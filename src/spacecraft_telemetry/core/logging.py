@@ -19,7 +19,7 @@ import structlog
 import structlog.contextvars
 import structlog.dev
 import structlog.processors
-import structlog.stdlib
+import structlog.types
 
 from spacecraft_telemetry.core.config import LoggingConfig
 
@@ -50,7 +50,6 @@ def setup_logging(config: LoggingConfig) -> None:
             # Merge any context vars set via structlog.contextvars.bind_contextvars()
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
-            structlog.stdlib.add_logger_name,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
             timestamper,
@@ -71,7 +70,7 @@ def setup_logging(config: LoggingConfig) -> None:
     )
 
 
-def get_logger(name: str) -> structlog.BoundLogger:
+def get_logger(name: str) -> structlog.types.FilteringBoundLogger:
     """Return a structlog bound logger for the given name.
 
     Args:
@@ -80,4 +79,4 @@ def get_logger(name: str) -> structlog.BoundLogger:
     Returns:
         A structlog BoundLogger pre-bound with {"logger": name}.
     """
-    return structlog.get_logger(name)
+    return structlog.get_logger().bind(logger=name)
