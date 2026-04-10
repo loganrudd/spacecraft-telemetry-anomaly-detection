@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data
+data/raw/
+data/processed/
+data/sample/
+*.parquet
+*.npy
+*.pkl
+*.pickle
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Spark
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Ray
+ray_results/
+
+# Feast
+data/registry.db
+data/online_store.db
+.feast/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Internal development plans
+docs/plans/
+
+# Internal AI tooling
+CLAUDE.md
+.claude/
+docs/PLANNING_MODE_GUIDE.md
+.clauderc
+
+# GCP credentials
+*.json
+!package.json
+!tsconfig.json
