@@ -1,0 +1,16 @@
+env: local
+
+data:
+  raw_data_dir: data/raw
+  sample_data_dir: data/sample
+  zenodo_record_id: "12528696"
+  missions:
+    - ESA-Mission1
+    - ESA-Mission2
+    - ESA-Mission3
+  sample_fraction: 0.01
+  sample_channels: 5
+
+logging:
+  level: DEBUG
+  format: console

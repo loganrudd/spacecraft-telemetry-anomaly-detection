@@ -1,0 +1,19 @@
+env: cloud
+
+# GCS paths are set via env vars in deployment (Phase 11):
+#   SPACECRAFT_DATA__RAW_DATA_DIR=gs://{project}-raw-data
+#   SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://{project}-processed/sample
+data:
+  raw_data_dir: data/raw
+  sample_data_dir: data/processed/sample
+  zenodo_record_id: "12528696"
+  missions:
+    - ESA-Mission1
+    - ESA-Mission2
+    - ESA-Mission3
+  sample_fraction: 1.0
+  sample_channels: 176
+
+logging:
+  level: INFO
+  format: json

@@ -1,0 +1,15 @@
+env: test
+
+# Paths are overridden per-test via tmp_path fixture.
+data:
+  raw_data_dir: data/raw
+  sample_data_dir: data/sample
+  zenodo_record_id: "12528696"
+  missions:
+    - ESA-Mission1
+  sample_fraction: 0.001
+  sample_channels: 2
+
+logging:
+  level: WARNING
+  format: console
