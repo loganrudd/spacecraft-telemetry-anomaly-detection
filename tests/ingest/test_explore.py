@@ -76,10 +76,12 @@ class TestDetectTimeColumn:
 
     def test_prefers_datetime64_over_name_match(self) -> None:
         # Both columns match by name, but 'ts' has actual datetime dtype
-        df = pd.DataFrame({
-            "time": ["2020-01-01", "2020-01-02"],
-            "ts": pd.date_range("2020-01-01", periods=2),
-        })
+        df = pd.DataFrame(
+            {
+                "time": ["2020-01-01", "2020-01-02"],
+                "ts": pd.date_range("2020-01-01", periods=2),
+            }
+        )
         assert _detect_time_column(df) == "ts"
 
 
@@ -99,14 +101,16 @@ class TestEstimateIntervalS:
 
     def test_handles_irregular_spacing(self) -> None:
         # Median of [1s, 1s, 10s, 1s, 1s] = 1s
-        times = pd.to_datetime([
-            "2020-01-01 00:00:00",
-            "2020-01-01 00:00:01",
-            "2020-01-01 00:00:02",
-            "2020-01-01 00:00:12",
-            "2020-01-01 00:00:13",
-            "2020-01-01 00:00:14",
-        ])
+        times = pd.to_datetime(
+            [
+                "2020-01-01 00:00:00",
+                "2020-01-01 00:00:01",
+                "2020-01-01 00:00:02",
+                "2020-01-01 00:00:12",
+                "2020-01-01 00:00:13",
+                "2020-01-01 00:00:14",
+            ]
+        )
         df = pd.DataFrame({"ts": times})
         assert _estimate_interval_s(df, "ts") == pytest.approx(1.0)
 
@@ -254,11 +258,15 @@ class TestChannelSummary:
 
 class TestLabelReport:
     def test_counts_segments_and_channels(self, tmp_path: Path) -> None:
-        _write_labels(tmp_path, "M1", [
-            {"channel": "A-1", "start": 0, "end": 10},
-            {"channel": "A-1", "start": 50, "end": 60},
-            {"channel": "B-1", "start": 5, "end": 15},
-        ])
+        _write_labels(
+            tmp_path,
+            "M1",
+            [
+                {"channel": "A-1", "start": 0, "end": 10},
+                {"channel": "A-1", "start": 50, "end": 60},
+                {"channel": "B-1", "start": 5, "end": 15},
+            ],
+        )
 
         report = DataExplorer(tmp_path).label_report("M1")
 
@@ -267,11 +275,15 @@ class TestLabelReport:
         assert set(report.channels_with_labels) == {"A-1", "B-1"}
 
     def test_counts_anomaly_types(self, tmp_path: Path) -> None:
-        _write_labels(tmp_path, "M1", [
-            {"channel": "A-1", "start": 0, "end": 5, "anomaly_type": "spike"},
-            {"channel": "A-1", "start": 10, "end": 20, "anomaly_type": "drift"},
-            {"channel": "B-1", "start": 0, "end": 5, "anomaly_type": "spike"},
-        ])
+        _write_labels(
+            tmp_path,
+            "M1",
+            [
+                {"channel": "A-1", "start": 0, "end": 5, "anomaly_type": "spike"},
+                {"channel": "A-1", "start": 10, "end": 20, "anomaly_type": "drift"},
+                {"channel": "B-1", "start": 0, "end": 5, "anomaly_type": "spike"},
+            ],
+        )
 
         report = DataExplorer(tmp_path).label_report("M1")
 
@@ -293,9 +305,13 @@ class TestLabelReport:
         assert report.n_anomaly_segments == 0
 
     def test_anomaly_types_empty_when_no_type_column(self, tmp_path: Path) -> None:
-        _write_labels(tmp_path, "M1", [
-            {"channel": "A-1", "start": 0, "end": 10},
-        ])
+        _write_labels(
+            tmp_path,
+            "M1",
+            [
+                {"channel": "A-1", "start": 0, "end": 10},
+            ],
+        )
 
         report = DataExplorer(tmp_path).label_report("M1")
 

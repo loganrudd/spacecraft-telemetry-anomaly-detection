@@ -2,7 +2,6 @@
 
 import logging
 
-import pytest
 import structlog.testing
 
 from spacecraft_telemetry.core.config import LoggingConfig

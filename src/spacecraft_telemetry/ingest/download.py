@@ -146,9 +146,8 @@ class ZenodoDownloader:
             TimeRemainingColumn(),
         ) as progress:
             task = progress.add_task(file.filename, total=file.size)
-            with self._stream_with_backoff(file.url) as response:
-                with dest.open("wb") as fh:
-                    for chunk in response.iter_bytes(chunk_size=_CHUNK_SIZE):
+            with self._stream_with_backoff(file.url) as response, dest.open("wb") as fh:
+                for chunk in response.iter_bytes(chunk_size=_CHUNK_SIZE):
                         fh.write(chunk)
                         hasher.update(chunk)
                         progress.advance(task, len(chunk))
@@ -157,8 +156,7 @@ class ZenodoDownloader:
         if actual != file.md5:
             dest.unlink(missing_ok=True)
             raise ValueError(
-                f"MD5 mismatch for {file.filename!r}: "
-                f"expected {file.md5!r}, got {actual!r}"
+                f"MD5 mismatch for {file.filename!r}: expected {file.md5!r}, got {actual!r}"
             )
 
         log.info("download verified", filename=file.filename, md5=actual)
@@ -221,9 +219,7 @@ class ZenodoDownloader:
             )
             time.sleep(delay)
 
-        raise RuntimeError(
-            f"Rate limit exceeded after {self.MAX_RETRIES} attempts on {url!r}"
-        )
+        raise RuntimeError(f"Rate limit exceeded after {self.MAX_RETRIES} attempts on {url!r}")
 
     @contextlib.contextmanager
     def _stream_with_backoff(self, url: str) -> Iterator[httpx.Response]:
@@ -243,9 +239,7 @@ class ZenodoDownloader:
                 yield response
                 return
 
-        raise RuntimeError(
-            f"Rate limit exceeded after {self.MAX_RETRIES} attempts on {url!r}"
-        )
+        raise RuntimeError(f"Rate limit exceeded after {self.MAX_RETRIES} attempts on {url!r}")
 
     @staticmethod
     def _verify_md5(path: Path, expected: str) -> bool:

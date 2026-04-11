@@ -1,0 +1,66 @@
+.DEFAULT_GOAL := help
+SHELL         := bash
+MISSION       ?= ESA-Mission1
+
+# Detect the Python / uv binary so the Makefile works in CI and local dev.
+UV := uv
+RUN := $(UV) run
+
+.PHONY: help setup test test-all lint format typecheck download-sample explore clean
+
+help:          ## Show this help message
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
+setup:         ## Install all dependency groups (dev + extras)
+	$(UV) sync --extra dev
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+test:          ## Run fast tests (excludes @pytest.mark.slow)
+	$(RUN) pytest -m "not slow" -q
+
+test-all:      ## Run the full test suite including slow tests
+	$(RUN) pytest -q
+
+# ---------------------------------------------------------------------------
+# Code quality
+# ---------------------------------------------------------------------------
+
+lint:          ## Check code with ruff (no fixes)
+	$(RUN) ruff check src/ tests/
+
+format:        ## Auto-format with ruff
+	$(RUN) ruff format src/ tests/
+	$(RUN) ruff check --fix src/ tests/
+
+typecheck:     ## Run mypy type checker
+	$(RUN) mypy src/
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+download-sample: ## Download ESA dataset sample from Zenodo (MISSION=ESA-Mission1)
+	$(RUN) spacecraft-telemetry download \
+		--mission $(MISSION) \
+		--sample
+
+explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
+	$(RUN) spacecraft-telemetry explore \
+		--mission $(MISSION)
+
+# ---------------------------------------------------------------------------
+# Housekeeping
+# ---------------------------------------------------------------------------
+
+clean:         ## Remove build artifacts, caches, and sample data
+	rm -rf dist/ .ruff_cache/ .mypy_cache/ .pytest_cache/
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete

@@ -16,7 +16,7 @@ Usage:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -107,7 +107,7 @@ class SampleCreator:
 
         manifest = SampleManifest(
             mission=mission,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             sample_fraction=self.sample_fraction,
             sample_channels=self.sample_channels,
             channels=channels,
@@ -161,9 +161,7 @@ class SampleCreator:
             if path.exists():
                 obj = pd.read_pickle(path)
                 return obj if isinstance(obj, pd.DataFrame) else pd.DataFrame(obj)
-        raise FileNotFoundError(
-            f"No pickle file for channel {channel!r} in {channel_dir}"
-        )
+        raise FileNotFoundError(f"No pickle file for channel {channel!r} in {channel_dir}")
 
     def _take_first_n_rows(self, df: pd.DataFrame) -> pd.DataFrame:
         """Return the first sample_fraction rows as a contiguous slice."""

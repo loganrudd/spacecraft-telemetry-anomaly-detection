@@ -194,9 +194,7 @@ class DataExplorer:
 
         type_col = _first_match(df.columns, _TYPE_CANDIDATES)
         anomaly_types: dict[str, int] = (
-            {str(k): int(v) for k, v in df[type_col].value_counts().items()}
-            if type_col
-            else {}
+            {str(k): int(v) for k, v in df[type_col].value_counts().items()} if type_col else {}
         )
 
         return LabelReport(
@@ -254,15 +252,14 @@ class DataExplorer:
 
             for col in ch.dtypes:
                 stats = ch.value_stats.get(col, {})
-                fmt = lambda v: f"{v:.4g}" if stats else "—"  # noqa: E731
                 tbl.add_row(
                     col,
                     ch.dtypes[col],
                     str(ch.null_counts.get(col, 0)),
-                    fmt(stats.get("min", float("nan"))) if stats else "—",
-                    fmt(stats.get("max", float("nan"))) if stats else "—",
-                    fmt(stats.get("mean", float("nan"))) if stats else "—",
-                    fmt(stats.get("std", float("nan"))) if stats else "—",
+                    f"{stats['min']:.4g}" if stats else "—",
+                    f"{stats['max']:.4g}" if stats else "—",
+                    f"{stats['mean']:.4g}" if stats else "—",
+                    f"{stats['std']:.4g}" if stats else "—",
                 )
             con.print(tbl)
 

@@ -196,7 +196,9 @@ class TestCreateSample:
         sample = tmp_path / "sample"
         _write_raw_mission(raw, "M1", ["A-1"])
 
-        manifest = SampleCreator(raw, sample, sample_fraction=1.0, sample_channels=1).create_sample("M1")
+        manifest = SampleCreator(
+            raw, sample, sample_fraction=1.0, sample_channels=1
+        ).create_sample("M1")
 
         assert isinstance(manifest, SampleManifest)
         assert manifest.mission == "M1"
@@ -218,7 +220,9 @@ class TestCreateSample:
         sample = tmp_path / "sample"
         _write_raw_mission(raw, "M1", ["A-1"], n_rows=1000)
 
-        manifest = SampleCreator(raw, sample, sample_fraction=0.1, sample_channels=1).create_sample("M1")
+        manifest = SampleCreator(
+            raw, sample, sample_fraction=0.1, sample_channels=1
+        ).create_sample("M1")
 
         assert manifest.row_counts["A-1"] == 100
 
@@ -227,7 +231,9 @@ class TestCreateSample:
         sample = tmp_path / "sample"
         _write_raw_mission(raw, "M1", ["A-1"])
 
-        manifest = SampleCreator(raw, sample, sample_fraction=1.0, sample_channels=1).create_sample("M1")
+        manifest = SampleCreator(
+            raw, sample, sample_fraction=1.0, sample_channels=1
+        ).create_sample("M1")
 
         assert manifest.source_dir == str(raw / "M1")
         assert manifest.sample_dir == str(sample / "M1")

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Tuple, Type
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -70,16 +70,14 @@ class _YamlConfigSource(PydanticBaseSettingsSource):
         2. {repo_root}/configs/  (default)
     """
 
-    def __init__(self, settings_cls: Type[BaseSettings]) -> None:
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
         env_name = os.environ.get("SPACECRAFT_ENV", "local")
         config_dir_str = os.environ.get("SPACECRAFT_CONFIG_DIR", "")
         config_dir = Path(config_dir_str) if config_dir_str else _REPO_ROOT / "configs"
         self._path = config_dir / f"{env_name}.yaml"
 
-    def get_field_value(
-        self, field: FieldInfo, field_name: str
-    ) -> Tuple[Any, str, bool]:
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
         # Not used — __call__ returns the full config dict directly.
         return None, field_name, False
 
@@ -103,12 +101,12 @@ class Settings(BaseSettings):
     @classmethod
     def settings_customise_sources(
         cls,
-        settings_cls: Type[BaseSettings],
+        settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
-    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings, env_settings, _YamlConfigSource(settings_cls))
 
 

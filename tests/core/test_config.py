@@ -1,7 +1,8 @@
 """Tests for core.config."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from spacecraft_telemetry.core.config import (
     DataConfig,
@@ -121,7 +122,9 @@ class TestLoadSettings:
 
         assert settings.logging.level == "ERROR"  # env var wins over YAML
 
-    def test_missing_yaml_falls_back_to_defaults(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_missing_yaml_falls_back_to_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         config_dir = tmp_path / "no-configs-here"
         monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
         monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
@@ -131,7 +134,9 @@ class TestLoadSettings:
         assert settings.data.sample_fraction == 0.01  # DataConfig default
         assert settings.logging.level == "INFO"  # LoggingConfig default
 
-    def test_load_settings_does_not_leak_env_var(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_load_settings_does_not_leak_env_var(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
         (config_dir / "test.yaml").write_text(_YAML_MINIMAL)
