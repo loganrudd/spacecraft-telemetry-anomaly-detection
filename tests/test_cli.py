@@ -40,8 +40,8 @@ def _write_sample_mission(sample_dir: Path, mission: str, n_rows: int = 20) -> N
             "value": rng.random(n_rows),
         }
     )
-    df.to_parquet(ch_dir / "A-1.parquet", index=False)
-    pd.DataFrame([{"channel": "A-1", "start": 0, "end": 5}]).to_csv(
+    df.to_parquet(ch_dir / "channel_1.parquet", index=False)
+    pd.DataFrame([{"channel": "channel_1", "start": 0, "end": 5}]).to_csv(
         sample_dir / mission / "labels.csv", index=False
     )
 
@@ -215,10 +215,10 @@ class TestExploreCommand:
         _write_sample_mission(sample_dir, "M1")
         monkeypatch.setenv("SPACECRAFT_DATA__SAMPLE_DATA_DIR", str(sample_dir))
 
-        result = runner.invoke(main, ["--env=local", "explore", "--mission=M1", "--channel=A-1"])
+        result = runner.invoke(main, ["--env=local", "explore", "--mission=M1", "--channel=1"])
 
         assert result.exit_code == 0, result.output
-        assert "A-1" in result.output
+        assert "1" in result.output
 
     def test_data_dir_override(self, runner: CliRunner, tmp_path: Path) -> None:
         custom_dir = tmp_path / "custom"
@@ -239,7 +239,7 @@ class TestExploreCommand:
         _write_sample_mission(sample_dir, "M1")
         monkeypatch.setenv("SPACECRAFT_DATA__SAMPLE_DATA_DIR", str(sample_dir))
 
-        result = runner.invoke(main, ["--env=local", "explore", "--mission=M1", "--channel=Z-99"])
+        result = runner.invoke(main, ["--env=local", "explore", "--mission=M1", "--channel=99"])
 
         assert result.exit_code != 0
 

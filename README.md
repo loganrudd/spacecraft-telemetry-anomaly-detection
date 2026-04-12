@@ -40,7 +40,7 @@ make explore MISSION=ESA-Mission1
 uv run spacecraft-telemetry --help
 uv run spacecraft-telemetry download --mission ESA-Mission1 --sample --sample-fraction 0.01
 uv run spacecraft-telemetry explore --mission ESA-Mission1
-uv run spacecraft-telemetry explore --mission ESA-Mission1 --channel A-1
+uv run spacecraft-telemetry explore --mission ESA-Mission1 --channel 1
 ```
 
 ## Architecture

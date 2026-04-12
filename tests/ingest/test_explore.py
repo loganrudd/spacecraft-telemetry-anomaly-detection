@@ -196,18 +196,18 @@ class TestMissionReport:
 
 class TestChannelSummary:
     def test_basic_fields(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=50)
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=50)
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
-        assert summary.channel == "A-1"
+        assert summary.channel == "1"
         assert summary.n_rows == 50
         assert summary.n_columns == 2  # timestamp + value
 
     def test_value_stats_present_for_numeric_columns(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=100)
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=100)
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
         assert "value" in summary.value_stats
         stats = summary.value_stats["value"]
@@ -215,37 +215,37 @@ class TestChannelSummary:
         assert stats["std"] >= 0
 
     def test_null_counts_reported(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=100, nulls=True)
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=100, nulls=True)
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
         # Every 10th row has a null, so ~10 nulls in 100 rows
         assert summary.null_counts["value"] > 0
 
     def test_time_range_detected(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=10, freq="1s")
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=10, freq="1s")
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
         assert summary.time_range is not None
         assert summary.time_range[0] < summary.time_range[1]
 
     def test_time_range_none_without_timestamp(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", include_timestamp=False)
+        _write_channel(tmp_path, "M1", "channel_1", include_timestamp=False)
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
         assert summary.time_range is None
 
     def test_raises_if_file_missing(self, tmp_path: Path) -> None:
         (tmp_path / "M1" / "channels").mkdir(parents=True)
         with pytest.raises(FileNotFoundError, match="Channel file not found"):
-            DataExplorer(tmp_path).channel_summary("M1", "X-99")
+            DataExplorer(tmp_path).channel_summary("M1", "99")
 
     def test_dtypes_recorded(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1")
+        _write_channel(tmp_path, "M1", "channel_1")
 
-        summary = DataExplorer(tmp_path).channel_summary("M1", "A-1")
+        summary = DataExplorer(tmp_path).channel_summary("M1", "1")
 
         assert "value" in summary.dtypes
         assert "float" in summary.dtypes["value"]
@@ -325,15 +325,15 @@ class TestLabelReport:
 
 class TestPrintReport:
     def test_prints_without_error(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=20)
-        _write_labels(tmp_path, "M1", [{"channel": "A-1", "start": 0, "end": 5}])
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=20)
+        _write_labels(tmp_path, "M1", [{"channel": "channel_1", "start": 0, "end": 5}])
 
         con = _capture_console()
         DataExplorer(tmp_path).print_report("M1", console=con)
 
         output = con.file.getvalue()  # type: ignore[union-attr]
         assert "M1" in output
-        assert "A-1" in output
+        assert "channel_1" in output
 
     def test_prints_error_message_for_missing_mission(self, tmp_path: Path) -> None:
         con = _capture_console()
@@ -343,7 +343,7 @@ class TestPrintReport:
         assert "not found" in output.lower()
 
     def test_handles_mission_with_no_labels(self, tmp_path: Path) -> None:
-        _write_channel(tmp_path, "M1", "A-1", n_rows=10)
+        _write_channel(tmp_path, "M1", "channel_1", n_rows=10)
 
         con = _capture_console()
         DataExplorer(tmp_path).print_report("M1", console=con)

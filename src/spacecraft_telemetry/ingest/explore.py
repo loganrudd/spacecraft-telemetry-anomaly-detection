@@ -136,7 +136,7 @@ class DataExplorer:
         Raises:
             FileNotFoundError: If the channel Parquet file does not exist.
         """
-        path = self.data_dir / mission / "channels" / f"{channel}.parquet"
+        path = self.data_dir / mission / "channels" / f"channel_{channel}.parquet"
         if not path.exists():
             raise FileNotFoundError(f"Channel file not found: {path}")
 
@@ -235,8 +235,11 @@ class DataExplorer:
 
         # --- Per-channel stats ---
         for channel in mr.channel_names:
+            # channel_summary expects just the numeric id (e.g. "1"), but
+            # mission_report returns full parquet stems (e.g. "channel_1").
+            channel_id = channel.removeprefix("channel_")
             try:
-                ch = self.channel_summary(mission, channel)
+                ch = self.channel_summary(mission, channel_id)
             except FileNotFoundError:
                 con.print(f"[yellow]Skipping {channel} (file missing)[/yellow]")
                 continue
