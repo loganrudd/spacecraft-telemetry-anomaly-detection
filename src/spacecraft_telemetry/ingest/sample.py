@@ -16,6 +16,8 @@ Usage:
 
 from __future__ import annotations
 
+import pickle
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -131,19 +133,19 @@ class SampleCreator:
         if not channel_dir.exists():
             raise FileNotFoundError(f"Channel directory not found: {channel_dir}")
 
-        pkl_files = sorted(
+        channel_files = sorted(
             (
                 p
                 for p in channel_dir.iterdir()
-                if p.suffix == ".pkl" or p.name.endswith(".pkl.zip")
+                if p.suffix in (".zip", ".pkl")
             ),
             key=lambda p: p.name,
         )
 
-        if not pkl_files:
-            raise FileNotFoundError(f"No pickle files found in {channel_dir}")
+        if not channel_files:
+            raise FileNotFoundError(f"No channel files found in {channel_dir}")
 
-        channel_names = [_channel_name(p) for p in pkl_files]
+        channel_names = [_channel_name(p) for p in channel_files]
         selected = channel_names[: self.sample_channels]
         log.info(
             "channels selected",
@@ -154,14 +156,24 @@ class SampleCreator:
         return selected
 
     def _load_channel(self, mission: str, channel: str) -> pd.DataFrame:
-        """Load a channel DataFrame from pickle (plain or zipped)."""
+        """Load a channel DataFrame from a zip or pickle file.
+
+        Tries .zip first (the actual ESA dataset format), then .pkl.zip, then .pkl.
+        Zip files are opened with zipfile and the first entry is unpickled directly
+        rather than relying on pd.read_pickle extension sniffing.
+        """
         channel_dir = self.raw_dir / mission / "channels"
-        for filename in (f"{channel}.pkl", f"{channel}.pkl.zip"):
+        for filename in (f"{channel}.zip", f"{channel}.pkl.zip", f"{channel}.pkl"):
             path = channel_dir / filename
-            if path.exists():
+            if not path.exists():
+                continue
+            if path.suffix == ".pkl":
                 obj = pd.read_pickle(path)
-                return obj if isinstance(obj, pd.DataFrame) else pd.DataFrame(obj)
-        raise FileNotFoundError(f"No pickle file for channel {channel!r} in {channel_dir}")
+            else:
+                with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as f:
+                    obj = pickle.load(f)
+            return obj if isinstance(obj, pd.DataFrame) else pd.DataFrame(obj)
+        raise FileNotFoundError(f"No channel file for channel {channel!r} in {channel_dir}")
 
     def _take_first_n_rows(self, df: pd.DataFrame) -> pd.DataFrame:
         """Return the first sample_fraction rows as a contiguous slice."""
@@ -193,9 +205,9 @@ class SampleCreator:
 
 
 def _channel_name(path: Path) -> str:
-    """Derive a clean channel name from a pickle file path."""
+    """Derive a clean channel name from a channel file path."""
     name = path.name
-    for suffix in (".pkl.zip", ".pkl"):
+    for suffix in (".pkl.zip", ".zip", ".pkl"):
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return path.stem

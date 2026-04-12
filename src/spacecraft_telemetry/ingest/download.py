@@ -75,7 +75,13 @@ class ZenodoDownloader:
     ) -> None:
         self._record_id = record_id
         self._dest_dir = dest_dir
-        self._client = client or httpx.Client(timeout=60.0, follow_redirects=True)
+        self._client = client or httpx.Client(
+            # Short deadline for establishing a connection; no per-chunk read
+            # timeout so large file downloads don't abort mid-stream on slow
+            # connections. Zenodo can pause between chunks for many seconds.
+            timeout=httpx.Timeout(connect=30.0, read=None, write=None, pool=30.0),
+            follow_redirects=True,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,7 +120,10 @@ class ZenodoDownloader:
         """Download a single file to dest_dir, verifying MD5 on completion.
 
         Skips the download if the file already exists with a matching checksum.
-        On MD5 mismatch the partial file is deleted before raising.
+        Resumes interrupted downloads using HTTP Range requests — on each retry
+        the already-written bytes are re-hashed and a Range header is sent so
+        only the remaining bytes are fetched.  On MD5 mismatch or exhausted
+        retries the partial file is deleted before raising.
 
         Args:
             file: ZenodoFile describing what to fetch.
@@ -125,6 +134,7 @@ class ZenodoDownloader:
         Raises:
             ValueError: If the downloaded file's MD5 doesn't match.
             httpx.HTTPStatusError: On non-429 HTTP errors.
+            httpx.RemoteProtocolError: If the connection drops MAX_RETRIES times.
         """
         dest = self._dest_dir / file.filename
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -146,11 +156,58 @@ class ZenodoDownloader:
             TimeRemainingColumn(),
         ) as progress:
             task = progress.add_task(file.filename, total=file.size)
-            with self._stream_with_backoff(file.url) as response, dest.open("wb") as fh:
-                for chunk in response.iter_bytes(chunk_size=_CHUNK_SIZE):
-                        fh.write(chunk)
-                        hasher.update(chunk)
-                        progress.advance(task, len(chunk))
+
+            for attempt in range(self.MAX_RETRIES):
+                resume_pos = dest.stat().st_size if dest.exists() else 0
+                hasher = hashlib.md5()
+                if resume_pos:
+                    progress.update(task, completed=resume_pos)
+                    log.info(
+                        "resuming download",
+                        filename=file.filename,
+                        resume_bytes=resume_pos,
+                    )
+                    with dest.open("rb") as fh:
+                        for chunk in iter(lambda: fh.read(_CHUNK_SIZE), b""):
+                            hasher.update(chunk)
+
+                headers: dict[str, str] = (
+                    {"Range": f"bytes={resume_pos}-"} if resume_pos else {}
+                )
+
+                try:
+                    with self._stream_with_backoff(file.url, extra_headers=headers) as response:
+                        if resume_pos and response.status_code == 200:
+                            log.warning(
+                                "server ignored Range header, restarting",
+                                filename=file.filename,
+                            )
+                            dest.unlink(missing_ok=True)
+                            hasher = hashlib.md5()
+                            resume_pos = 0
+                            progress.update(task, completed=0)
+
+                        file_mode = "ab" if resume_pos else "wb"
+                        with dest.open(file_mode) as fh:
+                            for chunk in response.iter_bytes(chunk_size=_CHUNK_SIZE):
+                                fh.write(chunk)
+                                hasher.update(chunk)
+                                progress.advance(task, len(chunk))
+                    break  # Completed without error.
+                except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+                    if attempt == self.MAX_RETRIES - 1:
+                        dest.unlink(missing_ok=True)
+                        raise
+                    delay = self.RETRY_BASE_DELAY * (2**attempt)
+                    log.warning(
+                        "connection dropped, will resume",
+                        attempt=attempt + 1,
+                        max_retries=self.MAX_RETRIES,
+                        delay_s=delay,
+                        received_bytes=dest.stat().st_size if dest.exists() else 0,
+                        exc=str(exc),
+                    )
+                    time.sleep(delay)
 
         actual = hasher.hexdigest()
         if actual != file.md5:
@@ -191,9 +248,9 @@ class ZenodoDownloader:
 
         for zf in mission_files:
             zip_path = self.download_file(zf)
-            log.info("extracting", filename=zf.filename, dest=str(mission_dir))
+            log.info("extracting", filename=zf.filename, dest=str(self._dest_dir))
             with zipfile.ZipFile(zip_path) as archive:
-                archive.extractall(mission_dir)
+                archive.extractall(self._dest_dir)
 
         return mission_dir
 
@@ -222,10 +279,12 @@ class ZenodoDownloader:
         raise RuntimeError(f"Rate limit exceeded after {self.MAX_RETRIES} attempts on {url!r}")
 
     @contextlib.contextmanager
-    def _stream_with_backoff(self, url: str) -> Iterator[httpx.Response]:
+    def _stream_with_backoff(
+        self, url: str, extra_headers: dict[str, str] | None = None
+    ) -> Iterator[httpx.Response]:
         """Context manager for a streaming GET with 429 backoff."""
         for attempt in range(self.MAX_RETRIES):
-            with self._client.stream("GET", url) as response:
+            with self._client.stream("GET", url, headers=extra_headers or {}) as response:
                 if response.status_code == 429:
                     delay = self.RETRY_BASE_DELAY * (2**attempt)
                     log.warning(

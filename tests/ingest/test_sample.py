@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +60,26 @@ def _write_raw_mission(
     return mission_dir
 
 
+def _write_raw_mission_zip(
+    raw_dir: Path,
+    mission: str,
+    channel_names: list[str],
+    n_rows: int = 1000,
+) -> Path:
+    """Create a raw mission directory with .zip channel files (real ESA dataset format)."""
+    mission_dir = raw_dir / mission
+    channel_dir = mission_dir / "channels"
+    channel_dir.mkdir(parents=True)
+
+    for name in channel_names:
+        df = _make_df(n_rows)
+        zip_path = channel_dir / f"{name}.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(f"{name}.pkl", pickle.dumps(df))
+
+    return mission_dir
+
+
 # ---------------------------------------------------------------------------
 # _channel_name
 # ---------------------------------------------------------------------------
@@ -70,6 +91,9 @@ class TestChannelName:
 
     def test_strips_pkl_zip_suffix(self) -> None:
         assert _channel_name(Path("B-2.pkl.zip")) == "B-2"
+
+    def test_strips_zip_suffix(self) -> None:
+        assert _channel_name(Path("channel_1.zip")) == "channel_1"
 
     def test_falls_back_to_stem(self) -> None:
         assert _channel_name(Path("channel.csv")) == "channel"
@@ -119,13 +143,20 @@ class TestSelectChannels:
         with pytest.raises(FileNotFoundError, match="Channel directory not found"):
             creator._select_channels("M1")
 
-    def test_raises_if_no_pickle_files(self, tmp_path: Path) -> None:
+    def test_raises_if_no_channel_files(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"
         (raw / "M1" / "channels").mkdir(parents=True)
 
         creator = SampleCreator(raw, tmp_path / "sample")
-        with pytest.raises(FileNotFoundError, match="No pickle files found"):
+        with pytest.raises(FileNotFoundError, match="No channel files found"):
             creator._select_channels("M1")
+
+    def test_selects_zip_channel_files(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        _write_raw_mission_zip(raw, "M1", ["channel_3", "channel_1", "channel_2"])
+
+        creator = SampleCreator(raw, tmp_path / "sample", sample_channels=2)
+        assert creator._select_channels("M1") == ["channel_1", "channel_2"]
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +221,18 @@ class TestCreateSample:
 
         sampled = pd.read_parquet(sample / "M1" / "channels" / "A-1.parquet")
         assert sampled["value"].iloc[0] == pytest.approx(original["value"].iloc[0])
+
+    def test_creates_sample_from_zip_channels(self, tmp_path: Path) -> None:
+        raw = tmp_path / "raw"
+        sample = tmp_path / "sample"
+        _write_raw_mission_zip(raw, "M1", ["channel_1", "channel_2"], n_rows=100)
+
+        SampleCreator(raw, sample, sample_fraction=0.1, sample_channels=2).create_sample("M1")
+
+        assert (sample / "M1" / "channels" / "channel_1.parquet").exists()
+        assert (sample / "M1" / "channels" / "channel_2.parquet").exists()
+        df = pd.read_parquet(sample / "M1" / "channels" / "channel_1.parquet")
+        assert len(df) == 10
 
     def test_returns_sample_manifest_instance(self, tmp_path: Path) -> None:
         raw = tmp_path / "raw"

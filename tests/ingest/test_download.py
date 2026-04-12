@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,6 +251,97 @@ class TestDownloadFile:
         assert result.exists()
         assert result.parent.is_dir()
 
+    def test_resumes_after_connection_drop(self, tmp_path: Path) -> None:
+        first_half = b"first part--"
+        second_half = b"second part."
+        full_content = first_half + second_half
+        zf = self._make_zenodo_file("data.zip", full_content)
+
+        # Simulate a partial file already on disk.
+        (tmp_path / "data.zip").write_bytes(first_half)
+
+        call_count = 0
+
+        @contextlib.contextmanager
+        def fake_stream(method: str, url: str, **kwargs: object):  # type: ignore[misc]
+            nonlocal call_count
+            call_count += 1
+            resp = MagicMock(spec=httpx.Response)
+            resp.raise_for_status.return_value = None
+            if call_count == 1:
+                # First attempt: connection drops mid-stream.
+                resp.status_code = 206
+
+                def _drop() -> Iterator[bytes]:
+                    raise httpx.RemoteProtocolError("peer closed connection")
+                    yield b""  # make it a generator
+
+                resp.iter_bytes.return_value = _drop()
+            else:
+                # Second attempt: resume succeeds.
+                resp.status_code = 206
+                resp.iter_bytes.return_value = iter([second_half])
+            yield resp
+
+        client = MagicMock(spec=httpx.Client)
+        client.stream = fake_stream
+
+        with patch("time.sleep"):
+            downloader = ZenodoDownloader(_RECORD_ID, tmp_path, client=client)
+            result = downloader.download_file(zf)
+
+        assert result.read_bytes() == full_content
+        assert call_count == 2
+
+    def test_server_ignores_range_restarts_from_scratch(self, tmp_path: Path) -> None:
+        content = b"full content bytes"
+        zf = self._make_zenodo_file("data.zip", content)
+
+        # Partial file exists, but server responds 200 (no Range support).
+        (tmp_path / "data.zip").write_bytes(b"partial stale bytes")
+
+        @contextlib.contextmanager
+        def fake_stream(method: str, url: str, **kwargs: object):  # type: ignore[misc]
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200  # ignored Range header
+            resp.raise_for_status.return_value = None
+            resp.iter_bytes.return_value = iter([content])
+            yield resp
+
+        client = MagicMock(spec=httpx.Client)
+        client.stream = fake_stream
+
+        downloader = ZenodoDownloader(_RECORD_ID, tmp_path, client=client)
+        result = downloader.download_file(zf)
+
+        assert result.read_bytes() == content
+
+    def test_raises_after_max_retries_on_connection_drop(self, tmp_path: Path) -> None:
+        content = b"some data"
+        zf = self._make_zenodo_file("data.zip", content)
+
+        @contextlib.contextmanager
+        def fake_stream(method: str, url: str, **kwargs: object):  # type: ignore[misc]
+            resp = MagicMock(spec=httpx.Response)
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+
+            def _always_drop() -> Iterator[bytes]:
+                raise httpx.RemoteProtocolError("peer closed connection")
+                yield b""
+
+            resp.iter_bytes.return_value = _always_drop()
+            yield resp
+
+        client = MagicMock(spec=httpx.Client)
+        client.stream = fake_stream
+
+        with patch("time.sleep"), pytest.raises(httpx.RemoteProtocolError):
+            downloader = ZenodoDownloader(_RECORD_ID, tmp_path, client=client)
+            downloader.download_file(zf)
+
+        assert not (tmp_path / "data.zip").exists()
+
 
 # ---------------------------------------------------------------------------
 # download_mission
@@ -266,7 +358,15 @@ class TestDownloadMission:
             downloader.download_mission("ESA-Mission1")
 
     def test_extracts_zip_to_mission_dir(self, tmp_path: Path) -> None:
-        zip_bytes = _make_zip({"channels/A-1.pkl": b"fake pickle", "labels.csv": b"ch,start,end"})
+        # Real Zenodo zips contain the mission name as the top-level folder
+        # (e.g. ESA-Mission1/channels/...).  extractall must target dest_dir,
+        # not mission_dir, so the folder lands at dest_dir/ESA-Mission1/.
+        zip_bytes = _make_zip(
+            {
+                "ESA-Mission1/channels/A-1.pkl": b"fake pickle",
+                "ESA-Mission1/labels.csv": b"ch,start,end",
+            }
+        )
         md5 = hashlib.md5(zip_bytes).hexdigest()
 
         api_resp = {
@@ -298,6 +398,8 @@ class TestDownloadMission:
         assert mission_dir.is_dir()
         assert (mission_dir / "channels" / "A-1.pkl").exists()
         assert (mission_dir / "labels.csv").exists()
+        # Confirm no double-nesting (dest_dir/ESA-Mission1/ESA-Mission1/).
+        assert not (mission_dir / "ESA-Mission1").exists()
 
     def test_mission_matching_is_case_insensitive(self, tmp_path: Path) -> None:
         zip_bytes = _make_zip({"labels.csv": b"data"})
