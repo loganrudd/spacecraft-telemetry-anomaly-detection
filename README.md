@@ -48,7 +48,7 @@ uv run spacecraft-telemetry explore --mission ESA-Mission1 --channel 1
 ```
 ESA Parquet (Zenodo/GCS)
   → Download + Sample (Phase 1)  ← complete
-  → PySpark preprocessing        (Phase 2)
+  → PySpark preprocessing        (In Progress)
   → Feast feature store          (Phase 3)
   → Telemanom LSTM training      (Phase 4)
   → Ray parallel training        (Phase 5)
