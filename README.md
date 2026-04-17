@@ -77,7 +77,7 @@ ESA Parquet (Zenodo/GCS)
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | Repo scaffold + data ingestion | ✅ Complete |
-| 2 | PySpark preprocessing pipeline | Planned |
+| 2 | PySpark preprocessing pipeline | In Progress |
 | 3 | Feast feature store integration | Planned |
 | 4 | Telemanom model drop-in | Planned |
 | 5 | Ray parallel training | Planned |
