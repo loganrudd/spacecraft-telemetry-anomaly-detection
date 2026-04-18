@@ -212,8 +212,8 @@ class TestComputeFeaturesNumpy:
     def test_accepts_list_inputs(self) -> None:
         # Should coerce plain Python lists to numpy arrays
         result = compute_features_numpy(
-            [1.0] * 110,
-            list(range(110)),
+            np.array([1.0] * 110),
+            np.arange(110, dtype=np.float64),
         )
         assert isinstance(result, dict)
         assert not math.isnan(result["rolling_mean_100"])
