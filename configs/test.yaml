@@ -13,3 +13,14 @@ data:
 logging:
   level: WARNING
   format: console
+
+spark:
+  processed_data_dir: data/processed  # overridden to tmp_path in Spark tests
+  driver_memory: "512m"
+  num_cores: 1
+  window_size: 10   # small for fast tests
+  prediction_horizon: 1
+  train_fraction: 0.8
+  normalization: z-score
+  gap_multiplier: 3.0
+  feature_windows: [3, 5]  # small for fast tests

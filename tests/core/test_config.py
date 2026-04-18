@@ -8,6 +8,7 @@ from spacecraft_telemetry.core.config import (
     DataConfig,
     LoggingConfig,
     Settings,
+    SparkConfig,
     load_settings,
 )
 
@@ -26,6 +27,9 @@ data:
 logging:
   level: DEBUG
   format: console
+spark:
+  window_size: 250
+  train_fraction: 0.8
 """
 
 _YAML_MINIMAL = """\
@@ -92,6 +96,64 @@ class TestLoggingConfig:
 
 
 # ---------------------------------------------------------------------------
+# SparkConfig
+# ---------------------------------------------------------------------------
+
+
+class TestSparkConfig:
+    def test_defaults(self) -> None:
+        cfg = SparkConfig()
+        assert cfg.window_size == 250
+        assert cfg.prediction_horizon == 1
+        assert cfg.train_fraction == 0.8
+        assert cfg.normalization == "z-score"
+        assert cfg.gap_multiplier == 3.0
+        assert cfg.feature_windows == [10, 50, 100]
+        assert cfg.driver_memory == "1536m"
+        assert cfg.num_cores == 2
+
+    def test_train_fraction_zero_invalid(self) -> None:
+        with pytest.raises(ValueError, match="train_fraction"):
+            SparkConfig(train_fraction=0.0)
+
+    def test_train_fraction_one_invalid(self) -> None:
+        with pytest.raises(ValueError, match="train_fraction"):
+            SparkConfig(train_fraction=1.0)
+
+    def test_train_fraction_valid_range(self) -> None:
+        cfg = SparkConfig(train_fraction=0.7)
+        assert cfg.train_fraction == 0.7
+
+    def test_invalid_normalization_raises(self) -> None:
+        with pytest.raises(ValueError, match="normalization"):
+            SparkConfig(normalization="l2")
+
+    def test_min_max_normalization_valid(self) -> None:
+        cfg = SparkConfig(normalization="min-max")
+        assert cfg.normalization == "min-max"
+
+    def test_window_size_zero_invalid(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            SparkConfig(window_size=0)
+
+    def test_gap_multiplier_zero_invalid(self) -> None:
+        with pytest.raises(ValueError, match="gap_multiplier"):
+            SparkConfig(gap_multiplier=0.0)
+
+    def test_feature_windows_empty_invalid(self) -> None:
+        with pytest.raises(ValueError, match="feature_windows"):
+            SparkConfig(feature_windows=[])
+
+    def test_feature_windows_zero_entry_invalid(self) -> None:
+        with pytest.raises(ValueError, match="feature_windows"):
+            SparkConfig(feature_windows=[10, 0])
+
+    def test_custom_feature_windows(self) -> None:
+        cfg = SparkConfig(feature_windows=[5, 20])
+        assert cfg.feature_windows == [5, 20]
+
+
+# ---------------------------------------------------------------------------
 # load_settings / Settings
 # ---------------------------------------------------------------------------
 
@@ -149,6 +211,13 @@ class TestLoadSettings:
 
         # SPACECRAFT_ENV must not linger after load_settings returns
         assert "SPACECRAFT_ENV" not in os.environ
+
+    def test_spark_config_present_with_defaults(self) -> None:
+        settings = Settings()
+        assert settings.spark.window_size == 250
+        assert settings.spark.train_fraction == 0.8
+        assert settings.spark.normalization == "z-score"
+        assert settings.spark.feature_windows == [10, 50, 100]
 
     def test_settings_direct_construction(self) -> None:
         settings = Settings(
