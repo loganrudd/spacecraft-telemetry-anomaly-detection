@@ -4,16 +4,28 @@ SparkSession is session-scoped — started once per test run, shared across all
 Spark tests. Individual data fixtures are function-scoped so tests stay isolated.
 
 If PySpark cannot start (wrong Java version, missing JDK), all Spark tests are
-skipped automatically via the `spark_session` fixture. Install JDK 17 or 21 to
+skipped automatically via the `spark_session` fixture. Install JDK 21 to
 run Spark tests: `brew install openjdk@21`
 """
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+
+def _java_major_version() -> int | None:
+    """Return the installed Java major version, or None if java is not found."""
+    try:
+        result = subprocess.run(["java", "-version"], capture_output=True, text=True)
+        match = re.search(r'"(\d+)', result.stderr)
+        return int(match.group(1)) if match else None
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # SparkSession — one per test process
@@ -22,7 +34,21 @@ import pytest
 
 @pytest.fixture(scope="session")
 def spark_session():
-    """Start a minimal local SparkSession. Skip all Spark tests if JVM fails."""
+    """Start a minimal local SparkSession. Skip all Spark tests if JVM fails.
+
+    PySpark 4.1 requires Java 17 or 21. Java 22+ removed javax.security.auth.Subject
+    APIs that Hadoop's FileSystem still calls, causing file I/O to fail even though
+    SparkSession.getOrCreate() itself succeeds. Install JDK 21 to run Spark tests:
+        brew install openjdk@21
+        export JAVA_HOME=$(brew --prefix openjdk@21)
+    """
+    java_ver = _java_major_version()
+    if java_ver is not None and java_ver >= 22:
+        pytest.skip(
+            f"Java {java_ver} detected — PySpark 4.1 requires Java 17 or 21. "
+            "Install: brew install openjdk@21 && export JAVA_HOME=$(brew --prefix openjdk@21)"
+        )
+
     try:
         from pyspark.sql import SparkSession
 
@@ -41,7 +67,7 @@ def spark_session():
         yield session
         session.stop()
     except Exception as exc:
-        pytest.skip(f"SparkSession could not start — install JDK 17 or 21. ({exc})")
+        pytest.skip(f"SparkSession could not start — install JDK 21. ({exc})")
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +215,14 @@ def irregular_spark_df(spark_session, irregular_channel_pd: pd.DataFrame):
 @pytest.fixture()
 def nulls_spark_df(spark_session, channel_with_nulls_pd: pd.DataFrame):
     """Spark DF with 5 null values at known positions — for null handling tests."""
+    from pyspark.sql import functions as F
+
     pdf = channel_with_nulls_pd.reset_index()
     pdf = pdf.rename(columns={"datetime": "telemetry_timestamp", "channel_3": "value"})
     pdf["channel_id"] = "channel_3"
     pdf["mission_id"] = "ESA-Mission1"
-    # Float32 with nulls — keep as float64 for Spark (Spark nullable FloatType)
     pdf["value"] = pdf["value"].astype("float64")
-    return spark_session.createDataFrame(pdf)
+    df = spark_session.createDataFrame(pdf)
+    # createDataFrame maps pd.NA → IEEE 754 NaN (a valid float), not Spark null.
+    # Parquet reads always produce proper nulls; normalise here to match that behaviour.
+    return df.withColumn("value", F.when(F.isnan("value"), None).otherwise(F.col("value")))
