@@ -1,4 +1,5 @@
-"""PySpark preprocessing transforms: null handling, gap detection, normalization.
+"""PySpark preprocessing transforms: null handling, gap detection, normalization,
+feature engineering.
 
 Each function is a pure DataFrame → DataFrame transform (or DataFrame → (DataFrame, dict)).
 Composable and stateless — no SparkSession dependency.
@@ -6,14 +7,28 @@ Composable and stateless — no SparkSession dependency.
 
 from __future__ import annotations
 
-from pyspark.sql import DataFrame
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import Window
+from pyspark.sql.window import WindowSpec
 from pyspark.sql.types import FloatType
 
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.features.definitions import (
+    FEATURE_DEFINITIONS,
+    FeatureDefinition,
+)
 
 log = get_logger(__name__)
+
+# Maps the operation segment of a rolling feature name to its Spark aggregation function.
+# Keyed by the middle token of "rolling_{op}_{n}" names (e.g. "mean", "std").
+_ROLLING_AGG = {
+    "mean": F.avg,
+    "std": F.stddev,
+    "min": F.min,
+    "max": F.max,
+}
 
 
 def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
@@ -181,3 +196,99 @@ def normalize(
     log.info("normalize", method=method, channels=list(params.keys()))
 
     return df.drop("_mean", "_std"), params
+
+
+# ---------------------------------------------------------------------------
+# Private helpers for add_rolling_features
+# ---------------------------------------------------------------------------
+
+
+def _rolling_col(fd: FeatureDefinition, w_base: WindowSpec) -> Column:
+    """Spark Column for a rolling-window statistic.
+
+    Returns null for the first window_size-1 rows of each partition so that
+    behaviour matches the numpy reference implementation (which also returns
+    NaN when the buffer is shorter than the requested window).
+    """
+    n = fd.window_size
+    op = fd.name.split("_")[1]  # "mean" | "std" | "min" | "max"
+    agg_fn = _ROLLING_AGG[op]
+    w = w_base.rowsBetween(-(n - 1), 0)
+    agg = agg_fn("value_normalized").over(w)
+    return (
+        F.when(F.col("_rn") < n, F.lit(None).cast(FloatType()))
+        .otherwise(agg.cast(FloatType()))
+    )
+
+
+def _rate_of_change_col(w_base: WindowSpec) -> Column:
+    """Spark Column for the first derivative: Δvalue / Δtime (seconds).
+
+    Returns null on the first row of each partition (no previous value) and
+    when consecutive timestamps are identical (division by zero).
+    """
+    prev_val = F.lag("value_normalized", 1).over(w_base)
+    prev_ts_unix = F.lag(F.unix_timestamp("telemetry_timestamp"), 1).over(w_base)
+    dt = F.unix_timestamp("telemetry_timestamp").cast("double") - prev_ts_unix.cast("double")
+    return (
+        F.when(prev_val.isNull() | (dt == 0.0), F.lit(None).cast(FloatType()))
+        .otherwise(((F.col("value_normalized") - prev_val) / dt).cast(FloatType()))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature engineering
+# ---------------------------------------------------------------------------
+
+
+def add_rolling_features(
+    df: DataFrame,
+    feature_defs: list[FeatureDefinition] | None = None,
+) -> DataFrame:
+    """Add rolling feature columns derived from value_normalized.
+
+    Iterates FEATURE_DEFINITIONS (or a caller-supplied subset) and adds one
+    Spark column per feature. Windows are partitioned by (channel_id, segment_id)
+    so they never cross gap boundaries detected by detect_gaps().
+
+    The rolling statistics match the numpy reference in features.definitions:
+    - Rows with fewer than window_size predecessors within the segment → null
+      (same as the numpy reference returning NaN for a short buffer)
+    - rate_of_change → null for the first row and when Δtime == 0
+
+    These columns are written to data/processed/{mission}/features/ and
+    consumed by Phase 3 (Feast offline store) and Phase 8 (Evidently drift).
+
+    Args:
+        df: DataFrame with columns: telemetry_timestamp, value_normalized,
+            channel_id, mission_id, segment_id.
+        feature_defs: Feature registry to iterate. Defaults to FEATURE_DEFINITIONS.
+            Pass a subset for testing or targeted pipelines.
+
+    Returns:
+        DataFrame with one new FloatType column per FeatureDefinition.
+    """
+    if feature_defs is None:
+        feature_defs = FEATURE_DEFINITIONS
+
+    # Base window: partition by channel + segment, order by time.
+    # segment_id prevents rolling windows from crossing gap boundaries.
+    w_base = (
+        Window.partitionBy("channel_id", "segment_id")
+        .orderBy("telemetry_timestamp")
+    )
+
+    # Row number within each (channel, segment) partition.
+    # Used by _rolling_col to null-out the first window_size-1 rows.
+    df = df.withColumn("_rn", F.row_number().over(w_base))
+
+    for fd in feature_defs:
+        col = (
+            _rate_of_change_col(w_base)
+            if fd.name == "rate_of_change"
+            else _rolling_col(fd, w_base)
+        )
+        df = df.withColumn(fd.name, col)
+
+    log.info("add_rolling_features", features=[fd.name for fd in feature_defs])
+    return df.drop("_rn")

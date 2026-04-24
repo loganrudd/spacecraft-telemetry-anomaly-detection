@@ -159,11 +159,27 @@ def labels_pd() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _write_parquet_micros(df: pd.DataFrame, path: Path) -> None:
+    """Write a pandas DataFrame to Parquet with microsecond UTC timestamps.
+
+    pandas defaults to TIMESTAMP(NANOS, false/true) which PySpark 4.x rejects.
+    Converting to microsecond precision AND localising to UTC causes pyarrow to
+    write TIMESTAMP(MICROS, true), which Spark reads as TimestampType.
+    """
+    df = df.copy()
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = df.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        df.index = idx.as_unit("us")
+    df.to_parquet(path)
+
+
 @pytest.fixture()
 def sample_channel_parquet(tmp_path: Path, sample_channel_pd: pd.DataFrame) -> Path:
     """Write sample_channel_pd to a Parquet file and return its path."""
     path = tmp_path / "channel_1.parquet"
-    sample_channel_pd.to_parquet(path)
+    _write_parquet_micros(sample_channel_pd, path)
     return path
 
 
@@ -171,7 +187,7 @@ def sample_channel_parquet(tmp_path: Path, sample_channel_pd: pd.DataFrame) -> P
 def irregular_channel_parquet(tmp_path: Path, irregular_channel_pd: pd.DataFrame) -> Path:
     """Write irregular_channel_pd to a Parquet file and return its path."""
     path = tmp_path / "channel_2.parquet"
-    irregular_channel_pd.to_parquet(path)
+    _write_parquet_micros(irregular_channel_pd, path)
     return path
 
 
