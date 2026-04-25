@@ -66,7 +66,7 @@ uv run spacecraft-telemetry spark preprocess --mission ESA-Mission1
 ESA Parquet (Zenodo/GCS)
   → Download + Sample (Phase 1)        ← complete
   → PySpark preprocessing (Phase 2)    ← complete
-  → Feast feature store (Phase 3)
+  → Feast feature store (Phase 3)      ← in progress
   → Telemanom LSTM training (Phase 4)
   → Ray parallel training (Phase 5)
   → Ray Tune HPO (Phase 6)
@@ -76,6 +76,7 @@ ESA Parquet (Zenodo/GCS)
   → React dashboard (Phase 10)
   → GCP deployment (Phase 11)
   → Documentation + polish (Phase 12)
+
 ```
 
 ## Phase 1 Components
@@ -117,7 +118,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 |-------|-------------|--------|
 | 1 | Repo scaffold + data ingestion | ✅ Complete |
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
-| 3 | Feast feature store integration | Planned |
+| 3 | Feast feature store integration | In Progress |
 | 4 | Telemanom model drop-in | Planned |
 | 5 | Ray parallel training | Planned |
 | 6 | Ray Tune HPO | Planned |
