@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
@@ -290,7 +290,7 @@ def _detect_time_column(df: pd.DataFrame) -> str | None:
     """
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
-            return col
+            return col  # type: ignore[no-any-return]
     return _first_match(df.columns, _TS_CANDIDATES)
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import FloatType
 
@@ -96,7 +96,7 @@ def read_labels(spark: SparkSession, path: Path) -> DataFrame:
 
     log.info("read_labels", path=str(path))
 
-    def _parse_ts(col_name: str):
+    def _parse_ts(col_name: str) -> Column:
         # Strip optional sub-second component (.NNN) so one format handles both
         # whole-second ("...15Z") and millisecond ("...15.429Z") timestamps.
         normalized = F.regexp_replace(F.col(col_name), r"\.\d+Z$", "Z")

@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,8 @@ class FeatureDefinition:
         window_size: Number of values the computation looks back over.
                      None means the feature uses a fixed look-back (e.g. 2 for ROC).
         compute_numpy: Pure-NumPy reference implementation.
-                       Signature: (values: np.ndarray, timestamps_s: np.ndarray) -> float
+                       Signature: (values: NDArray[float64], timestamps_s: NDArray[float64])
+                       -> float
                        - values: 1-D array of the most recent raw (normalized) readings,
                          length >= window_size, most recent last
                        - timestamps_s: matching Unix timestamps in seconds, same length
@@ -44,11 +46,11 @@ class FeatureDefinition:
     dtype: str
     description: str
     window_size: int
-    compute_numpy: Callable[[np.ndarray, np.ndarray], float]
+    compute_numpy: Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], float]
 
 
-def _rolling_mean(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
-    def _fn(values: np.ndarray, _ts: np.ndarray) -> float:
+def _rolling_mean(n: int) -> Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], float]:
+    def _fn(values: npt.NDArray[np.float64], _ts: npt.NDArray[np.float64]) -> float:
         if len(values) < n:
             return float("nan")
         return float(np.mean(values[-n:]))
@@ -56,8 +58,8 @@ def _rolling_mean(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
     return _fn
 
 
-def _rolling_std(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
-    def _fn(values: np.ndarray, _ts: np.ndarray) -> float:
+def _rolling_std(n: int) -> Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], float]:
+    def _fn(values: npt.NDArray[np.float64], _ts: npt.NDArray[np.float64]) -> float:
         if len(values) < n:
             return float("nan")
         return float(np.std(values[-n:], ddof=1))
@@ -65,8 +67,8 @@ def _rolling_std(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
     return _fn
 
 
-def _rolling_min(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
-    def _fn(values: np.ndarray, _ts: np.ndarray) -> float:
+def _rolling_min(n: int) -> Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], float]:
+    def _fn(values: npt.NDArray[np.float64], _ts: npt.NDArray[np.float64]) -> float:
         if len(values) < n:
             return float("nan")
         return float(np.min(values[-n:]))
@@ -74,8 +76,8 @@ def _rolling_min(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
     return _fn
 
 
-def _rolling_max(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
-    def _fn(values: np.ndarray, _ts: np.ndarray) -> float:
+def _rolling_max(n: int) -> Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], float]:
+    def _fn(values: npt.NDArray[np.float64], _ts: npt.NDArray[np.float64]) -> float:
         if len(values) < n:
             return float("nan")
         return float(np.max(values[-n:]))
@@ -83,7 +85,9 @@ def _rolling_max(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
     return _fn
 
 
-def _rate_of_change(values: np.ndarray, timestamps_s: np.ndarray) -> float:
+def _rate_of_change(
+    values: npt.NDArray[np.float64], timestamps_s: npt.NDArray[np.float64]
+) -> float:
     """(value[t] - value[t-1]) / (timestamp[t] - timestamp[t-1]) in seconds."""
     if len(values) < 2 or len(timestamps_s) < 2:
         return float("nan")
@@ -171,8 +175,8 @@ def get_feature_by_name(name: str) -> FeatureDefinition:
 
 
 def compute_features_numpy(
-    values: np.ndarray,
-    timestamps_s: np.ndarray,
+    values: npt.NDArray[np.float64],
+    timestamps_s: npt.NDArray[np.float64],
 ) -> dict[str, float]:
     """Compute all registered features for the most recent point in a buffer.
 

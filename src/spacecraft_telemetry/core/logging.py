@@ -79,4 +79,4 @@ def get_logger(name: str) -> structlog.types.FilteringBoundLogger:
     Returns:
         A structlog BoundLogger pre-bound with {"logger": name}.
     """
-    return structlog.get_logger().bind(logger=name)
+    return structlog.get_logger().bind(logger=name)  # type: ignore[no-any-return]

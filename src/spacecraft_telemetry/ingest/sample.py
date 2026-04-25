@@ -21,7 +21,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 from pydantic import BaseModel
 
 from spacecraft_telemetry.core.logging import get_logger

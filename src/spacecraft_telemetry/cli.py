@@ -261,7 +261,7 @@ def spark_preprocess(
     log = get_logger(__name__)
 
     # Apply CLI overrides to SparkConfig.
-    spark_overrides: dict = {}
+    spark_overrides: dict[str, object] = {}
     if window_size is not None:
         spark_overrides["window_size"] = window_size
     if train_fraction is not None:

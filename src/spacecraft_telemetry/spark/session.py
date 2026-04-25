@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from spacecraft_telemetry.core.config import SparkConfig
 from spacecraft_telemetry.core.logging import get_logger
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 log = get_logger(__name__)
 
 
-def create_spark_session(config: SparkConfig, app_name: str = "spacecraft-telemetry"):
+def create_spark_session(
+    config: SparkConfig, app_name: str = "spacecraft-telemetry"
+) -> SparkSession:
     """Build and return a SparkSession configured for the given environment.
 
     Imports PySpark lazily so the rest of the package works without the spark
