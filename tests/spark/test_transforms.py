@@ -993,3 +993,277 @@ class TestExcludeAnomaliesFromTrain:
         df = spark_session.createDataFrame(pdf)
         result = exclude_anomalies_from_train(df)
         assert result.count() == 3
+
+    def test_all_anomaly_returns_empty_with_correct_schema(self, spark_session) -> None:
+        """T2: all-anomaly input produces an empty DataFrame with the right columns."""
+        import pandas as pd
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
+
+        pdf = pd.DataFrame(
+            {
+                "window_id": list(range(5)),
+                "is_anomaly": [True, True, True, True, True],
+                "value_normalized": [float(i) for i in range(5)],
+                "channel_id": ["ch1"] * 5,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = exclude_anomalies_from_train(df)
+
+        assert result.count() == 0
+        assert "window_id" in result.columns
+        assert "is_anomaly" in result.columns
+        assert "value_normalized" in result.columns
+        assert result.filter(F.col("is_anomaly")).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# T1: Value-level correctness tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleNullsValues:
+    """T1 additions: assert the computed VALUES, not just counts/columns."""
+
+    def test_forward_fill_not_backward(self, spark_session) -> None:
+        """Null must take the PRIOR value, not the next one.
+
+        Arrange: [1.0, null, 3.0] → forward fill gives [1.0, 1.0, 3.0].
+        If the fill were backward the null would become 3.0.
+        """
+        import pandas as pd
+
+        from spacecraft_telemetry.spark.transforms import handle_nulls
+
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=3, freq="90s"),
+                "value": [1.0, None, 3.0],
+                "channel_id": ["ch1"] * 3,
+                "mission_id": ["m1"] * 3,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = handle_nulls(df)
+        rows = result.orderBy("telemetry_timestamp").collect()
+        assert float(rows[1]["value"]) == pytest.approx(1.0, abs=1e-5), (
+            f"Expected forward-fill value 1.0, got {rows[1]['value']}"
+        )
+
+    def test_all_null_returns_empty(self, spark_session) -> None:
+        """Q3 runtime check: a channel with all nulls should produce zero rows."""
+        import pandas as pd
+
+        from spacecraft_telemetry.spark.transforms import handle_nulls
+
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
+                "value": [None, None, None, None],
+                "channel_id": ["ch1"] * 4,
+                "mission_id": ["m1"] * 4,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = handle_nulls(df)
+        assert result.count() == 0
+
+
+class TestDetectGapsValues:
+    """T1 additions: verify the gap threshold is applied correctly."""
+
+    def test_interval_exactly_at_threshold_is_not_a_gap(self, spark_session) -> None:
+        """interval == gap_multiplier * median is NOT a gap (strictly greater required)."""
+        import pandas as pd
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import detect_gaps
+
+        # median interval = 10s, gap_multiplier = 3.0 → threshold = 30s
+        # row 2 interval = exactly 30s → NOT a gap
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": [
+                    pd.Timestamp("2000-01-01 00:00:00"),
+                    pd.Timestamp("2000-01-01 00:00:10"),  # +10s (median)
+                    pd.Timestamp("2000-01-01 00:00:40"),  # +30s == threshold, NOT gap
+                    pd.Timestamp("2000-01-01 00:00:50"),  # +10s
+                ],
+                "value": [1.0, 2.0, 3.0, 4.0],
+                "channel_id": ["ch1"] * 4,
+                "mission_id": ["m1"] * 4,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = detect_gaps(df, gap_multiplier=3.0)
+        assert result.filter(F.col("is_gap")).count() == 0
+
+    def test_interval_just_above_threshold_is_a_gap(self, spark_session) -> None:
+        """interval > gap_multiplier * median IS a gap."""
+        import pandas as pd
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import detect_gaps
+
+        # median interval = 10s, gap_multiplier = 3.0 → threshold = 30s
+        # row 2 interval = 31s > 30s → IS a gap
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": [
+                    pd.Timestamp("2000-01-01 00:00:00"),
+                    pd.Timestamp("2000-01-01 00:00:10"),  # +10s (median)
+                    pd.Timestamp("2000-01-01 00:00:41"),  # +31s > threshold → gap
+                    pd.Timestamp("2000-01-01 00:00:51"),  # +10s
+                ],
+                "value": [1.0, 2.0, 3.0, 4.0],
+                "channel_id": ["ch1"] * 4,
+                "mission_id": ["m1"] * 4,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = detect_gaps(df, gap_multiplier=3.0)
+        gaps = result.filter(F.col("is_gap")).orderBy("telemetry_timestamp").collect()
+        assert len(gaps) == 1
+        assert float(gaps[0]["value"]) == pytest.approx(3.0, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# T3: create_windows parametrized over realistic window sizes
+# ---------------------------------------------------------------------------
+
+
+class TestCreateWindowsLargeWindows:
+    """T3: Verify window count and values-array length hold across realistic window sizes.
+
+    Tests use a 300-row fixture so window_size=250 produces windows.
+    Expected count formula: max(0, N - window_size - prediction_horizon + 1).
+    """
+
+    @pytest.fixture()
+    def three_hundred_row_df(self, spark_session):
+        import pandas as pd
+
+        n = 300
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n, freq="90s"),
+                "value_normalized": [float(i) for i in range(n)],
+                "channel_id": ["ch1"] * n,
+                "mission_id": ["m1"] * n,
+                "segment_id": [0] * n,
+            }
+        )
+        return spark_session.createDataFrame(pdf)
+
+    @pytest.mark.parametrize(
+        "window_size",
+        [3, 10, 50, 250],
+        ids=["ws3", "ws10", "ws50", "ws250"],
+    )
+    def test_window_count_formula(self, three_hundred_row_df, window_size) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        ph = 1
+        n = 300
+        expected = max(0, n - window_size - ph + 1)
+        result = create_windows(
+            three_hundred_row_df, window_size=window_size, prediction_horizon=ph
+        )
+        assert result.count() == expected
+
+    @pytest.mark.parametrize(
+        "window_size",
+        [3, 10, 50, 250],
+        ids=["ws3", "ws10", "ws50", "ws250"],
+    )
+    def test_values_array_length(self, three_hundred_row_df, window_size) -> None:
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(
+            three_hundred_row_df, window_size=window_size, prediction_horizon=1
+        )
+        bad = result.filter(F.size("values") != window_size).count()
+        assert bad == 0, f"Some windows had values array != {window_size} elements"
+
+
+# ---------------------------------------------------------------------------
+# T4: join_anomaly_labels boundary semantics
+# ---------------------------------------------------------------------------
+
+
+class TestJoinAnomalyLabelsBoundaries:
+    """T4: Verify the strict half-open interval semantics of join_anomaly_labels.
+
+    The join uses strict > and <, so boundary-touching windows are NOT anomalous.
+    """
+
+    @pytest.fixture()
+    def label_df(self, spark_session):
+        """Single label: start=100s, end=200s from epoch."""
+        import pandas as pd
+
+        base = pd.Timestamp("2000-01-01")
+        pdf = pd.DataFrame(
+            {
+                "anomaly_id": ["L1"],
+                "channel_id": ["ch1"],
+                "start_time": [base + pd.Timedelta(seconds=100)],
+                "end_time": [base + pd.Timedelta(seconds=200)],
+            }
+        )
+        return spark_session.createDataFrame(pdf)
+
+    @pytest.mark.parametrize(
+        "win_start_s,win_end_s,expected_anomaly,description",
+        [
+            # Boundary-touching: window ends exactly when label starts → NOT anomaly
+            (50, 100, False, "window_end == label_start"),
+            # Boundary-touching: window starts exactly when label ends → NOT anomaly
+            (200, 250, False, "window_start == label_end"),
+            # Clearly inside
+            (120, 180, True, "window fully inside label"),
+            # Window starts exactly when label starts → IS anomaly
+            (100, 150, True, "window_start == label_start"),
+            # Window ends exactly when label ends → IS anomaly
+            (150, 200, True, "window_end == label_end"),
+            # Clearly outside before label
+            (0, 50, False, "window entirely before label"),
+            # Clearly outside after label
+            (250, 300, False, "window entirely after label"),
+        ],
+    )
+    def test_boundary_semantics(
+        self,
+        spark_session,
+        label_df,
+        win_start_s,
+        win_end_s,
+        expected_anomaly,
+        description,
+    ) -> None:
+        import pandas as pd
+
+        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+
+        base = pd.Timestamp("2000-01-01")
+        pdf = pd.DataFrame(
+            {
+                "window_id": [0],
+                "channel_id": ["ch1"],
+                "mission_id": ["m1"],
+                "segment_id": [0],
+                "window_start_ts": [base + pd.Timedelta(seconds=win_start_s)],
+                "window_end_ts": [base + pd.Timedelta(seconds=win_end_s)],
+                "target": [0.0],
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result = join_anomaly_labels(df, label_df)
+        row = result.collect()[0]
+        assert row["is_anomaly"] is expected_anomaly, (
+            f"{description}: expected is_anomaly={expected_anomaly}, got {row['is_anomaly']}"
+        )

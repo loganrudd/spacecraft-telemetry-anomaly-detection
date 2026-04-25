@@ -393,8 +393,14 @@ def temporal_train_test_split(
 def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
     """Add is_anomaly boolean column by joining window time ranges against anomaly labels.
 
-    A window is anomalous if its [window_start_ts, window_end_ts) overlaps any label
-    interval [start_time, end_time) for the same channel_id. Channels absent from
+    A window is anomalous if it overlaps any label segment for the same channel_id.
+    Overlap uses strict inequalities:
+
+        window_end_ts > label.start_time  AND  window_start_ts < label.end_time
+
+    This is the standard half-open interval overlap condition. Boundary-touching windows
+    are NOT anomalous: a window whose end_ts equals a label's start_time is excluded, and
+    a window whose start_ts equals a label's end_time is excluded. Channels absent from
     labels_df are treated as fully nominal (all False).
 
     Args:
@@ -431,8 +437,7 @@ def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
         F.coalesce(F.col("is_anomaly"), F.lit(False)),
     )
 
-    anomaly_count = result.filter(F.col("is_anomaly")).count()
-    log.info("join_anomaly_labels", anomaly_count=anomaly_count)
+    log.info("join_anomaly_labels")
     return result
 
 
@@ -449,8 +454,6 @@ def exclude_anomalies_from_train(train_df: DataFrame) -> DataFrame:
     Returns:
         DataFrame with all is_anomaly=True rows removed.
     """
-    total = train_df.count()
     result = train_df.filter(~F.col("is_anomaly"))
-    excluded = total - result.count()
-    log.info("exclude_anomalies_from_train", excluded=excluded)
+    log.info("exclude_anomalies_from_train")
     return result
