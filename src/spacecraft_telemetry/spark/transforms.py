@@ -416,8 +416,10 @@ def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
 
     # Left join: one row per (window, overlapping label) pair.
     # Overlap condition: window_end > label_start AND window_start < label_end.
+    # Labels are always a small CSV (~KB); broadcast ships them to each executor
+    # rather than shuffling the large windows DataFrame.
     matched = win.join(
-        lbl,
+        F.broadcast(lbl),
         on=(
             (F.col("win.channel_id") == F.col("lbl.channel_id"))
             & (F.col("win.window_end_ts") > F.col("lbl.start_time"))

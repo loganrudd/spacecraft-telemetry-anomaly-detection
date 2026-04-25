@@ -74,10 +74,12 @@ def run_preprocessing(
     if not channel_paths:
         raise FileNotFoundError(f"No channel Parquet files found in {channel_dir}")
 
-    # Read labels once — shared across all channels, cached to avoid re-reading per channel.
+    # Read labels once — shared across all channels.
+    # join_anomaly_labels applies F.broadcast() so Spark ships the small labels
+    # table to each executor rather than shuffling the large windows DataFrame.
     labels_df = None
     if labels_path.exists():
-        labels_df = read_labels(spark, labels_path).cache()
+        labels_df = read_labels(spark, labels_path)
 
     # Feature definitions restricted to the configured window sizes.
     feature_defs: list[FeatureDefinition] = [
@@ -183,9 +185,6 @@ def run_preprocessing(
             train_windows=train_count,
             test_windows=test_count,
         )
-
-    if labels_df is not None:
-        labels_df.unpersist()
 
     # Persist normalization params — required at inference time (Phase 9) to apply
     # the identical z-score transform to incoming telemetry. Only channels that
