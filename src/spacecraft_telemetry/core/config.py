@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
@@ -46,6 +46,48 @@ class DataConfig(BaseModel):
     def channels_positive(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"sample_channels must be >= 1, got {v}")
+        return v
+
+
+class SparkConfig(BaseModel):
+    processed_data_dir: Path = Path("data/processed")
+    driver_memory: str = "1536m"
+    num_cores: int = 2
+    window_size: int = 250
+    prediction_horizon: int = 1
+    train_fraction: float = 0.8
+    normalization: Literal["z-score"] = "z-score"
+    gap_multiplier: float = 3.0
+    feature_windows: list[int] = [10, 50, 100]
+
+    @field_validator("train_fraction")
+    @classmethod
+    def train_fraction_in_range(cls, v: float) -> float:
+        if not 0 < v < 1.0:
+            raise ValueError(f"train_fraction must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("window_size", "num_cores", "prediction_horizon")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("gap_multiplier")
+    @classmethod
+    def positive_float(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"gap_multiplier must be > 0, got {v}")
+        return v
+
+    @field_validator("feature_windows")
+    @classmethod
+    def windows_nonempty_positive(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError("feature_windows must not be empty")
+        if any(w < 1 for w in v):
+            raise ValueError(f"all feature_windows must be >= 1, got {v}")
         return v
 
 
@@ -97,6 +139,7 @@ class Settings(BaseSettings):
     env: str = "local"
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
+    spark: SparkConfig = SparkConfig()
 
     @classmethod
     def settings_customise_sources(

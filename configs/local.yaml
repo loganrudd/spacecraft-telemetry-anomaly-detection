@@ -14,3 +14,14 @@ data:
 logging:
   level: DEBUG
   format: console
+
+spark:
+  processed_data_dir: data/processed
+  driver_memory: "1536m"
+  num_cores: 2
+  window_size: 250
+  prediction_horizon: 1
+  train_fraction: 0.8
+  normalization: z-score
+  gap_multiplier: 3.0
+  feature_windows: [10, 50, 100]
