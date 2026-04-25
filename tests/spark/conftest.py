@@ -199,6 +199,24 @@ def labels_csv(tmp_path: Path, labels_pd: pd.DataFrame) -> Path:
     return path
 
 
+@pytest.fixture()
+def pipeline_input_dir(tmp_path: Path, sample_channel_pd: pd.DataFrame, labels_pd: pd.DataFrame) -> Path:
+    """Build the directory structure expected by run_preprocessing.
+
+    Layout:
+        {tmp_path}/input/ESA-Mission1/channels/channel_1.parquet
+        {tmp_path}/input/ESA-Mission1/labels.csv
+
+    Returns the root input directory ({tmp_path}/input).
+    """
+    mission = "ESA-Mission1"
+    channels_dir = tmp_path / "input" / mission / "channels"
+    channels_dir.mkdir(parents=True)
+    _write_parquet_micros(sample_channel_pd, channels_dir / "channel_1.parquet")
+    labels_pd.to_csv(tmp_path / "input" / mission / "labels.csv", index=False)
+    return tmp_path / "input"
+
+
 # ---------------------------------------------------------------------------
 # Spark DataFrame fixtures — standardised schema for transform tests
 # ---------------------------------------------------------------------------

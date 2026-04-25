@@ -197,3 +197,97 @@ def explore(
         console.print(tbl)
     else:
         explorer.print_report(mission)
+
+
+# ---------------------------------------------------------------------------
+# spark group
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def spark() -> None:
+    """PySpark preprocessing pipeline commands."""
+
+
+@spark.command("preprocess")
+@click.option("--mission", required=True, help="Mission name to preprocess (e.g. ESA-Mission1).")
+@click.option(
+    "--sample-fraction",
+    type=float,
+    default=None,
+    show_default=True,
+    help="Ignored — reads from sample_data_dir (already sampled in ingest phase).",
+)
+@click.option(
+    "--window-size",
+    type=int,
+    default=None,
+    show_default=True,
+    help="LSTM sliding-window length (overrides config, default 250).",
+)
+@click.option(
+    "--train-fraction",
+    type=float,
+    default=None,
+    show_default=True,
+    help="Temporal train split fraction (overrides config, default 0.8).",
+)
+@click.pass_context
+def spark_preprocess(
+    ctx: click.Context,
+    mission: str,
+    sample_fraction: float | None,
+    window_size: int | None,
+    train_fraction: float | None,
+) -> None:
+    """Run the Spark preprocessing pipeline for one mission.
+
+    Reads channel Parquet files from sample_data_dir/{mission}/channels/,
+    processes them (null-fill → gap-detect → normalize → features + windows),
+    and writes partitioned Parquet to spark.processed_data_dir/{mission}/.
+
+    Examples:
+
+        # Default settings (window_size=250, train_fraction=0.8)
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1
+
+        # Quick dev run with smaller windows
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --window-size 50
+    """
+    from spacecraft_telemetry.spark.pipeline import run_preprocessing
+    from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    # Apply CLI overrides to SparkConfig.
+    spark_overrides: dict = {}
+    if window_size is not None:
+        spark_overrides["window_size"] = window_size
+    if train_fraction is not None:
+        spark_overrides["train_fraction"] = train_fraction
+    if spark_overrides:
+        settings = settings.model_copy(
+            update={"spark": settings.spark.model_copy(update=spark_overrides)}
+        )
+
+    log.info(
+        "spark.preprocess.start",
+        mission=mission,
+        window_size=settings.spark.window_size,
+        train_fraction=settings.spark.train_fraction,
+    )
+
+    session = create_spark_session(settings.spark)
+    try:
+        summary = run_preprocessing(session, settings, mission)
+    finally:
+        stop_spark_session(session)
+
+    click.echo(f"Mission           : {mission}")
+    click.echo(f"Channels processed: {summary['channels_processed']}")
+    click.echo(f"Rows in           : {summary['rows_in']:,}")
+    click.echo(f"Feature rows out  : {summary['feature_rows_out']:,}")
+    click.echo(f"Train windows     : {summary['train_windows']:,}")
+    click.echo(f"Test windows      : {summary['test_windows']:,}")
+    click.echo(f"Total windows     : {summary['windows_out']:,}")
