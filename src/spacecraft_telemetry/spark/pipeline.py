@@ -81,13 +81,16 @@ def run_preprocessing(
 
     # Feature definitions restricted to the configured window sizes.
     feature_defs: list[FeatureDefinition] = [
-        fd for fd in FEATURE_DEFINITIONS
+        fd
+        for fd in FEATURE_DEFINITIONS
         if fd.name == "rate_of_change" or fd.window_size in cfg.feature_windows
     ]
-    feature_output_cols = (
-        ["telemetry_timestamp", "channel_id", "mission_id", "value_normalized"]
-        + [fd.name for fd in feature_defs]
-    )
+    feature_output_cols = [
+        "telemetry_timestamp",
+        "channel_id",
+        "mission_id",
+        "value_normalized",
+    ] + [fd.name for fd in feature_defs]
 
     # Clear output dirs: re-runs must not accumulate duplicates across channels.
     features_out = output_dir / mission / "features"

@@ -95,7 +95,7 @@ class SampleCreator:
             sampled = self._take_first_n_rows(df)
             dest = self.sample_dir / mission / "channels" / f"{channel}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            sampled.to_parquet(dest, index=True, engine="pyarrow")
+            _write_parquet_spark_compat(sampled, dest)
             row_counts[channel] = len(sampled)
             log.info(
                 "channel sampled",
@@ -134,11 +134,7 @@ class SampleCreator:
             raise FileNotFoundError(f"Channel directory not found: {channel_dir}")
 
         channel_files = sorted(
-            (
-                p
-                for p in channel_dir.iterdir()
-                if p.suffix in (".zip", ".pkl")
-            ),
+            (p for p in channel_dir.iterdir() if p.suffix in (".zip", ".pkl")),
             key=lambda p: p.name,
         )
 
@@ -202,6 +198,22 @@ class SampleCreator:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _write_parquet_spark_compat(df: pd.DataFrame, path: Path) -> None:
+    """Write a pandas DataFrame to Parquet with PySpark 4.x-compatible timestamps.
+
+    PySpark 4.x rejects TIMESTAMP(NANOS, false) — the default produced by pandas
+    when the DatetimeIndex has no timezone. Fix: localize to UTC and truncate to
+    microsecond precision so pyarrow writes TIMESTAMP(MICROS, true) instead.
+    """
+    df = df.copy()
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = df.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        df.index = idx.as_unit("us")
+    df.to_parquet(path, index=True, engine="pyarrow")
 
 
 def _channel_name(path: Path) -> str:

@@ -6,11 +6,20 @@ MISSION       ?= ESA-Mission1
 UV := uv
 RUN := $(UV) run
 
-.PHONY: help setup test test-all lint format typecheck download-sample explore clean
+# Auto-detect JDK 21 for PySpark (macOS Homebrew path).
+# Override by setting JAVA_HOME externally (e.g. on Linux CI).
+JAVA_HOME_21 ?= $(shell brew --prefix openjdk@21 2>/dev/null)
+# Prepended to commands that need JDK 21; empty string if not found (tests skip gracefully).
+_SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
+
+.PHONY: help setup test test-all lint format typecheck \
+        download-sample explore \
+        spark-test spark-preprocess \
+        clean
 
 help:          ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -23,11 +32,14 @@ setup:         ## Install all dependency groups (dev + extras)
 # Tests
 # ---------------------------------------------------------------------------
 
-test:          ## Run fast tests (excludes @pytest.mark.slow)
-	$(RUN) pytest -m "not slow" -q
+test:          ## Run fast tests (Spark tests skip automatically if JDK 21 absent)
+	$(_SPARK_ENV) $(RUN) pytest -m "not slow" -q
 
 test-all:      ## Run the full test suite including slow tests
-	$(RUN) pytest -q
+	$(_SPARK_ENV) $(RUN) pytest -q
+
+spark-test:    ## Run only PySpark tests (requires JDK 21 — brew install openjdk@21)
+	$(_SPARK_ENV) $(RUN) pytest tests/spark/ -v
 
 # ---------------------------------------------------------------------------
 # Code quality
@@ -54,6 +66,14 @@ download-sample: ## Download ESA dataset sample from Zenodo (MISSION=ESA-Mission
 
 explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 	$(RUN) spacecraft-telemetry explore \
+		--mission $(MISSION)
+
+# ---------------------------------------------------------------------------
+# Spark preprocessing (Phase 2)
+# ---------------------------------------------------------------------------
+
+spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=ESA-Mission1)
+	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
 		--mission $(MISSION)
 
 # ---------------------------------------------------------------------------

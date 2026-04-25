@@ -17,6 +17,8 @@ from spacecraft_telemetry.core.logging import get_logger
 log = get_logger(__name__)
 
 # ISO 8601 format used in labels.csv StartTime/EndTime columns.
+# ESA labels may include sub-second precision (e.g. "2004-12-01T20:42:15.429Z").
+# We strip the fractional part before parsing so one format handles both variants.
 _LABEL_TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ss'Z'"
 
 
@@ -94,11 +96,17 @@ def read_labels(spark: SparkSession, path: Path) -> DataFrame:
 
     log.info("read_labels", path=str(path))
 
+    def _parse_ts(col_name: str):
+        # Strip optional sub-second component (.NNN) so one format handles both
+        # whole-second ("...15Z") and millisecond ("...15.429Z") timestamps.
+        normalized = F.regexp_replace(F.col(col_name), r"\.\d+Z$", "Z")
+        return F.to_timestamp(normalized, _LABEL_TS_FORMAT)
+
     return (
         df.withColumnRenamed("ID", "anomaly_id")
         .withColumnRenamed("Channel", "channel_id")
-        .withColumn("start_time", F.to_timestamp(F.col("StartTime"), _LABEL_TS_FORMAT))
-        .withColumn("end_time", F.to_timestamp(F.col("EndTime"), _LABEL_TS_FORMAT))
+        .withColumn("start_time", _parse_ts("StartTime"))
+        .withColumn("end_time", _parse_ts("EndTime"))
         .select("anomaly_id", "channel_id", "start_time", "end_time")
     )
 
@@ -121,12 +129,7 @@ def write_windows(
         mode: Spark write mode. "overwrite" replaces existing data (default).
     """
     log.info("write_windows", output_path=str(output_path), mode=mode)
-    (
-        df.write
-        .mode(mode)
-        .partitionBy("mission_id", "channel_id")
-        .parquet(str(output_path))
-    )
+    (df.write.mode(mode).partitionBy("mission_id", "channel_id").parquet(str(output_path)))
 
 
 def write_features(
@@ -147,9 +150,4 @@ def write_features(
         mode: Spark write mode. "overwrite" replaces existing data (default).
     """
     log.info("write_features", output_path=str(output_path), mode=mode)
-    (
-        df.write
-        .mode(mode)
-        .partitionBy("mission_id", "channel_id")
-        .parquet(str(output_path))
-    )
+    (df.write.mode(mode).partitionBy("mission_id", "channel_id").parquet(str(output_path)))

@@ -7,11 +7,10 @@ Composable and stateless — no SparkSession dependency.
 
 from __future__ import annotations
 
-from pyspark.sql import Column, DataFrame
+from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
-from pyspark.sql import Window
-from pyspark.sql.window import WindowSpec
 from pyspark.sql.types import ArrayType, FloatType
+from pyspark.sql.window import WindowSpec
 
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.features.definitions import (
@@ -50,8 +49,7 @@ def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
     """
     if strategy != "forward_fill":
         raise ValueError(
-            f"Unsupported null-handling strategy {strategy!r}. "
-            "Only 'forward_fill' is supported."
+            f"Unsupported null-handling strategy {strategy!r}. Only 'forward_fill' is supported."
         )
 
     null_count = df.filter(F.col("value").isNull()).count()
@@ -81,7 +79,7 @@ def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
 def detect_gaps(df: DataFrame, gap_multiplier: float = 3.0) -> DataFrame:
     """Detect time gaps and assign contiguous segment IDs.
 
-    A gap is an interval between consecutive rows exceeding gap_multiplier ×
+    A gap is an interval between consecutive rows exceeding gap_multiplier *
     the median sampling interval for that channel. The first row of each channel
     is never a gap.
 
@@ -98,13 +96,9 @@ def detect_gaps(df: DataFrame, gap_multiplier: float = 3.0) -> DataFrame:
     """
     w_ts = Window.partitionBy("channel_id").orderBy("telemetry_timestamp")
 
-    df = df.withColumn(
-        "_prev_ts", F.lag("telemetry_timestamp", 1).over(w_ts)
-    ).withColumn(
+    df = df.withColumn("_prev_ts", F.lag("telemetry_timestamp", 1).over(w_ts)).withColumn(
         "_interval_s",
-        (F.unix_timestamp("telemetry_timestamp") - F.unix_timestamp("_prev_ts")).cast(
-            "double"
-        ),
+        (F.unix_timestamp("telemetry_timestamp") - F.unix_timestamp("_prev_ts")).cast("double"),
     )
 
     median_df = (
@@ -215,10 +209,7 @@ def _rolling_col(fd: FeatureDefinition, w_base: WindowSpec) -> Column:
     agg_fn = _ROLLING_AGG[op]
     w = w_base.rowsBetween(-(n - 1), 0)
     agg = agg_fn("value_normalized").over(w)
-    return (
-        F.when(F.col("_rn") < n, F.lit(None).cast(FloatType()))
-        .otherwise(agg.cast(FloatType()))
-    )
+    return F.when(F.col("_rn") < n, F.lit(None).cast(FloatType())).otherwise(agg.cast(FloatType()))
 
 
 def _rate_of_change_col(w_base: WindowSpec) -> Column:
@@ -230,9 +221,8 @@ def _rate_of_change_col(w_base: WindowSpec) -> Column:
     prev_val = F.lag("value_normalized", 1).over(w_base)
     prev_ts_unix = F.lag(F.unix_timestamp("telemetry_timestamp"), 1).over(w_base)
     dt = F.unix_timestamp("telemetry_timestamp").cast("double") - prev_ts_unix.cast("double")
-    return (
-        F.when(prev_val.isNull() | (dt == 0.0), F.lit(None).cast(FloatType()))
-        .otherwise(((F.col("value_normalized") - prev_val) / dt).cast(FloatType()))
+    return F.when(prev_val.isNull() | (dt == 0.0), F.lit(None).cast(FloatType())).otherwise(
+        ((F.col("value_normalized") - prev_val) / dt).cast(FloatType())
     )
 
 
@@ -273,10 +263,7 @@ def add_rolling_features(
 
     # Base window: partition by channel + segment, order by time.
     # segment_id prevents rolling windows from crossing gap boundaries.
-    w_base = (
-        Window.partitionBy("channel_id", "segment_id")
-        .orderBy("telemetry_timestamp")
-    )
+    w_base = Window.partitionBy("channel_id", "segment_id").orderBy("telemetry_timestamp")
 
     # Row number within each (channel, segment) partition.
     # Used by _rolling_col to null-out the first window_size-1 rows.
@@ -345,10 +332,7 @@ def create_windows(
 
     # Drop rows where the trailing window is shorter than window_size (early rows
     # in a segment) or where no target exists (final prediction_horizon rows).
-    df = (
-        df.filter(F.size("values") == window_size)
-        .filter(F.col("target").isNotNull())
-    )
+    df = df.filter(F.size("values") == window_size).filter(F.col("target").isNotNull())
 
     df = df.withColumn("window_id", F.monotonically_increasing_id())
 
@@ -384,7 +368,7 @@ def temporal_train_test_split(
     """Split a DataFrame into train and test sets using a per-channel timestamp cutoff.
 
     The cutoff for each channel is:
-        min_ts + train_fraction × (max_ts − min_ts)
+        min_ts + train_fraction * (max_ts - min_ts)
 
     Rows at or before the cutoff → train; rows after → test. This is a temporal
     (non-random) split that preserves ordering: the model trains on the earlier
@@ -407,13 +391,13 @@ def temporal_train_test_split(
         )
     )
 
-    train = df.filter(
-        F.unix_timestamp("telemetry_timestamp") <= F.col("_cutoff_ts")
-    ).drop("_min_ts", "_max_ts", "_cutoff_ts")
+    train = df.filter(F.unix_timestamp("telemetry_timestamp") <= F.col("_cutoff_ts")).drop(
+        "_min_ts", "_max_ts", "_cutoff_ts"
+    )
 
-    test = df.filter(
-        F.unix_timestamp("telemetry_timestamp") > F.col("_cutoff_ts")
-    ).drop("_min_ts", "_max_ts", "_cutoff_ts")
+    test = df.filter(F.unix_timestamp("telemetry_timestamp") > F.col("_cutoff_ts")).drop(
+        "_min_ts", "_max_ts", "_cutoff_ts"
+    )
 
     log.info("temporal_train_test_split", train_fraction=train_fraction)
     return train, test
@@ -453,9 +437,7 @@ def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
     )
 
     # Collapse: any match → is_anomaly=True for that window_id.
-    flags = matched.groupBy("window_id").agg(
-        F.max("_matched").cast("boolean").alias("is_anomaly")
-    )
+    flags = matched.groupBy("window_id").agg(F.max("_matched").cast("boolean").alias("is_anomaly"))
 
     result = df.join(flags, on="window_id", how="left").withColumn(
         "is_anomaly",

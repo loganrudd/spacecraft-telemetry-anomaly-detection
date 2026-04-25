@@ -26,38 +26,44 @@ from pyspark.sql.types import (
 # Schema after reading a sample Parquet and renaming columns to standard names.
 # Original files have [channel_N: float, datetime: timestamp] — renamed here.
 
-RAW_CHANNEL_SCHEMA = StructType([
-    StructField("telemetry_timestamp", TimestampType(), nullable=False),
-    StructField("value", FloatType(), nullable=True),  # nulls handled in cleaning step
-    StructField("channel_id", StringType(), nullable=False),
-    StructField("mission_id", StringType(), nullable=False),
-])
+RAW_CHANNEL_SCHEMA = StructType(
+    [
+        StructField("telemetry_timestamp", TimestampType(), nullable=False),
+        StructField("value", FloatType(), nullable=True),  # nulls handled in cleaning step
+        StructField("channel_id", StringType(), nullable=False),
+        StructField("mission_id", StringType(), nullable=False),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Labels input
 # ---------------------------------------------------------------------------
 # Schema after reading labels.csv and parsing ISO timestamp strings.
 
-LABELS_SCHEMA = StructType([
-    StructField("anomaly_id", StringType(), nullable=False),   # original "ID" column
-    StructField("channel_id", StringType(), nullable=False),
-    StructField("start_time", TimestampType(), nullable=False),
-    StructField("end_time", TimestampType(), nullable=False),
-])
+LABELS_SCHEMA = StructType(
+    [
+        StructField("anomaly_id", StringType(), nullable=False),  # original "ID" column
+        StructField("channel_id", StringType(), nullable=False),
+        StructField("start_time", TimestampType(), nullable=False),
+        StructField("end_time", TimestampType(), nullable=False),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Cleaned channel (after null handling, gap detection, normalization)
 # ---------------------------------------------------------------------------
 
-CLEANED_CHANNEL_SCHEMA = StructType([
-    StructField("telemetry_timestamp", TimestampType(), nullable=False),
-    StructField("value", FloatType(), nullable=False),          # no nulls after cleaning
-    StructField("value_normalized", FloatType(), nullable=False),
-    StructField("channel_id", StringType(), nullable=False),
-    StructField("mission_id", StringType(), nullable=False),
-    StructField("segment_id", IntegerType(), nullable=False),   # contiguous run ID
-    StructField("is_gap", BooleanType(), nullable=False),
-])
+CLEANED_CHANNEL_SCHEMA = StructType(
+    [
+        StructField("telemetry_timestamp", TimestampType(), nullable=False),
+        StructField("value", FloatType(), nullable=False),  # no nulls after cleaning
+        StructField("value_normalized", FloatType(), nullable=False),
+        StructField("channel_id", StringType(), nullable=False),
+        StructField("mission_id", StringType(), nullable=False),
+        StructField("segment_id", IntegerType(), nullable=False),  # contiguous run ID
+        StructField("is_gap", BooleanType(), nullable=False),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Feature output (written to data/processed/{mission}/features/)
@@ -66,40 +72,44 @@ CLEANED_CHANNEL_SCHEMA = StructType([
 # Feature column names come from features.definitions.FEATURE_DEFINITIONS —
 # this schema must stay in sync with that registry.
 
-FEATURE_SCHEMA = StructType([
-    StructField("telemetry_timestamp", TimestampType(), nullable=False),
-    StructField("channel_id", StringType(), nullable=False),
-    StructField("mission_id", StringType(), nullable=False),
-    StructField("value_normalized", FloatType(), nullable=False),
-    # Rolling stats — window sizes match SparkConfig.feature_windows default [10, 50, 100]
-    StructField("rolling_mean_10", FloatType(), nullable=True),
-    StructField("rolling_std_10", FloatType(), nullable=True),
-    StructField("rolling_min_10", FloatType(), nullable=True),
-    StructField("rolling_max_10", FloatType(), nullable=True),
-    StructField("rolling_mean_50", FloatType(), nullable=True),
-    StructField("rolling_std_50", FloatType(), nullable=True),
-    StructField("rolling_min_50", FloatType(), nullable=True),
-    StructField("rolling_max_50", FloatType(), nullable=True),
-    StructField("rolling_mean_100", FloatType(), nullable=True),
-    StructField("rolling_std_100", FloatType(), nullable=True),
-    StructField("rolling_min_100", FloatType(), nullable=True),
-    StructField("rolling_max_100", FloatType(), nullable=True),
-    StructField("rate_of_change", FloatType(), nullable=True),
-])
+FEATURE_SCHEMA = StructType(
+    [
+        StructField("telemetry_timestamp", TimestampType(), nullable=False),
+        StructField("channel_id", StringType(), nullable=False),
+        StructField("mission_id", StringType(), nullable=False),
+        StructField("value_normalized", FloatType(), nullable=False),
+        # Rolling stats — window sizes match SparkConfig.feature_windows default [10, 50, 100]
+        StructField("rolling_mean_10", FloatType(), nullable=True),
+        StructField("rolling_std_10", FloatType(), nullable=True),
+        StructField("rolling_min_10", FloatType(), nullable=True),
+        StructField("rolling_max_10", FloatType(), nullable=True),
+        StructField("rolling_mean_50", FloatType(), nullable=True),
+        StructField("rolling_std_50", FloatType(), nullable=True),
+        StructField("rolling_min_50", FloatType(), nullable=True),
+        StructField("rolling_max_50", FloatType(), nullable=True),
+        StructField("rolling_mean_100", FloatType(), nullable=True),
+        StructField("rolling_std_100", FloatType(), nullable=True),
+        StructField("rolling_min_100", FloatType(), nullable=True),
+        StructField("rolling_max_100", FloatType(), nullable=True),
+        StructField("rate_of_change", FloatType(), nullable=True),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Windowed LSTM input (written to data/processed/{mission}/train/ and test/)
 # ---------------------------------------------------------------------------
 # One row per sliding window. Consumed by PyTorch Dataset in Phase 4.
 
-WINDOW_SCHEMA = StructType([
-    StructField("window_id", LongType(), nullable=False),
-    StructField("channel_id", StringType(), nullable=False),
-    StructField("mission_id", StringType(), nullable=False),
-    StructField("segment_id", IntegerType(), nullable=False),
-    StructField("window_start_ts", TimestampType(), nullable=False),
-    StructField("window_end_ts", TimestampType(), nullable=False),
-    StructField("values", ArrayType(FloatType(), containsNull=False), nullable=False),
-    StructField("target", FloatType(), nullable=False),
-    StructField("is_anomaly", BooleanType(), nullable=False),
-])
+WINDOW_SCHEMA = StructType(
+    [
+        StructField("window_id", LongType(), nullable=False),
+        StructField("channel_id", StringType(), nullable=False),
+        StructField("mission_id", StringType(), nullable=False),
+        StructField("segment_id", IntegerType(), nullable=False),
+        StructField("window_start_ts", TimestampType(), nullable=False),
+        StructField("window_end_ts", TimestampType(), nullable=False),
+        StructField("values", ArrayType(FloatType(), containsNull=False), nullable=False),
+        StructField("target", FloatType(), nullable=False),
+        StructField("is_anomaly", BooleanType(), nullable=False),
+    ]
+)

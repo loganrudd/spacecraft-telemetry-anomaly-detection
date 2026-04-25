@@ -13,7 +13,6 @@ from spacecraft_telemetry.spark.io import (
     write_windows,
 )
 
-
 # ---------------------------------------------------------------------------
 # read_channel
 # ---------------------------------------------------------------------------
@@ -36,46 +35,34 @@ class TestReadChannel:
         df = read_channel(spark_session, sample_channel_parquet, "channel_1", "ESA-Mission1")
         assert isinstance(df.schema["telemetry_timestamp"].dataType, TimestampType)
 
-    def test_value_is_float_type(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_value_is_float_type(self, spark_session, sample_channel_parquet: Path) -> None:
         from pyspark.sql.types import FloatType
 
         df = read_channel(spark_session, sample_channel_parquet, "channel_1", "ESA-Mission1")
         assert isinstance(df.schema["value"].dataType, FloatType)
 
-    def test_channel_id_literal(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_channel_id_literal(self, spark_session, sample_channel_parquet: Path) -> None:
         df = read_channel(spark_session, sample_channel_parquet, "channel_1", "ESA-Mission1")
         distinct = [r["channel_id"] for r in df.select("channel_id").distinct().collect()]
         assert distinct == ["channel_1"]
 
-    def test_mission_id_literal(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_mission_id_literal(self, spark_session, sample_channel_parquet: Path) -> None:
         df = read_channel(spark_session, sample_channel_parquet, "channel_1", "ESA-Mission1")
         distinct = [r["mission_id"] for r in df.select("mission_id").distinct().collect()]
         assert distinct == ["ESA-Mission1"]
 
-    def test_no_nulls_in_sample_data(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_no_nulls_in_sample_data(self, spark_session, sample_channel_parquet: Path) -> None:
         from pyspark.sql import functions as F
 
         df = read_channel(spark_session, sample_channel_parquet, "channel_1", "ESA-Mission1")
         null_count = df.filter(F.col("value").isNull()).count()
         assert null_count == 0
 
-    def test_wrong_channel_id_raises(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_wrong_channel_id_raises(self, spark_session, sample_channel_parquet: Path) -> None:
         with pytest.raises(ValueError, match="channel_99"):
             read_channel(spark_session, sample_channel_parquet, "channel_99", "ESA-Mission1")
 
-    def test_timestamps_are_ordered(
-        self, spark_session, sample_channel_parquet: Path
-    ) -> None:
+    def test_timestamps_are_ordered(self, spark_session, sample_channel_parquet: Path) -> None:
         from pyspark.sql import functions as F
         from pyspark.sql.window import Window
 
@@ -86,7 +73,9 @@ class TestReadChannel:
         df_orig = df.withColumn("rn_orig", F.row_number().over(w_orig))
         df_ts = df.withColumn("rn_ts", F.row_number().over(w_ts))
         # Both orderings should give the same sequence of timestamps
-        orig_ts = [r[0] for r in df_orig.orderBy("rn_orig").select("telemetry_timestamp").collect()]
+        orig_ts = [
+            r[0] for r in df_orig.orderBy("rn_orig").select("telemetry_timestamp").collect()
+        ]
         ts_ts = [r[0] for r in df_ts.orderBy("rn_ts").select("telemetry_timestamp").collect()]
         assert orig_ts == ts_ts
 
@@ -133,9 +122,7 @@ class TestReadLabels:
         from pyspark.sql import functions as F
 
         df = read_labels(spark_session, labels_csv)
-        nulls = df.filter(
-            F.col("start_time").isNull() | F.col("end_time").isNull()
-        ).count()
+        nulls = df.filter(F.col("start_time").isNull() | F.col("end_time").isNull()).count()
         assert nulls == 0
 
 
@@ -145,17 +132,13 @@ class TestReadLabels:
 
 
 class TestWriteWindows:
-    def test_writes_parquet_files(
-        self, spark_session, sample_spark_df, tmp_path: Path
-    ) -> None:
+    def test_writes_parquet_files(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
         out = tmp_path / "windows"
         write_windows(sample_spark_df, out)
         result = spark_session.read.parquet(str(out))
         assert result.count() == 100
 
-    def test_partition_directories_created(
-        self, sample_spark_df, tmp_path: Path
-    ) -> None:
+    def test_partition_directories_created(self, sample_spark_df, tmp_path: Path) -> None:
         out = tmp_path / "windows"
         write_windows(sample_spark_df, out)
         assert (out / "mission_id=ESA-Mission1").is_dir()
@@ -170,9 +153,7 @@ class TestWriteWindows:
         result = spark_session.read.parquet(str(out))
         assert result.count() == 100
 
-    def test_schema_roundtrip(
-        self, spark_session, sample_spark_df, tmp_path: Path
-    ) -> None:
+    def test_schema_roundtrip(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
         out = tmp_path / "windows"
         write_windows(sample_spark_df, out)
         result = spark_session.read.parquet(str(out))
@@ -187,17 +168,13 @@ class TestWriteWindows:
 
 
 class TestWriteFeatures:
-    def test_writes_parquet_files(
-        self, spark_session, sample_spark_df, tmp_path: Path
-    ) -> None:
+    def test_writes_parquet_files(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
         out = tmp_path / "features"
         write_features(sample_spark_df, out)
         result = spark_session.read.parquet(str(out))
         assert result.count() == 100
 
-    def test_partition_directories_created(
-        self, sample_spark_df, tmp_path: Path
-    ) -> None:
+    def test_partition_directories_created(self, sample_spark_df, tmp_path: Path) -> None:
         out = tmp_path / "features"
         write_features(sample_spark_df, out)
         assert (out / "mission_id=ESA-Mission1").is_dir()

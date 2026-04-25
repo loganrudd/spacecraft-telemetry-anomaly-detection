@@ -27,6 +27,7 @@ def _java_major_version() -> int | None:
     except Exception:
         return None
 
+
 # ---------------------------------------------------------------------------
 # SparkSession — one per test process
 # ---------------------------------------------------------------------------
@@ -138,20 +139,22 @@ def labels_pd() -> pd.DataFrame:
     Segment 3: rows 70-74 (2000-01-01 01:45:00 → 01:51:00)
     """
     base = pd.Timestamp("2000-01-01")
-    return pd.DataFrame({
-        "ID": ["id_1", "id_1", "id_2"],
-        "Channel": ["channel_1", "channel_1", "channel_1"],
-        "StartTime": [
-            (base + pd.Timedelta(seconds=90 * 10)).isoformat() + "Z",
-            (base + pd.Timedelta(seconds=90 * 40)).isoformat() + "Z",
-            (base + pd.Timedelta(seconds=90 * 70)).isoformat() + "Z",
-        ],
-        "EndTime": [
-            (base + pd.Timedelta(seconds=90 * 14)).isoformat() + "Z",
-            (base + pd.Timedelta(seconds=90 * 44)).isoformat() + "Z",
-            (base + pd.Timedelta(seconds=90 * 74)).isoformat() + "Z",
-        ],
-    })
+    return pd.DataFrame(
+        {
+            "ID": ["id_1", "id_1", "id_2"],
+            "Channel": ["channel_1", "channel_1", "channel_1"],
+            "StartTime": [
+                (base + pd.Timedelta(seconds=90 * 10)).isoformat() + "Z",
+                (base + pd.Timedelta(seconds=90 * 40)).isoformat() + "Z",
+                (base + pd.Timedelta(seconds=90 * 70)).isoformat() + "Z",
+            ],
+            "EndTime": [
+                (base + pd.Timedelta(seconds=90 * 14)).isoformat() + "Z",
+                (base + pd.Timedelta(seconds=90 * 44)).isoformat() + "Z",
+                (base + pd.Timedelta(seconds=90 * 74)).isoformat() + "Z",
+            ],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +203,9 @@ def labels_csv(tmp_path: Path, labels_pd: pd.DataFrame) -> Path:
 
 
 @pytest.fixture()
-def pipeline_input_dir(tmp_path: Path, sample_channel_pd: pd.DataFrame, labels_pd: pd.DataFrame) -> Path:
+def pipeline_input_dir(
+    tmp_path: Path, sample_channel_pd: pd.DataFrame, labels_pd: pd.DataFrame
+) -> Path:
     """Build the directory structure expected by run_preprocessing.
 
     Layout:

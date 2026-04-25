@@ -16,8 +16,8 @@ FEATURE_DEFINITIONS — no hardcoded column lists elsewhere.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -52,6 +52,7 @@ def _rolling_mean(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
         if len(values) < n:
             return float("nan")
         return float(np.mean(values[-n:]))
+
     return _fn
 
 
@@ -60,6 +61,7 @@ def _rolling_std(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
         if len(values) < n:
             return float("nan")
         return float(np.std(values[-n:], ddof=1))
+
     return _fn
 
 
@@ -68,6 +70,7 @@ def _rolling_min(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
         if len(values) < n:
             return float("nan")
         return float(np.min(values[-n:]))
+
     return _fn
 
 
@@ -76,6 +79,7 @@ def _rolling_max(n: int) -> Callable[[np.ndarray, np.ndarray], float]:
         if len(values) < n:
             return float("nan")
         return float(np.max(values[-n:]))
+
     return _fn
 
 
@@ -162,8 +166,8 @@ def get_feature_by_name(name: str) -> FeatureDefinition:
     """
     try:
         return _BY_NAME[name]
-    except KeyError:
-        raise KeyError(f"Unknown feature {name!r}. Known: {list(_BY_NAME)}")
+    except KeyError as err:
+        raise KeyError(f"Unknown feature {name!r}. Known: {list(_BY_NAME)}") from err
 
 
 def compute_features_numpy(

@@ -43,8 +43,10 @@ def create_spark_session(config: SparkConfig, app_name: str = "spacecraft-teleme
         .master(master)
         .config("spark.driver.memory", config.driver_memory)
         # Silence noisy Hadoop ViewFS warning on macOS local mode
-        .config("spark.hadoop.fs.viewfs.overload.scheme.target.file.impl",
-                "org.apache.hadoop.fs.LocalFileSystem")
+        .config(
+            "spark.hadoop.fs.viewfs.overload.scheme.target.file.impl",
+            "org.apache.hadoop.fs.LocalFileSystem",
+        )
         # Keep UI disabled by default for CLI runs; enable via env var if needed
         .config("spark.ui.enabled", "false")
         # ANSI mode stays on (PySpark 4.x default) — strict types are correct

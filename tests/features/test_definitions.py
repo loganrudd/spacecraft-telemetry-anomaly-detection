@@ -28,9 +28,18 @@ class TestRegistry:
     def test_expected_feature_names_present(self) -> None:
         names = set(get_feature_names())
         expected = {
-            "rolling_mean_10", "rolling_std_10", "rolling_min_10", "rolling_max_10",
-            "rolling_mean_50", "rolling_std_50", "rolling_min_50", "rolling_max_50",
-            "rolling_mean_100", "rolling_std_100", "rolling_min_100", "rolling_max_100",
+            "rolling_mean_10",
+            "rolling_std_10",
+            "rolling_min_10",
+            "rolling_max_10",
+            "rolling_mean_50",
+            "rolling_std_50",
+            "rolling_min_50",
+            "rolling_max_50",
+            "rolling_mean_100",
+            "rolling_std_100",
+            "rolling_min_100",
+            "rolling_max_100",
             "rate_of_change",
         }
         assert expected == names

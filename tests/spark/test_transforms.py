@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # handle_nulls
 # ---------------------------------------------------------------------------
@@ -29,9 +28,7 @@ class TestHandleNulls:
         result = handle_nulls(nulls_spark_df)
         assert result.filter(F.col("value").isNull()).count() == 0
 
-    def test_row_count_preserved_when_no_leading_nulls(
-        self, nulls_spark_df
-    ) -> None:
+    def test_row_count_preserved_when_no_leading_nulls(self, nulls_spark_df) -> None:
         from spacecraft_telemetry.spark.transforms import handle_nulls
 
         # nulls_spark_df has nulls at positions [5,20,35,60,80] — none leading
@@ -50,7 +47,6 @@ class TestHandleNulls:
 
     def test_leading_nulls_are_dropped(self, spark_session, sample_channel_pd) -> None:
         import pandas as pd
-
         from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.transforms import handle_nulls
@@ -218,17 +214,18 @@ class TestNormalize:
 
     def test_constant_channel_no_nulls(self, spark_session) -> None:
         import pandas as pd
-
         from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.transforms import normalize
 
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
-            "value": [5.0] * 10,
-            "channel_id": ["const_ch"] * 10,
-            "mission_id": ["ESA-Mission1"] * 10,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
+                "value": [5.0] * 10,
+                "channel_id": ["const_ch"] * 10,
+                "mission_id": ["ESA-Mission1"] * 10,
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result, params = normalize(df)
         assert result.filter(F.col("value_normalized").isNull()).count() == 0
@@ -264,13 +261,15 @@ class TestAddRollingFeatures:
         import pandas as pd
 
         n = 110
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=n, freq="90s"),
-            "value_normalized": [float(i) for i in range(n)],
-            "channel_id": ["ch1"] * n,
-            "mission_id": ["m1"] * n,
-            "segment_id": [0] * n,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n, freq="90s"),
+                "value_normalized": [float(i) for i in range(n)],
+                "channel_id": ["ch1"] * n,
+                "mission_id": ["m1"] * n,
+                "segment_id": [0] * n,
+            }
+        )
         return spark_session.createDataFrame(pdf)
 
     # ------------------------------------------------------------------
@@ -343,10 +342,7 @@ class TestAddRollingFeatures:
     # Null behaviour for short buffers
     # ------------------------------------------------------------------
 
-    def test_first_n_minus_1_rows_null_for_rolling_mean_10(
-        self, normalized_df
-    ) -> None:
-        from pyspark.sql import functions as F
+    def test_first_n_minus_1_rows_null_for_rolling_mean_10(self, normalized_df) -> None:
 
         from spacecraft_telemetry.spark.transforms import add_rolling_features
 
@@ -366,7 +362,6 @@ class TestAddRollingFeatures:
         assert first["rate_of_change"] is None
 
     def test_rate_of_change_known_value(self, normalized_df) -> None:
-        from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.transforms import add_rolling_features
 
@@ -379,9 +374,7 @@ class TestAddRollingFeatures:
     # Segment boundary — windows must not cross gap boundaries
     # ------------------------------------------------------------------
 
-    def test_windows_do_not_cross_segment_boundaries(
-        self, spark_session
-    ) -> None:
+    def test_windows_do_not_cross_segment_boundaries(self, spark_session) -> None:
         import pandas as pd
         from pyspark.sql import functions as F
 
@@ -391,13 +384,16 @@ class TestAddRollingFeatures:
         # If windowing respected boundaries, rolling_mean_10 for the last row of
         # segment 1 should be mean([100..109]) = 104.5, not a mixture of both.
         n = 10
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
-            "value_normalized": [float(i) for i in range(n)] + [float(100 + i) for i in range(n)],
-            "channel_id": ["ch1"] * (n * 2),
-            "mission_id": ["m1"] * (n * 2),
-            "segment_id": [0] * n + [1] * n,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
+                "value_normalized": [float(i) for i in range(n)]
+                + [float(100 + i) for i in range(n)],
+                "channel_id": ["ch1"] * (n * 2),
+                "mission_id": ["m1"] * (n * 2),
+                "segment_id": [0] * n + [1] * n,
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result = add_rolling_features(df)
 
@@ -411,11 +407,7 @@ class TestAddRollingFeatures:
         assert last_seg1["rolling_mean_10"] == pytest.approx(104.5, rel=1e-4)
 
         # First row of segment 1 — insufficient buffer within the segment → null.
-        first_seg1 = (
-            result.filter(F.col("segment_id") == 1)
-            .orderBy("telemetry_timestamp")
-            .first()
-        )
+        first_seg1 = result.filter(F.col("segment_id") == 1).orderBy("telemetry_timestamp").first()
         assert first_seg1 is not None
         assert first_seg1["rolling_mean_10"] is None
 
@@ -455,9 +447,9 @@ class TestAddRollingFeatures:
             numpy_val = expected[name]
             assert not math.isnan(numpy_val), f"{name} should not be NaN with 110-row buffer"
             assert spark_val is not None, f"{name} should not be null for last row"
-            assert float(spark_val) == pytest.approx(
-                numpy_val, rel=1e-3
-            ), f"{name}: spark={spark_val}, numpy={numpy_val}"
+            assert float(spark_val) == pytest.approx(numpy_val, rel=1e-3), (
+                f"{name}: spark={spark_val}, numpy={numpy_val}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -477,13 +469,15 @@ class TestCreateWindows:
         """10 rows, single segment, value_normalized = [0.0 .. 9.0]."""
         import pandas as pd
 
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
-            "value_normalized": [float(i) for i in range(10)],
-            "channel_id": ["ch1"] * 10,
-            "mission_id": ["m1"] * 10,
-            "segment_id": [0] * 10,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
+                "value_normalized": [float(i) for i in range(10)],
+                "channel_id": ["ch1"] * 10,
+                "mission_id": ["m1"] * 10,
+                "segment_id": [0] * 10,
+            }
+        )
         return spark_session.createDataFrame(pdf)
 
     # ------------------------------------------------------------------
@@ -503,13 +497,15 @@ class TestCreateWindows:
         from spacecraft_telemetry.spark.transforms import create_windows
 
         # 2 rows < window_size=3 + prediction_horizon=1 → 0 windows
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=2, freq="90s"),
-            "value_normalized": [1.0, 2.0],
-            "channel_id": ["ch1"] * 2,
-            "mission_id": ["m1"] * 2,
-            "segment_id": [0] * 2,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=2, freq="90s"),
+                "value_normalized": [1.0, 2.0],
+                "channel_id": ["ch1"] * 2,
+                "mission_id": ["m1"] * 2,
+                "segment_id": [0] * 2,
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result = create_windows(df, window_size=3, prediction_horizon=1)
         assert result.count() == 0
@@ -520,13 +516,15 @@ class TestCreateWindows:
         from spacecraft_telemetry.spark.transforms import create_windows
 
         # N = window_size + prediction_horizon = 3 + 1 = 4 → exactly 1 window
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
-            "value_normalized": [0.0, 1.0, 2.0, 3.0],
-            "channel_id": ["ch1"] * 4,
-            "mission_id": ["m1"] * 4,
-            "segment_id": [0] * 4,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
+                "value_normalized": [0.0, 1.0, 2.0, 3.0],
+                "channel_id": ["ch1"] * 4,
+                "mission_id": ["m1"] * 4,
+                "segment_id": [0] * 4,
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result = create_windows(df, window_size=3, prediction_horizon=1)
         assert result.count() == 1
@@ -628,20 +626,22 @@ class TestCreateWindows:
 
     def test_windows_do_not_cross_segment_boundaries(self, spark_session) -> None:
         import pandas as pd
-
         from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.transforms import create_windows
 
         # Two segments: segment 0 values [0..9], segment 1 values [100..109]
         n = 10
-        pdf = pd.DataFrame({
-            "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
-            "value_normalized": [float(i) for i in range(n)] + [float(100 + i) for i in range(n)],
-            "channel_id": ["ch1"] * (n * 2),
-            "mission_id": ["m1"] * (n * 2),
-            "segment_id": [0] * n + [1] * n,
-        })
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
+                "value_normalized": [float(i) for i in range(n)]
+                + [float(100 + i) for i in range(n)],
+                "channel_id": ["ch1"] * (n * 2),
+                "mission_id": ["m1"] * (n * 2),
+                "segment_id": [0] * n + [1] * n,
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result = create_windows(df, window_size=3, prediction_horizon=1)
 
@@ -649,11 +649,15 @@ class TestCreateWindows:
 
         # Every value in segment 0 windows must be < 100
         for row in result.filter(F.col("segment_id") == 0).collect():
-            assert all(v < 100 for v in row["values"]), f"Cross-segment leak in seg 0: {row['values']}"
+            assert all(v < 100 for v in row["values"]), (
+                f"Cross-segment leak in seg 0: {row['values']}"
+            )
 
         # Every value in segment 1 windows must be >= 100
         for row in result.filter(F.col("segment_id") == 1).collect():
-            assert all(v >= 100 for v in row["values"]), f"Cross-segment leak in seg 1: {row['values']}"
+            assert all(v >= 100 for v in row["values"]), (
+                f"Cross-segment leak in seg 1: {row['values']}"
+            )
 
     # ------------------------------------------------------------------
     # Output schema
@@ -664,8 +668,14 @@ class TestCreateWindows:
 
         result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
         expected = {
-            "window_id", "channel_id", "mission_id", "segment_id",
-            "window_start_ts", "window_end_ts", "values", "target",
+            "window_id",
+            "channel_id",
+            "mission_id",
+            "segment_id",
+            "window_start_ts",
+            "window_end_ts",
+            "values",
+            "target",
         }
         assert set(result.columns) == expected
 
@@ -756,25 +766,27 @@ class TestJoinAnomalyLabels:
         #   seg 1: rows 10-14 → base+900s .. base+1260s
         #   seg 2: rows 40-44 → base+3600s .. base+3960s
         #   seg 3: rows 70-74 → base+6300s .. base+6660s
-        pdf = pd.DataFrame({
-            "window_id": [0, 1, 2, 3],
-            "channel_id": ["channel_1"] * 4,
-            "mission_id": ["ESA-Mission1"] * 4,
-            "segment_id": [0] * 4,
-            "window_start_ts": [
-                base + pd.Timedelta(seconds=900),   # overlaps label seg 1
-                base + pd.Timedelta(seconds=3600),  # overlaps label seg 2
-                base + pd.Timedelta(seconds=6300),  # overlaps label seg 3
-                base + pd.Timedelta(seconds=2000),  # nominal (between labels)
-            ],
-            "window_end_ts": [
-                base + pd.Timedelta(seconds=1260),
-                base + pd.Timedelta(seconds=3960),
-                base + pd.Timedelta(seconds=6660),
-                base + pd.Timedelta(seconds=2270),
-            ],
-            "target": [1.0] * 4,
-        })
+        pdf = pd.DataFrame(
+            {
+                "window_id": [0, 1, 2, 3],
+                "channel_id": ["channel_1"] * 4,
+                "mission_id": ["ESA-Mission1"] * 4,
+                "segment_id": [0] * 4,
+                "window_start_ts": [
+                    base + pd.Timedelta(seconds=900),  # overlaps label seg 1
+                    base + pd.Timedelta(seconds=3600),  # overlaps label seg 2
+                    base + pd.Timedelta(seconds=6300),  # overlaps label seg 3
+                    base + pd.Timedelta(seconds=2000),  # nominal (between labels)
+                ],
+                "window_end_ts": [
+                    base + pd.Timedelta(seconds=1260),
+                    base + pd.Timedelta(seconds=3960),
+                    base + pd.Timedelta(seconds=6660),
+                    base + pd.Timedelta(seconds=2270),
+                ],
+                "target": [1.0] * 4,
+            }
+        )
         return spark_session.createDataFrame(pdf)
 
     @pytest.fixture()
@@ -783,20 +795,22 @@ class TestJoinAnomalyLabels:
         import pandas as pd
 
         base = pd.Timestamp("2000-01-01")
-        pdf = pd.DataFrame({
-            "anomaly_id": ["id_1", "id_1", "id_2"],
-            "channel_id": ["channel_1", "channel_1", "channel_1"],
-            "start_time": [
-                base + pd.Timedelta(seconds=90 * 10),
-                base + pd.Timedelta(seconds=90 * 40),
-                base + pd.Timedelta(seconds=90 * 70),
-            ],
-            "end_time": [
-                base + pd.Timedelta(seconds=90 * 14),
-                base + pd.Timedelta(seconds=90 * 44),
-                base + pd.Timedelta(seconds=90 * 74),
-            ],
-        })
+        pdf = pd.DataFrame(
+            {
+                "anomaly_id": ["id_1", "id_1", "id_2"],
+                "channel_id": ["channel_1", "channel_1", "channel_1"],
+                "start_time": [
+                    base + pd.Timedelta(seconds=90 * 10),
+                    base + pd.Timedelta(seconds=90 * 40),
+                    base + pd.Timedelta(seconds=90 * 70),
+                ],
+                "end_time": [
+                    base + pd.Timedelta(seconds=90 * 14),
+                    base + pd.Timedelta(seconds=90 * 44),
+                    base + pd.Timedelta(seconds=90 * 74),
+                ],
+            }
+        )
         return spark_session.createDataFrame(pdf)
 
     def test_is_anomaly_column_added(self, windows_df, labels_spark_df) -> None:
@@ -848,12 +862,14 @@ class TestJoinAnomalyLabels:
 
         empty_labels = spark_session.createDataFrame(
             [],
-            schema=StructType([
-                StructField("anomaly_id", StringType()),
-                StructField("channel_id", StringType()),
-                StructField("start_time", TimestampType()),
-                StructField("end_time", TimestampType()),
-            ]),
+            schema=StructType(
+                [
+                    StructField("anomaly_id", StringType()),
+                    StructField("channel_id", StringType()),
+                    StructField("start_time", TimestampType()),
+                    StructField("end_time", TimestampType()),
+                ]
+            ),
         )
         result = join_anomaly_labels(windows_df, empty_labels)
         assert result.filter(F.col("is_anomaly")).count() == 0
@@ -875,11 +891,13 @@ class TestExcludeAnomaliesFromTrain:
         """5 rows: 2 anomalies (ids 0, 2) and 3 nominal (ids 1, 3, 4)."""
         import pandas as pd
 
-        pdf = pd.DataFrame({
-            "window_id": list(range(5)),
-            "is_anomaly": [True, False, True, False, False],
-            "value_normalized": [float(i) for i in range(5)],
-        })
+        pdf = pd.DataFrame(
+            {
+                "window_id": list(range(5)),
+                "is_anomaly": [True, False, True, False, False],
+                "value_normalized": [float(i) for i in range(5)],
+            }
+        )
         return spark_session.createDataFrame(pdf)
 
     def test_anomaly_rows_removed(self, flagged_df) -> None:
@@ -909,11 +927,13 @@ class TestExcludeAnomaliesFromTrain:
 
         from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
 
-        pdf = pd.DataFrame({
-            "window_id": list(range(3)),
-            "is_anomaly": [False, False, False],
-            "value_normalized": [1.0, 2.0, 3.0],
-        })
+        pdf = pd.DataFrame(
+            {
+                "window_id": list(range(3)),
+                "is_anomaly": [False, False, False],
+                "value_normalized": [1.0, 2.0, 3.0],
+            }
+        )
         df = spark_session.createDataFrame(pdf)
         result = exclude_anomalies_from_train(df)
         assert result.count() == 3

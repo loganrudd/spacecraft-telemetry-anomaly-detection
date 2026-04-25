@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture: Settings wired to tmp_path
 # ---------------------------------------------------------------------------
@@ -136,10 +135,7 @@ class TestOutputDirectories:
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         partition = (
-            _output(settings)
-            / "features"
-            / "mission_id=ESA-Mission1"
-            / "channel_id=channel_1"
+            _output(settings) / "features" / "mission_id=ESA-Mission1" / "channel_id=channel_1"
         )
         assert partition.is_dir()
 
@@ -148,10 +144,7 @@ class TestOutputDirectories:
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         partition = (
-            _output(settings)
-            / "train"
-            / "mission_id=ESA-Mission1"
-            / "channel_id=channel_1"
+            _output(settings) / "train" / "mission_id=ESA-Mission1" / "channel_id=channel_1"
         )
         assert partition.is_dir()
 
@@ -159,12 +152,7 @@ class TestOutputDirectories:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
-        partition = (
-            _output(settings)
-            / "test"
-            / "mission_id=ESA-Mission1"
-            / "channel_id=channel_1"
-        )
+        partition = _output(settings) / "test" / "mission_id=ESA-Mission1" / "channel_id=channel_1"
         assert partition.is_dir()
 
 
@@ -179,7 +167,12 @@ class TestOutputSchemas:
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         df = spark_session.read.parquet(str(_output(settings) / "features"))
-        for col in ("telemetry_timestamp", "value_normalized", "rolling_mean_10", "rate_of_change"):
+        for col in (
+            "telemetry_timestamp",
+            "value_normalized",
+            "rolling_mean_10",
+            "rate_of_change",
+        ):
             assert col in df.columns, f"Missing feature column: {col}"
 
     def test_train_has_is_anomaly_column(self, spark_session, settings) -> None:
@@ -273,7 +266,7 @@ class TestIdempotency:
 
 class TestErrorHandling:
     def test_missing_channel_dir_raises(self, spark_session, settings, tmp_path) -> None:
-        from spacecraft_telemetry.core.config import DataConfig, Settings
+        from spacecraft_telemetry.core.config import DataConfig
 
         bad_settings = settings.model_copy(
             update={"data": DataConfig(sample_data_dir=tmp_path / "nonexistent")}
@@ -289,12 +282,13 @@ class TestErrorHandling:
         """Pipeline completes when labels.csv is absent; all windows marked nominal."""
         from pyspark.sql import functions as F
 
-        from spacecraft_telemetry.core.config import DataConfig, Settings
+        from spacecraft_telemetry.core.config import DataConfig
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         # Build an input dir without a labels.csv
         no_labels_dir = pipeline_input_dir.parent / "input_no_labels"
         import shutil
+
         shutil.copytree(pipeline_input_dir, no_labels_dir)
         labels_file = no_labels_dir / "ESA-Mission1" / "labels.csv"
         if labels_file.exists():

@@ -171,9 +171,7 @@ class ZenodoDownloader:
                         for chunk in iter(lambda: fh.read(_CHUNK_SIZE), b""):
                             hasher.update(chunk)
 
-                headers: dict[str, str] = (
-                    {"Range": f"bytes={resume_pos}-"} if resume_pos else {}
-                )
+                headers: dict[str, str] = {"Range": f"bytes={resume_pos}-"} if resume_pos else {}
 
                 try:
                     with self._stream_with_backoff(file.url, extra_headers=headers) as response:
