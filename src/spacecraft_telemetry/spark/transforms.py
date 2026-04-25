@@ -144,6 +144,10 @@ def normalize(
     value_normalized = (value - mean) / std. Channels with std=0 (constant
     signal) are normalized to 0.0 rather than NaN.
 
+    The formula matches features.definitions.normalize_value() exactly — that
+    function is the reference implementation tested for train-serve equivalence.
+    Phase 9 (FastAPI) calls normalize_value() directly on incoming telemetry.
+
     The returned params dict must be persisted by the pipeline (Step 8) as
     normalization_params.json — these values are required at inference time
     (Phase 9) to apply the identical transform to incoming telemetry.

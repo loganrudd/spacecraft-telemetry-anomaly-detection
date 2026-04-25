@@ -157,6 +157,31 @@ _BY_NAME: dict[str, FeatureDefinition] = {f.name: f for f in FEATURE_DEFINITIONS
 # ---------------------------------------------------------------------------
 
 
+def normalize_value(x: float, mean: float, std: float) -> float:
+    """Z-score normalization reference implementation.
+
+    This is the canonical formula used by both the Spark preprocessing pipeline
+    (offline, via transforms.normalize()) and the FastAPI serving layer (online,
+    Phase 9) to normalize raw telemetry values at inference time.
+
+    Keeping the formula here — rather than inlined in transforms.py or the serving
+    code — prevents train-serve skew: any drift in the formula is caught by the
+    Spark-vs-NumPy equivalence test in tests/spark/test_transforms.py.
+
+    Args:
+        x: Raw (unnormalized) telemetry value.
+        mean: Per-channel mean computed from training data.
+        std: Per-channel sample standard deviation (ddof=1) from training data.
+
+    Returns:
+        (x - mean) / std. Returns 0.0 for constant channels (std == 0) to match
+        Spark's CASE WHEN _std = 0 THEN 0.0 behaviour in transforms.normalize().
+    """
+    if std == 0.0:
+        return 0.0
+    return (x - mean) / std
+
+
 def get_feature_names() -> list[str]:
     """Return all feature names in registry order."""
     return [f.name for f in FEATURE_DEFINITIONS]

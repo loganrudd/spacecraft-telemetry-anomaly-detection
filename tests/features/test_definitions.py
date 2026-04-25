@@ -13,6 +13,7 @@ from spacecraft_telemetry.features.definitions import (
     compute_features_numpy,
     get_feature_by_name,
     get_feature_names,
+    normalize_value,
 )
 
 # ---------------------------------------------------------------------------
@@ -189,6 +190,39 @@ class TestRateOfChange:
         ts = np.array([float(i) for i in range(98)] + [98.0, 99.0])
         fd = get_feature_by_name("rate_of_change")
         assert fd.compute_numpy(values, ts) == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# normalize_value
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeValue:
+    def test_basic_z_score(self) -> None:
+        # (5.0 - 3.0) / 2.0 == 1.0
+        assert normalize_value(5.0, mean=3.0, std=2.0) == pytest.approx(1.0)
+
+    def test_negative_result(self) -> None:
+        assert normalize_value(1.0, mean=3.0, std=2.0) == pytest.approx(-1.0)
+
+    def test_zero_std_returns_zero(self) -> None:
+        # Constant channel — std=0 must return 0.0, not NaN/inf.
+        assert normalize_value(42.0, mean=42.0, std=0.0) == 0.0
+
+    def test_zero_std_non_constant_still_zero(self) -> None:
+        # Even if x != mean, std=0 returns 0.0 (matches Spark CASE WHEN _std=0 THEN 0.0).
+        assert normalize_value(99.0, mean=0.0, std=0.0) == 0.0
+
+    def test_x_equals_mean_returns_zero(self) -> None:
+        assert normalize_value(7.0, mean=7.0, std=3.0) == pytest.approx(0.0)
+
+    def test_known_values(self) -> None:
+        values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        mean = float(np.mean(values))
+        std = float(np.std(values, ddof=1))
+        for x in values:
+            expected = (x - mean) / std
+            assert normalize_value(x, mean=mean, std=std) == pytest.approx(expected, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

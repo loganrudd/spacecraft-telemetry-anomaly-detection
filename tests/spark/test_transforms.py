@@ -237,6 +237,62 @@ class TestNormalize:
         with pytest.raises(ValueError, match="min-max"):
             normalize(sample_spark_df, method="min-max")
 
+    def test_spark_matches_normalize_value(self, spark_session) -> None:
+        """Spark normalize() output must match the normalize_value() reference impl row-by-row."""
+        import pandas as pd
+
+        from spacecraft_telemetry.features.definitions import normalize_value
+        from spacecraft_telemetry.spark.transforms import normalize
+
+        raw_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
+                "value": raw_values,
+                "channel_id": ["ch_test"] * 10,
+                "mission_id": ["ESA-Mission1"] * 10,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result, params = normalize(df)
+
+        mean = params["ch_test"]["mean"]
+        std = params["ch_test"]["std"]
+
+        rows = result.orderBy("telemetry_timestamp").collect()
+        for row, x in zip(rows, raw_values, strict=True):
+            expected = normalize_value(x, mean=mean, std=std)
+            assert float(row["value_normalized"]) == pytest.approx(expected, rel=1e-5), (
+                f"value={x}: spark={row['value_normalized']}, normalize_value={expected}"
+            )
+
+    def test_constant_channel_normalize_value_matches_spark(self, spark_session) -> None:
+        """std=0 edge case: both Spark and normalize_value must return 0.0."""
+        import pandas as pd
+
+        from spacecraft_telemetry.features.definitions import normalize_value
+        from spacecraft_telemetry.spark.transforms import normalize
+
+        pdf = pd.DataFrame(
+            {
+                "telemetry_timestamp": pd.date_range("2000-01-01", periods=5, freq="90s"),
+                "value": [42.0] * 5,
+                "channel_id": ["const_ch"] * 5,
+                "mission_id": ["ESA-Mission1"] * 5,
+            }
+        )
+        df = spark_session.createDataFrame(pdf)
+        result, params = normalize(df)
+
+        std = params["const_ch"]["std"]
+        mean = params["const_ch"]["mean"]
+        assert std == 0.0
+
+        for row in result.collect():
+            spark_val = float(row["value_normalized"])
+            ref_val = normalize_value(row["value"], mean=mean, std=std)
+            assert spark_val == ref_val == 0.0
+
 
 # ---------------------------------------------------------------------------
 # add_rolling_features

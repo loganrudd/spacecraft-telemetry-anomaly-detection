@@ -101,7 +101,10 @@ def run_preprocessing(
             shutil.rmtree(out_dir)
 
     normalization_params: dict[str, dict[str, float]] = {}
+    windows_per_channel: dict[str, int] = {}
     total_rows_in = 0
+    total_train_windows = 0
+    total_test_windows = 0
 
     for channel_path in channel_paths:
         channel_id = channel_path.stem
@@ -112,7 +115,6 @@ def run_preprocessing(
         cleaned = handle_nulls(raw_df)
         gapped = detect_gaps(cleaned, gap_multiplier=cfg.gap_multiplier)
         normalized, params = normalize(gapped, method=cfg.normalization)
-        normalization_params.update(params)
 
         # Cache the normalized result — both branches build from here.
         # count() forces materialisation into the cache so subsequent reads are fast.
@@ -151,36 +153,60 @@ def run_preprocessing(
         # Telemanom trains on nominal data only.
         clean_train = exclude_anomalies_from_train(train_w)
 
+        # Count per channel to track data quality and filter normalization params.
+        train_count = clean_train.count()
+        test_count = test_w.count()
+        windows_per_channel[channel_id] = train_count + test_count
+        total_train_windows += train_count
+        total_test_windows += test_count
+
+        if train_count == 0:
+            # Channel has no nominal training windows — no model will be trained.
+            # Omit from normalization_params so Phase 9 ignores this channel.
+            log.warning(
+                "pipeline.channel.no_train_windows",
+                channel_id=channel_id,
+                mission=mission,
+                test_windows=test_count,
+            )
+        else:
+            normalization_params.update(params)
+
         write_windows(clean_train, train_out, mode="append")
         write_windows(test_w, test_out, mode="append")
 
         normalized.unpersist()
-        log.info("pipeline.channel.done", channel_id=channel_id, rows=n_rows)
+        log.info(
+            "pipeline.channel.done",
+            channel_id=channel_id,
+            rows=n_rows,
+            train_windows=train_count,
+            test_windows=test_count,
+        )
 
     if labels_df is not None:
         labels_df.unpersist()
 
     # Persist normalization params — required at inference time (Phase 9) to apply
-    # the identical z-score transform to incoming telemetry.
+    # the identical z-score transform to incoming telemetry. Only channels that
+    # produced training windows are included (others have no trained model).
     params_path = output_dir / mission / "normalization_params.json"
     params_path.parent.mkdir(parents=True, exist_ok=True)
     params_path.write_text(json.dumps(normalization_params, indent=2))
 
-    # Count final outputs by reading from the written Parquets (one scan each).
-    def _count_parquet(path: Path) -> int:
-        return spark.read.parquet(str(path)).count() if path.exists() else 0
-
-    feature_rows_out = _count_parquet(features_out)
-    train_windows = _count_parquet(train_out)
-    test_windows = _count_parquet(test_out)
+    log.info(
+        "pipeline.windows_per_channel",
+        mission=mission,
+        windows_per_channel=windows_per_channel,
+    )
 
     summary: dict[str, int] = {
         "channels_processed": len(channel_paths),
         "rows_in": total_rows_in,
-        "windows_out": train_windows + test_windows,
-        "feature_rows_out": feature_rows_out,
-        "train_windows": train_windows,
-        "test_windows": test_windows,
+        "windows_out": total_train_windows + total_test_windows,
+        "feature_rows_out": total_rows_in,  # add_rolling_features preserves row count
+        "train_windows": total_train_windows,
+        "test_windows": total_test_windows,
     }
     log.info("pipeline.complete", mission=mission, **summary)
     return summary
