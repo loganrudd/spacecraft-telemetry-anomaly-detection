@@ -56,6 +56,9 @@ def create_spark_session(
         )
         # Keep UI disabled by default for CLI runs; enable via env var if needed
         .config("spark.ui.enabled", "false")
+        # Reduce default 200 shuffle partitions — local mode with 2 cores doesn't need them
+        # and 200 * n_channels produces thousands of tiny output files locally.
+        .config("spark.sql.shuffle.partitions", "8")
         # ANSI mode stays on (PySpark 4.x default) — strict types are correct
         .getOrCreate()
     )
@@ -71,5 +74,5 @@ def stop_spark_session(session) -> None:  # type: ignore[no-untyped-def]
     try:
         session.stop()
         log.info("spark_session_stopped")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("spark_session_stop_failed", exc=str(exc))

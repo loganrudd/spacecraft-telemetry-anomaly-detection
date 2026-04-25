@@ -7,6 +7,8 @@ Composable and stateless — no SparkSession dependency.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, FloatType
@@ -30,7 +32,9 @@ _ROLLING_AGG = {
 }
 
 
-def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
+def handle_nulls(
+    df: DataFrame, strategy: Literal["forward_fill"] = "forward_fill"
+) -> DataFrame:
     """Forward-fill null values within each channel, dropping any leading nulls.
 
     Nulls are filled using the last non-null value in timestamp order within the
@@ -43,18 +47,10 @@ def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
 
     Returns:
         DataFrame with no null values in the 'value' column.
-
-    Raises:
-        ValueError: If strategy is not "forward_fill".
     """
-    if strategy != "forward_fill":
-        raise ValueError(
-            f"Unsupported null-handling strategy {strategy!r}. Only 'forward_fill' is supported."
-        )
-
-    null_count = df.filter(F.col("value").isNull()).count()
-    if null_count == 0:
-        log.info("handle_nulls", null_count=0, rows_dropped=0)
+    # Cheap check: stop at the first null row rather than counting all of them.
+    if df.filter(F.col("value").isNull()).rdd.isEmpty():
+        log.info("handle_nulls.skipped", strategy=strategy)
         return df
 
     w = (
@@ -63,16 +59,13 @@ def handle_nulls(df: DataFrame, strategy: str = "forward_fill") -> DataFrame:
         .rowsBetween(Window.unboundedPreceding, 0)
     )
     df = df.withColumn("value", F.last("value", ignorenulls=True).over(w))
-
-    rows_before = df.count()
     df = df.filter(F.col("value").isNotNull())
-    rows_dropped = rows_before - df.count()
 
-    log.info(
-        "handle_nulls",
-        nulls_filled=null_count - rows_dropped,
-        rows_dropped=rows_dropped,
-    )
+    if df.rdd.isEmpty():
+        log.warning("handle_nulls.all_rows_dropped", strategy=strategy)
+    else:
+        log.info("handle_nulls", strategy=strategy)
+
     return df
 
 
@@ -128,15 +121,13 @@ def detect_gaps(df: DataFrame, gap_multiplier: float = 3.0) -> DataFrame:
         F.sum(F.col("is_gap").cast("int")).over(w_cumsum).cast("int"),
     )
 
-    gap_count = df.filter(F.col("is_gap")).count()
-    log.info("detect_gaps", gap_count=gap_count, gap_multiplier=gap_multiplier)
-
+    log.info("detect_gaps", gap_multiplier=gap_multiplier)
     return df.drop("_prev_ts", "_interval_s", "_median_interval")
 
 
 def normalize(
     df: DataFrame,
-    method: str = "z-score",
+    method: Literal["z-score"] = "z-score",
 ) -> tuple[DataFrame, dict[str, dict[str, float]]]:
     """Add a value_normalized column using per-channel z-score normalization.
 
@@ -154,19 +145,11 @@ def normalize(
 
     Args:
         df: DataFrame with 'value' and 'channel_id' columns.
-        method: Currently only "z-score" is supported.
+        method: Normalization method — currently only "z-score" is supported.
 
     Returns:
         (normalized_df, params) where params = {channel_id: {"mean": ..., "std": ...}}.
-
-    Raises:
-        ValueError: If method is not "z-score".
     """
-    if method != "z-score":
-        raise ValueError(
-            f"Unsupported normalization method {method!r}. Only 'z-score' is supported."
-        )
-
     stats_df = df.groupBy("channel_id").agg(
         F.mean("value").alias("_mean"),
         F.stddev("value").alias("_std"),

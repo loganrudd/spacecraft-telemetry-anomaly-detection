@@ -14,14 +14,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
-
-_VALID_NORMALIZATIONS = ("z-score", "min-max")
 
 # Repo root — used to locate configs/ in local dev.
 # Override with SPACECRAFT_CONFIG_DIR for non-standard layouts.
@@ -58,7 +56,7 @@ class SparkConfig(BaseModel):
     window_size: int = 250
     prediction_horizon: int = 1
     train_fraction: float = 0.8
-    normalization: str = "z-score"
+    normalization: Literal["z-score"] = "z-score"
     gap_multiplier: float = 3.0
     feature_windows: list[int] = [10, 50, 100]
 
@@ -67,13 +65,6 @@ class SparkConfig(BaseModel):
     def train_fraction_in_range(cls, v: float) -> float:
         if not 0 < v < 1.0:
             raise ValueError(f"train_fraction must be in (0, 1), got {v}")
-        return v
-
-    @field_validator("normalization")
-    @classmethod
-    def valid_normalization(cls, v: str) -> str:
-        if v not in _VALID_NORMALIZATIONS:
-            raise ValueError(f"normalization must be one of {_VALID_NORMALIZATIONS}, got {v!r}")
         return v
 
     @field_validator("window_size", "num_cores", "prediction_horizon")

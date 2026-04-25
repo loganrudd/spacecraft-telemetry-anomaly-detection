@@ -128,9 +128,9 @@ class TestSparkConfig:
         with pytest.raises(ValueError, match="normalization"):
             SparkConfig(normalization="l2")
 
-    def test_min_max_normalization_valid(self) -> None:
-        cfg = SparkConfig(normalization="min-max")
-        assert cfg.normalization == "min-max"
+    def test_min_max_normalization_rejected(self) -> None:
+        with pytest.raises((ValueError, Exception)):
+            SparkConfig(normalization="min-max")  # type: ignore[arg-type]
 
     def test_window_size_zero_invalid(self) -> None:
         with pytest.raises(ValueError, match="must be >= 1"):
