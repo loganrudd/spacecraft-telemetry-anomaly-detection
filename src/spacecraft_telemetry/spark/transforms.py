@@ -48,6 +48,10 @@ def handle_nulls(
     Returns:
         DataFrame with no null values in the 'value' column.
     """
+    if strategy != "forward_fill":  # type: ignore[comparison-overlap]
+        raise ValueError(
+            f"Unsupported null-handling strategy {strategy!r}. Only 'forward_fill' is supported."
+        )
     # Cheap check: stop at the first null row rather than counting all of them.
     if df.filter(F.col("value").isNull()).rdd.isEmpty():
         log.info("handle_nulls.skipped", strategy=strategy)
@@ -150,6 +154,10 @@ def normalize(
     Returns:
         (normalized_df, params) where params = {channel_id: {"mean": ..., "std": ...}}.
     """
+    if method != "z-score":  # type: ignore[comparison-overlap]
+        raise ValueError(
+            f"Unsupported normalization method {method!r}. Only 'z-score' is supported."
+        )
     stats_df = df.groupBy("channel_id").agg(
         F.mean("value").alias("_mean"),
         F.stddev("value").alias("_std"),

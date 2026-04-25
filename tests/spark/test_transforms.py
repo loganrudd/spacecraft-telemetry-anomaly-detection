@@ -1034,6 +1034,7 @@ class TestHandleNullsValues:
         If the fill were backward the null would become 3.0.
         """
         import pandas as pd
+        from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.transforms import handle_nulls
 
@@ -1046,6 +1047,8 @@ class TestHandleNullsValues:
             }
         )
         df = spark_session.createDataFrame(pdf)
+        # createDataFrame maps Python None → IEEE 754 NaN, not Spark null — normalise.
+        df = df.withColumn("value", F.when(F.isnan("value"), None).otherwise(F.col("value")))
         result = handle_nulls(df)
         rows = result.orderBy("telemetry_timestamp").collect()
         assert float(rows[1]["value"]) == pytest.approx(1.0, abs=1e-5), (
@@ -1054,19 +1057,32 @@ class TestHandleNullsValues:
 
     def test_all_null_returns_empty(self, spark_session) -> None:
         """Q3 runtime check: a channel with all nulls should produce zero rows."""
-        import pandas as pd
+        from pyspark.sql import Row
+        from pyspark.sql.types import FloatType, StringType, StructField, StructType, TimestampType
 
         from spacecraft_telemetry.spark.transforms import handle_nulls
 
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
-                "value": [None, None, None, None],
-                "channel_id": ["ch1"] * 4,
-                "mission_id": ["m1"] * 4,
-            }
+        import datetime
+
+        schema = StructType(
+            [
+                StructField("telemetry_timestamp", TimestampType(), nullable=False),
+                StructField("value", FloatType(), nullable=True),
+                StructField("channel_id", StringType(), nullable=False),
+                StructField("mission_id", StringType(), nullable=False),
+            ]
         )
-        df = spark_session.createDataFrame(pdf)
+        base_ts = datetime.datetime(2000, 1, 1)
+        rows = [
+            Row(
+                telemetry_timestamp=base_ts + datetime.timedelta(seconds=90 * i),
+                value=None,
+                channel_id="ch1",
+                mission_id="m1",
+            )
+            for i in range(4)
+        ]
+        df = spark_session.createDataFrame(rows, schema=schema)
         result = handle_nulls(df)
         assert result.count() == 0
 
