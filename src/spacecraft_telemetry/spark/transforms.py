@@ -370,3 +370,118 @@ def create_windows(
         F.col("values").cast(ArrayType(FloatType())).alias("values"),
         F.col("target").cast(FloatType()).alias("target"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Train/test split and anomaly label join
+# ---------------------------------------------------------------------------
+
+
+def temporal_train_test_split(
+    df: DataFrame,
+    train_fraction: float = 0.8,
+) -> tuple[DataFrame, DataFrame]:
+    """Split a DataFrame into train and test sets using a per-channel timestamp cutoff.
+
+    The cutoff for each channel is:
+        min_ts + train_fraction × (max_ts − min_ts)
+
+    Rows at or before the cutoff → train; rows after → test. This is a temporal
+    (non-random) split that preserves ordering: the model trains on the earlier
+    portion of each channel's history and evaluates on the later portion.
+
+    Args:
+        df: DataFrame with 'channel_id' and 'telemetry_timestamp' columns.
+        train_fraction: Fraction of the time range assigned to training (default 0.8).
+
+    Returns:
+        (train_df, test_df)
+    """
+    w = Window.partitionBy("channel_id")
+    df = (
+        df.withColumn("_min_ts", F.min(F.unix_timestamp("telemetry_timestamp")).over(w))
+        .withColumn("_max_ts", F.max(F.unix_timestamp("telemetry_timestamp")).over(w))
+        .withColumn(
+            "_cutoff_ts",
+            F.col("_min_ts") + train_fraction * (F.col("_max_ts") - F.col("_min_ts")),
+        )
+    )
+
+    train = df.filter(
+        F.unix_timestamp("telemetry_timestamp") <= F.col("_cutoff_ts")
+    ).drop("_min_ts", "_max_ts", "_cutoff_ts")
+
+    test = df.filter(
+        F.unix_timestamp("telemetry_timestamp") > F.col("_cutoff_ts")
+    ).drop("_min_ts", "_max_ts", "_cutoff_ts")
+
+    log.info("temporal_train_test_split", train_fraction=train_fraction)
+    return train, test
+
+
+def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
+    """Add is_anomaly boolean column by joining window time ranges against anomaly labels.
+
+    A window is anomalous if its [window_start_ts, window_end_ts) overlaps any label
+    interval [start_time, end_time) for the same channel_id. Channels absent from
+    labels_df are treated as fully nominal (all False).
+
+    Args:
+        df: Windows DataFrame with 'window_id', 'channel_id', 'window_start_ts',
+            'window_end_ts' columns.
+        labels_df: Labels DataFrame with 'channel_id', 'start_time', 'end_time'.
+
+    Returns:
+        DataFrame with 'is_anomaly' (BooleanType) column added.
+    """
+    win = df.alias("win")
+    lbl = labels_df.alias("lbl")
+
+    # Left join: one row per (window, overlapping label) pair.
+    # Overlap condition: window_end > label_start AND window_start < label_end.
+    matched = win.join(
+        lbl,
+        on=(
+            (F.col("win.channel_id") == F.col("lbl.channel_id"))
+            & (F.col("win.window_end_ts") > F.col("lbl.start_time"))
+            & (F.col("win.window_start_ts") < F.col("lbl.end_time"))
+        ),
+        how="left",
+    ).select(
+        F.col("win.window_id"),
+        F.col("lbl.start_time").isNotNull().alias("_matched"),
+    )
+
+    # Collapse: any match → is_anomaly=True for that window_id.
+    flags = matched.groupBy("window_id").agg(
+        F.max("_matched").cast("boolean").alias("is_anomaly")
+    )
+
+    result = df.join(flags, on="window_id", how="left").withColumn(
+        "is_anomaly",
+        F.coalesce(F.col("is_anomaly"), F.lit(False)),
+    )
+
+    anomaly_count = result.filter(F.col("is_anomaly")).count()
+    log.info("join_anomaly_labels", anomaly_count=anomaly_count)
+    return result
+
+
+def exclude_anomalies_from_train(train_df: DataFrame) -> DataFrame:
+    """Remove anomalous windows from the training set.
+
+    Telemanom trains on nominal data only — it learns the normal pattern and flags
+    deviations at inference time. Anomaly windows are kept in the test set for
+    evaluation.
+
+    Args:
+        train_df: Windows DataFrame with 'is_anomaly' (BooleanType) column.
+
+    Returns:
+        DataFrame with all is_anomaly=True rows removed.
+    """
+    total = train_df.count()
+    result = train_df.filter(~F.col("is_anomaly"))
+    excluded = total - result.count()
+    log.info("exclude_anomalies_from_train", excluded=excluded)
+    return result
