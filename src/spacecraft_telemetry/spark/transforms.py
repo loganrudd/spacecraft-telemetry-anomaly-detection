@@ -11,7 +11,7 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql import Window
 from pyspark.sql.window import WindowSpec
-from pyspark.sql.types import FloatType
+from pyspark.sql.types import ArrayType, FloatType
 
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.features.definitions import (
@@ -292,3 +292,81 @@ def add_rolling_features(
 
     log.info("add_rolling_features", features=[fd.name for fd in feature_defs])
     return df.drop("_rn")
+
+
+# ---------------------------------------------------------------------------
+# Windowing for LSTM input
+# ---------------------------------------------------------------------------
+
+
+def create_windows(
+    df: DataFrame,
+    window_size: int = 250,
+    prediction_horizon: int = 1,
+) -> DataFrame:
+    """Create sliding-window sequences for Telemanom LSTM input.
+
+    Each output row is one training or evaluation example:
+      values         — Array<Float> of window_size consecutive value_normalized
+                       readings in ascending timestamp order (oldest first)
+      target         — value_normalized at window_end + prediction_horizon steps
+      window_start_ts / window_end_ts — timestamps bracketing the input window
+
+    Windows are strictly contained within a single (channel_id, segment_id)
+    partition, so they never span gap boundaries from detect_gaps().
+
+    Segments with fewer than (window_size + prediction_horizon) rows produce
+    zero windows and are silently excluded (count logged at INFO).
+
+    Number of windows per segment of length N:
+        max(0, N - window_size - prediction_horizon + 1)
+
+    Args:
+        df: DataFrame with columns: telemetry_timestamp, value_normalized,
+            channel_id, mission_id, segment_id.
+        window_size: Length of each input sequence (Telemanom default: 250).
+        prediction_horizon: Steps ahead to forecast (default: 1 = next reading).
+
+    Returns:
+        DataFrame with columns: window_id (LongType), channel_id, mission_id,
+        segment_id, window_start_ts (TimestampType), window_end_ts (TimestampType),
+        values (Array<Float>, length == window_size), target (FloatType).
+        is_anomaly is added separately in join_anomaly_labels().
+    """
+    w = Window.partitionBy("channel_id", "segment_id").orderBy("telemetry_timestamp")
+    vals_w = w.rowsBetween(-(window_size - 1), 0)
+
+    df = (
+        df.withColumn("values", F.collect_list("value_normalized").over(vals_w))
+        .withColumn("window_end_ts", F.col("telemetry_timestamp"))
+        .withColumn("window_start_ts", F.min("telemetry_timestamp").over(vals_w))
+        .withColumn("target", F.lead("value_normalized", prediction_horizon).over(w))
+    )
+
+    # Drop rows where the trailing window is shorter than window_size (early rows
+    # in a segment) or where no target exists (final prediction_horizon rows).
+    df = (
+        df.filter(F.size("values") == window_size)
+        .filter(F.col("target").isNotNull())
+    )
+
+    df = df.withColumn("window_id", F.monotonically_increasing_id())
+
+    windows_count = df.count()
+    log.info(
+        "create_windows",
+        window_size=window_size,
+        prediction_horizon=prediction_horizon,
+        windows_count=windows_count,
+    )
+
+    return df.select(
+        "window_id",
+        "channel_id",
+        "mission_id",
+        "segment_id",
+        "window_start_ts",
+        "window_end_ts",
+        F.col("values").cast(ArrayType(FloatType())).alias("values"),
+        F.col("target").cast(FloatType()).alias("target"),
+    )

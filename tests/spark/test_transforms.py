@@ -458,3 +458,221 @@ class TestAddRollingFeatures:
             assert float(spark_val) == pytest.approx(
                 numpy_val, rel=1e-3
             ), f"{name}: spark={spark_val}, numpy={numpy_val}"
+
+
+# ---------------------------------------------------------------------------
+# create_windows
+# ---------------------------------------------------------------------------
+
+
+class TestCreateWindows:
+    """Tests for create_windows().
+
+    Uses small synthetic DataFrames (≤20 rows) with value_normalized already
+    set, isolated from upstream transforms.
+    """
+
+    @pytest.fixture()
+    def ten_row_df(self, spark_session):
+        """10 rows, single segment, value_normalized = [0.0 .. 9.0]."""
+        import pandas as pd
+
+        pdf = pd.DataFrame({
+            "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
+            "value_normalized": [float(i) for i in range(10)],
+            "channel_id": ["ch1"] * 10,
+            "mission_id": ["m1"] * 10,
+            "segment_id": [0] * 10,
+        })
+        return spark_session.createDataFrame(pdf)
+
+    # ------------------------------------------------------------------
+    # Row count
+    # ------------------------------------------------------------------
+
+    def test_window_count_10_rows_window_3(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        # N=10, ws=3, ph=1 → max(0, 10 - 3 - 1 + 1) = 7 windows
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        assert result.count() == 7
+
+    def test_short_segment_produces_zero_windows(self, spark_session) -> None:
+        import pandas as pd
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        # 2 rows < window_size=3 + prediction_horizon=1 → 0 windows
+        pdf = pd.DataFrame({
+            "telemetry_timestamp": pd.date_range("2000-01-01", periods=2, freq="90s"),
+            "value_normalized": [1.0, 2.0],
+            "channel_id": ["ch1"] * 2,
+            "mission_id": ["m1"] * 2,
+            "segment_id": [0] * 2,
+        })
+        df = spark_session.createDataFrame(pdf)
+        result = create_windows(df, window_size=3, prediction_horizon=1)
+        assert result.count() == 0
+
+    def test_exact_minimum_segment_produces_one_window(self, spark_session) -> None:
+        import pandas as pd
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        # N = window_size + prediction_horizon = 3 + 1 = 4 → exactly 1 window
+        pdf = pd.DataFrame({
+            "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
+            "value_normalized": [0.0, 1.0, 2.0, 3.0],
+            "channel_id": ["ch1"] * 4,
+            "mission_id": ["m1"] * 4,
+            "segment_id": [0] * 4,
+        })
+        df = spark_session.createDataFrame(pdf)
+        result = create_windows(df, window_size=3, prediction_horizon=1)
+        assert result.count() == 1
+
+    def test_prediction_horizon_2_reduces_count(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        # N=10, ws=3, ph=2 → max(0, 10 - 3 - 2 + 1) = 6 windows
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=2)
+        assert result.count() == 6
+
+    # ------------------------------------------------------------------
+    # Values array correctness
+    # ------------------------------------------------------------------
+
+    def test_values_array_length_equals_window_size(self, ten_row_df) -> None:
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        bad = result.filter(F.size("values") != 3).count()
+        assert bad == 0
+
+    def test_first_window_values(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        first = result.orderBy("window_start_ts").first()
+        assert first is not None
+        assert list(first["values"]) == pytest.approx([0.0, 1.0, 2.0], abs=1e-5)
+
+    def test_last_window_values(self, ten_row_df) -> None:
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        last = result.orderBy(F.col("window_start_ts").desc()).first()
+        assert last is not None
+        assert list(last["values"]) == pytest.approx([6.0, 7.0, 8.0], abs=1e-5)
+
+    def test_values_are_oldest_first(self, ten_row_df) -> None:
+        """collect_list with an ordered window must preserve ascending order."""
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        rows = result.orderBy("window_start_ts").collect()
+        for row in rows:
+            vals = list(row["values"])
+            assert vals == sorted(vals), f"Values not ascending: {vals}"
+
+    # ------------------------------------------------------------------
+    # Target correctness
+    # ------------------------------------------------------------------
+
+    def test_first_window_target(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        first = result.orderBy("window_start_ts").first()
+        assert first is not None
+        # values=[0,1,2], next value is 3.0
+        assert first["target"] == pytest.approx(3.0, abs=1e-5)
+
+    def test_prediction_horizon_2_target(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=2)
+        first = result.orderBy("window_start_ts").first()
+        assert first is not None
+        # values=[0,1,2], target 2 steps ahead = 4.0
+        assert first["target"] == pytest.approx(4.0, abs=1e-5)
+
+    def test_no_null_targets(self, ten_row_df) -> None:
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        assert result.filter(F.col("target").isNull()).count() == 0
+
+    # ------------------------------------------------------------------
+    # Timestamps
+    # ------------------------------------------------------------------
+
+    def test_window_start_before_window_end(self, ten_row_df) -> None:
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        bad = result.filter(F.col("window_start_ts") >= F.col("window_end_ts")).count()
+        assert bad == 0
+
+    # ------------------------------------------------------------------
+    # Segment boundary isolation
+    # ------------------------------------------------------------------
+
+    def test_windows_do_not_cross_segment_boundaries(self, spark_session) -> None:
+        import pandas as pd
+
+        from pyspark.sql import functions as F
+
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        # Two segments: segment 0 values [0..9], segment 1 values [100..109]
+        n = 10
+        pdf = pd.DataFrame({
+            "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
+            "value_normalized": [float(i) for i in range(n)] + [float(100 + i) for i in range(n)],
+            "channel_id": ["ch1"] * (n * 2),
+            "mission_id": ["m1"] * (n * 2),
+            "segment_id": [0] * n + [1] * n,
+        })
+        df = spark_session.createDataFrame(pdf)
+        result = create_windows(df, window_size=3, prediction_horizon=1)
+
+        assert result.count() == 14  # 7 from each segment
+
+        # Every value in segment 0 windows must be < 100
+        for row in result.filter(F.col("segment_id") == 0).collect():
+            assert all(v < 100 for v in row["values"]), f"Cross-segment leak in seg 0: {row['values']}"
+
+        # Every value in segment 1 windows must be >= 100
+        for row in result.filter(F.col("segment_id") == 1).collect():
+            assert all(v >= 100 for v in row["values"]), f"Cross-segment leak in seg 1: {row['values']}"
+
+    # ------------------------------------------------------------------
+    # Output schema
+    # ------------------------------------------------------------------
+
+    def test_output_column_names(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        expected = {
+            "window_id", "channel_id", "mission_id", "segment_id",
+            "window_start_ts", "window_end_ts", "values", "target",
+        }
+        assert set(result.columns) == expected
+
+    def test_window_id_is_unique(self, ten_row_df) -> None:
+        from spacecraft_telemetry.spark.transforms import create_windows
+
+        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
+        total = result.count()
+        distinct = result.select("window_id").distinct().count()
+        assert total == distinct
