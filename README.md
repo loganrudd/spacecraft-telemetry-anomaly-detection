@@ -2,16 +2,16 @@
 
 End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detection using the [ESA Anomaly Dataset](https://zenodo.org/records/12528696).
 
-**Status: Phase 2 of 12 complete — PySpark Preprocessing Pipeline**
+**Status: Phase 3 of 12 complete — Feast Feature Store Integration**
 
 ## Tech Stack
 
 - Python 3.12, uv
 - PySpark 4.1 (preprocessing — Phase 2 ✅)
+- Feast 0.47 (feature store — Phase 3 ✅)
 - Ray 2.x Core + Tune (parallel training, HPO — Phases 5–6)
 - PyTorch (Telemanom LSTM — Phase 4)
 - MLflow 3.x (experiment tracking, model registry — Phase 7)
-- Feast (feature store — Phase 3)
 - Evidently (drift monitoring — Phase 8)
 - FastAPI + SSE (serving — Phase 9)
 - React + Recharts (dashboard — Phase 10)
@@ -30,10 +30,10 @@ End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detectio
 ## What Works Today
 
 ```bash
-# Install all dependencies
+# Install all dependencies (includes Feast)
 make setup
 
-# Run all 266 tests (Spark tests need JDK 21 — skip gracefully if absent)
+# Run all tests (Spark tests need JDK 21 — skip gracefully if absent)
 make test
 
 # Lint
@@ -50,6 +50,15 @@ make explore MISSION=ESA-Mission1
 # Outputs to data/processed/ESA-Mission1/{features,train,test}/
 make spark-preprocess MISSION=ESA-Mission1
 
+# Register Feast feature view definitions to the local registry
+make feast-apply MISSION=ESA-Mission1
+
+# Materialize offline features into the SQLite online store
+make feast-materialize MISSION=ESA-Mission1
+
+# Run only the Feast tests
+make feast-test
+
 # Run only the Spark tests
 make spark-test
 
@@ -58,6 +67,9 @@ uv run spacecraft-telemetry --help
 uv run spacecraft-telemetry download --mission ESA-Mission1 --sample
 uv run spacecraft-telemetry explore --mission ESA-Mission1
 uv run spacecraft-telemetry spark preprocess --mission ESA-Mission1
+uv run spacecraft-telemetry feast apply --mission ESA-Mission1
+uv run spacecraft-telemetry feast materialize --mission ESA-Mission1
+uv run spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1
 ```
 
 ## Architecture
@@ -66,7 +78,7 @@ uv run spacecraft-telemetry spark preprocess --mission ESA-Mission1
 ESA Parquet (Zenodo/GCS)
   → Download + Sample (Phase 1)        ← complete
   → PySpark preprocessing (Phase 2)    ← complete
-  → Feast feature store (Phase 3)      ← in progress
+  → Feast feature store (Phase 3)      ← complete
   → Telemanom LSTM training (Phase 4)
   → Ray parallel training (Phase 5)
   → Ray Tune HPO (Phase 6)
@@ -77,6 +89,47 @@ ESA Parquet (Zenodo/GCS)
   → GCP deployment (Phase 11)
   → Documentation + polish (Phase 12)
 
+```
+
+## Phase 3 Components
+
+| Module | Description |
+|--------|-------------|
+| `feast_client/repo.py` | `build_schema_from_definitions`, `build_entities`, `build_feature_view` — Feast object builders driven by `FEATURE_DEFINITIONS` |
+| `feast_client/store.py` | `create_feature_store`, `apply_definitions`, `materialize`, `teardown` — store lifecycle |
+| `feast_client/client.py` | `get_historical_features(store, entity_df)`, `get_online_features_for_channel(store, channel_id, mission_id)` — retrieval helpers for Phase 4 (training) and Phase 9 (serving) |
+| `feature_repo/registry.py` | Feast CLI adapter — `Entity` + `FeatureView` objects discovered by `feast apply` |
+| `feature_repo/feature_store.yaml` | Local store config: `FileOfflineStore` (reads Phase 2 Parquet directly) + `SqliteOnlineStore` |
+
+### feature_repo/ Layout
+
+```
+feature_repo/
+  feature_store.yaml        # Feast project config (committed)
+  registry.py               # Entities + FeatureView definitions (committed)
+  data/
+    registry.db             # Written by feast apply (gitignored)
+    online_store.db         # Written by feast materialize (gitignored)
+```
+
+### Phase 4 Contract
+
+Phase 4 (Telemanom training) retrieves features via:
+
+```python
+from spacecraft_telemetry.feast_client.client import get_historical_features
+
+# entity_df columns: channel_id (str), mission_id (str),
+#                    event_timestamp (datetime64[us, UTC])
+df = get_historical_features(store, entity_df)
+```
+
+Phase 9 (FastAPI serving) retrieves latest materialized values via:
+
+```python
+from spacecraft_telemetry.feast_client.client import get_online_features_for_channel
+
+features = get_online_features_for_channel(store, channel_id="channel_1", mission_id="ESA-Mission1")
 ```
 
 ## Phase 1 Components
@@ -118,7 +171,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 |-------|-------------|--------|
 | 1 | Repo scaffold + data ingestion | ✅ Complete |
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
-| 3 | Feast feature store integration | In Progress |
+| 3 | Feast feature store integration | ✅ Complete |
 | 4 | Telemanom model drop-in | Planned |
 | 5 | Ray parallel training | Planned |
 | 6 | Ray Tune HPO | Planned |

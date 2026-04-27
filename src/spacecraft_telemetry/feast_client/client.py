@@ -59,7 +59,7 @@ def get_online_features_for_channel(
     channel_id: str,
     mission_id: str,
     features: list[str] | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Retrieve the latest materialized feature values for one channel.
 
     Performs a single-row online lookup keyed on (channel_id, mission_id).

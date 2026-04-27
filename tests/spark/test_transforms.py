@@ -1046,12 +1046,12 @@ class TestHandleNullsValues:
 
     def test_all_null_returns_empty(self, spark_session) -> None:
         """Q3 runtime check: a channel with all nulls should produce zero rows."""
+        import datetime
+
         from pyspark.sql import Row
         from pyspark.sql.types import FloatType, StringType, StructField, StructType, TimestampType
 
         from spacecraft_telemetry.spark.transforms import handle_nulls
-
-        import datetime
 
         schema = StructType(
             [

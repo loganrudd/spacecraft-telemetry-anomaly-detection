@@ -79,7 +79,9 @@ class TestMaterialize:
 
         online_path = tmp_feast_repo / "data" / "online_store.db"
         assert online_path.exists()
-        assert online_path.stat().st_size > 0, "online_store.db should be non-empty after materialize"
+        assert online_path.stat().st_size > 0, (
+            "online_store.db should be non-empty after materialize"
+        )
 
     def test_materialize_incremental_called_twice_does_not_raise(
         self, tmp_feast_repo: Path

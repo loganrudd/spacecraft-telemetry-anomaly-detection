@@ -8,7 +8,7 @@ Each subcommand follows the same pattern:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -309,7 +309,7 @@ def _resolve_feast_settings(
     mission: str | None,
 ) -> Settings:
     """Return settings, optionally overriding source_path for the given mission."""
-    settings = ctx.obj["settings"]
+    settings: Settings = ctx.obj["settings"]
     if mission is not None:
         new_source_path = (
             Path(str(settings.spark.processed_data_dir)) / mission / "features"
@@ -391,7 +391,7 @@ def feast_materialize(
         spacecraft-telemetry feast materialize --mission ESA-Mission1 \\
             --start-date 2000-01-01 --end-date 2001-01-01
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from spacecraft_telemetry.feast_client.store import (
         apply_definitions,
@@ -402,7 +402,7 @@ def feast_materialize(
     settings = _resolve_feast_settings(ctx, mission)
     log = get_logger(__name__)
 
-    end = end_date or datetime.now(tz=timezone.utc)
+    end = end_date or datetime.now(tz=UTC)
     store = create_feature_store(settings)
     # Ensure definitions are registered before materializing.
     apply_definitions(store)
@@ -460,7 +460,7 @@ def feast_retrieve(
             --mode historical --start 2000-01-01 --end 2000-02-01
     """
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import pandas as pd
 
@@ -480,12 +480,12 @@ def feast_retrieve(
     else:
         if start is None:
             raise click.UsageError("--start is required when --mode=historical")
-        end_ts = end or datetime.now(tz=timezone.utc)
+        end_ts = end or datetime.now(tz=UTC)
         # Build a small entity_df spanning the requested window using real timestamps
         # from the offline Parquet. For the CLI we synthesize a grid at 90s intervals;
         # Phase 4 (training) will supply real telemetry timestamps instead.
-        start_utc = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start
-        end_utc = end_ts.replace(tzinfo=timezone.utc) if end_ts.tzinfo is None else end_ts
+        start_utc = start.replace(tzinfo=UTC) if start.tzinfo is None else start
+        end_utc = end_ts.replace(tzinfo=UTC) if end_ts.tzinfo is None else end_ts
         timestamps = pd.date_range(start=start_utc, end=end_utc, freq="90s", tz="UTC")
         entity_df = pd.DataFrame(
             {

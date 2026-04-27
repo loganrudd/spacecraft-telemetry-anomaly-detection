@@ -123,4 +123,4 @@ def teardown(store: FeatureStore) -> None:
         registry=str(registry_path),
         online_store=str(online_path),
     )
-    store.teardown()
+    store.teardown()  # type: ignore[no-untyped-call]

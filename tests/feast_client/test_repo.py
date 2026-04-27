@@ -6,14 +6,17 @@ import pytest
 
 feast = pytest.importorskip("feast")
 
-from feast.types import Float32, PrimitiveFeastType  # noqa: E402
+from feast.types import Float32  # noqa: E402
 
 from spacecraft_telemetry.feast_client.repo import (  # noqa: E402
     build_entities,
     build_schema_from_definitions,
     feast_dtype_for,
 )
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, get_feature_names  # noqa: E402
+from spacecraft_telemetry.features.definitions import (  # noqa: E402
+    FEATURE_DEFINITIONS,
+    get_feature_names,
+)
 
 
 class TestBuildSchema:

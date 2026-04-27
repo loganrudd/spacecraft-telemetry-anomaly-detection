@@ -11,7 +11,6 @@ Entity/FeatureView objects programmatically.  It is imported by:
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Union
 
 from feast import Entity, FeatureView, Field, FileSource
 from feast.types import Bool, ComplexFeastType, Float32, Int64, PrimitiveFeastType, String
@@ -20,7 +19,7 @@ from feast.value_type import ValueType
 from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, FeatureDefinition
 
 # Union type accepted by Feast's Field.dtype parameter.
-_FeastType = Union[ComplexFeastType, PrimitiveFeastType]
+_FeastType = ComplexFeastType | PrimitiveFeastType
 
 # Map dtype strings (from FeatureDefinition.dtype) → Feast types.
 # "float64" maps to Float32 — Feast 0.47 online store serialisation is cleanest
@@ -45,7 +44,7 @@ def feast_dtype_for(dtype_str: str) -> _FeastType:
     except KeyError:
         raise KeyError(
             f"No Feast dtype mapping for {dtype_str!r}. Known: {sorted(_DTYPE_MAP)}"
-        )
+        ) from None
 
 
 def build_schema_from_definitions(defs: list[FeatureDefinition]) -> list[Field]:

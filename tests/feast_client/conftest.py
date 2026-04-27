@@ -22,8 +22,8 @@ feast = pytest.importorskip("feast")  # skip entire module if feast not installe
 
 import yaml  # noqa: E402 — must come after the importorskip guard
 
-from spacecraft_telemetry.feast_client.repo import build_entities, build_feature_view
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
+from spacecraft_telemetry.feast_client.repo import build_entities, build_feature_view  # noqa: E402
+from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants shared by fixtures and tests

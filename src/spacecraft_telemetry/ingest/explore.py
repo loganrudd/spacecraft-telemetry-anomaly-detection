@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd  # type: ignore[import-untyped]
+import pandas as pd
 from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table

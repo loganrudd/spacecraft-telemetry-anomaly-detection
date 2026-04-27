@@ -280,7 +280,9 @@ class TestFeastConfig:
         cfg = FeastConfig(project="spacecraft_telemetry")
         assert cfg.project == "spacecraft_telemetry"
 
-    def test_load_settings_includes_feast(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_load_settings_includes_feast(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
         (config_dir / "local.yaml").write_text(_YAML_WITH_FEAST)
