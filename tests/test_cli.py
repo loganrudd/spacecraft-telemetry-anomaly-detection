@@ -253,3 +253,180 @@ class TestExploreCommand:
         result = runner.invoke(main, ["--env=local", "--verbose", "explore", "--mission=M1"])
 
         assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# feast group
+# ---------------------------------------------------------------------------
+
+
+class TestFeastCommands:
+    """Smoke tests for the feast CLI group.
+
+    These mock feast_client internals so no real Feast store is created — the
+    feast integration is covered thoroughly in tests/feast_client/.
+    """
+
+    def test_feast_help_lists_subcommands(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["feast", "--help"])
+        assert result.exit_code == 0
+        assert "apply" in result.output
+        assert "materialize" in result.output
+        assert "retrieve" in result.output
+
+    def test_feast_apply_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["feast", "apply", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+
+    def test_feast_apply_calls_apply_definitions(
+        self, runner: CliRunner
+    ) -> None:
+        mock_store = MagicMock()
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.store.apply_definitions",
+                return_value={"entities": 2, "feature_views": 1},
+            ) as mock_apply,
+        ):
+            result = runner.invoke(main, ["--env=local", "feast", "apply"])
+
+        assert result.exit_code == 0, result.output
+        mock_apply.assert_called_once_with(mock_store)
+        assert "Feature views : 1" in result.output
+
+    def test_feast_apply_mission_override(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        processed_dir = tmp_path / "processed"
+        monkeypatch.setenv(
+            "SPACECRAFT_SPARK__PROCESSED_DATA_DIR", str(processed_dir)
+        )
+        mock_store = MagicMock()
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ) as mock_create,
+            patch(
+                "spacecraft_telemetry.feast_client.store.apply_definitions",
+                return_value={"entities": 2, "feature_views": 1},
+            ),
+        ):
+            result = runner.invoke(
+                main, ["--env=local", "feast", "apply", "--mission=ESA-Mission1"]
+            )
+
+        assert result.exit_code == 0, result.output
+        # source_path should be overridden to processed_dir/ESA-Mission1/features
+        applied_settings = mock_create.call_args[0][0]
+        expected = processed_dir / "ESA-Mission1" / "features"
+        assert applied_settings.feast.source_path == expected
+
+    def test_feast_materialize_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["feast", "materialize", "--help"])
+        assert result.exit_code == 0
+        assert "--start-date" in result.output
+        assert "--end-date" in result.output
+
+    def test_feast_materialize_incremental(self, runner: CliRunner) -> None:
+        mock_store = MagicMock()
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.store.apply_definitions",
+                return_value={"entities": 2, "feature_views": 1},
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.store.materialize"
+            ) as mock_materialize,
+        ):
+            result = runner.invoke(main, ["--env=local", "feast", "materialize"])
+
+        assert result.exit_code == 0, result.output
+        mock_materialize.assert_called_once()
+        # start_date should be None (incremental)
+        assert mock_materialize.call_args.kwargs.get("start_date") is None
+
+    def test_feast_retrieve_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["feast", "retrieve", "--help"])
+        assert result.exit_code == 0
+        assert "--channel" in result.output
+        assert "--mission" in result.output
+        assert "--mode" in result.output
+
+    def test_feast_retrieve_requires_channel_and_mission(
+        self, runner: CliRunner
+    ) -> None:
+        result = runner.invoke(main, ["feast", "retrieve"])
+        assert result.exit_code != 0
+
+    def test_feast_retrieve_online_mode(self, runner: CliRunner) -> None:
+        mock_store = MagicMock()
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.store.apply_definitions",
+                return_value={"entities": 2, "feature_views": 1},
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.client.get_online_features_for_channel",
+                return_value={"telemetry_features__rolling_mean_10": 0.42},
+            ) as mock_online,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=local",
+                    "feast",
+                    "retrieve",
+                    "--channel=channel_1",
+                    "--mission=ESA-Mission1",
+                    "--mode=online",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_online.assert_called_once_with(
+            mock_store, channel_id="channel_1", mission_id="ESA-Mission1"
+        )
+        assert "0.42" in result.output
+
+    def test_feast_retrieve_historical_requires_start(
+        self, runner: CliRunner
+    ) -> None:
+        mock_store = MagicMock()
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ),
+            patch(
+                "spacecraft_telemetry.feast_client.store.apply_definitions",
+                return_value={"entities": 2, "feature_views": 1},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=local",
+                    "feast",
+                    "retrieve",
+                    "--channel=channel_1",
+                    "--mission=ESA-Mission1",
+                    "--mode=historical",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "start" in result.output.lower()
