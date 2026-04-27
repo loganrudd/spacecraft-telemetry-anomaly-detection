@@ -13,6 +13,7 @@ Priority (highest → lowest):
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -104,6 +105,30 @@ class LoggingConfig(BaseModel):
         return v
 
 
+class FeastConfig(BaseModel):
+    repo_path: Path = Path("feature_repo")
+    project: str = "spacecraft_telemetry"
+    feature_view_name: str = "telemetry_features"
+    source_path: Path = Path("data/processed/ESA-Mission1/features")
+    ttl_days: int = 365
+
+    @field_validator("ttl_days")
+    @classmethod
+    def ttl_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"ttl_days must be >= 1, got {v}")
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def valid_project_name(cls, v: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", v):
+            raise ValueError(
+                f"project must match [a-zA-Z_][a-zA-Z0-9_]*, got {v!r}"
+            )
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -140,6 +165,7 @@ class Settings(BaseSettings):
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
     spark: SparkConfig = SparkConfig()
+    feast: FeastConfig = FeastConfig()
 
     @classmethod
     def settings_customise_sources(
