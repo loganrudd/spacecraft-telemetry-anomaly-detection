@@ -50,9 +50,10 @@ metastore_db/
 ray_results/
 
 # Feast
-data/registry.db
-data/online_store.db
-.feast/
+feature_repo/data/registry.db
+feature_repo/data/online_store.db
+feature_repo/data/*.parquet
+feature_repo/.feast/
 
 # Test artifacts
 .pytest_cache/
