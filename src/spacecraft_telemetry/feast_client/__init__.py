@@ -2,7 +2,7 @@
 
 Public API grows as modules are added:
   repo.py   — build_schema_from_definitions, build_entities, build_feature_view, feast_dtype_for
-  store.py  — create_feature_store, apply_definitions, materialize, teardown  (Step 5)
+  store.py  — create_feature_store, apply_definitions, materialize, teardown
   client.py — get_historical_features, get_online_features_for_channel         (Step 6)
 """
 
@@ -12,10 +12,20 @@ from spacecraft_telemetry.feast_client.repo import (
     build_schema_from_definitions,
     feast_dtype_for,
 )
+from spacecraft_telemetry.feast_client.store import (
+    apply_definitions,
+    create_feature_store,
+    materialize,
+    teardown,
+)
 
 __all__ = [
+    "apply_definitions",
     "build_entities",
     "build_feature_view",
     "build_schema_from_definitions",
+    "create_feature_store",
     "feast_dtype_for",
+    "materialize",
+    "teardown",
 ]
