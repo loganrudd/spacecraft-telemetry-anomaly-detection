@@ -39,9 +39,10 @@ class TestFeastDtype:
     def test_float32_maps_to_float32(self) -> None:
         assert feast_dtype_for("float32") == Float32
 
-    def test_float64_maps_to_float32(self) -> None:
-        # Feast 0.47 has no Float64; normalized telemetry fits in Float32.
-        assert feast_dtype_for("float64") == Float32
+    def test_float64_raises_key_error(self) -> None:
+        # float64 is not in _DTYPE_MAP — callers must downcast to float32 explicitly.
+        with pytest.raises(KeyError, match="float64"):
+            feast_dtype_for("float64")
 
     def test_unknown_dtype_raises_key_error(self) -> None:
         with pytest.raises(KeyError, match="complex64"):

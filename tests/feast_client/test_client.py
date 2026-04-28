@@ -122,15 +122,12 @@ class TestGetOnlineFeatures:
         # Latest row is index (_N_ROWS - 1) == 199; value == 199 * 0.01 == 1.99
         result = get_online_features_for_channel(materialized_store, _CHANNEL, _MISSION)
 
-        # Key may be bare name ("rolling_mean_10") — look for any key containing the name.
-        matching = {k: v for k, v in result.items() if "rolling_mean_10" in k}
-        assert matching, "Expected at least one key containing 'rolling_mean_10'"
-        value = next(iter(matching.values()))
-        assert value == pytest.approx((_N_ROWS - 1) * 0.01, abs=1e-4)
+        # Keys are bare feature names after prefix stripping.
+        assert "rolling_mean_10" in result, f"Keys: {list(result)[:5]}"
+        assert result["rolling_mean_10"] == pytest.approx((_N_ROWS - 1) * 0.01, abs=1e-4)
 
     def test_all_features_present(self, materialized_store: FeatureStore) -> None:
         result = get_online_features_for_channel(materialized_store, _CHANNEL, _MISSION)
 
-        result_str = " ".join(result.keys())
         for name in get_feature_names():
-            assert name in result_str, f"Feature {name!r} missing from online response"
+            assert name in result, f"Feature {name!r} missing from online response"

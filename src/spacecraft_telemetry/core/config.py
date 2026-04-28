@@ -110,6 +110,7 @@ class FeastConfig(BaseModel):
     project: str = "spacecraft_telemetry"
     feature_view_name: str = "telemetry_features"
     source_path: Path = Path("data/processed/ESA-Mission1/features")
+    source_root: Path = Path("data/processed")
     ttl_days: int = 365
 
     @field_validator("ttl_days")

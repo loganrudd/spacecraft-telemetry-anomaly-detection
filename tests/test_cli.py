@@ -307,7 +307,7 @@ class TestFeastCommands:
     ) -> None:
         processed_dir = tmp_path / "processed"
         monkeypatch.setenv(
-            "SPACECRAFT_SPARK__PROCESSED_DATA_DIR", str(processed_dir)
+            "SPACECRAFT_FEAST__SOURCE_ROOT", str(processed_dir)
         )
         mock_store = MagicMock()
         with (

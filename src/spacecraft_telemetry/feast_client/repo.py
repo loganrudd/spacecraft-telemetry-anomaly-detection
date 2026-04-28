@@ -22,11 +22,11 @@ from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, Featu
 _FeastType = ComplexFeastType | PrimitiveFeastType
 
 # Map dtype strings (from FeatureDefinition.dtype) → Feast types.
-# "float64" maps to Float32 — Feast 0.47 online store serialisation is cleanest
-# with Float32; normalized telemetry values in the [-5, 5] range don't need it.
+# float64 is intentionally absent: all telemetry features are stored as Float32
+# (Feast 0.47 online store serialisation; normalized values fit within Float32 range).
+# Callers that need float64 should downcast to float32 before feature registration.
 _DTYPE_MAP: dict[str, _FeastType] = {
     "float32": Float32,
-    "float64": Float32,
     "int64": Int64,
     "string": String,
     "bool": Bool,

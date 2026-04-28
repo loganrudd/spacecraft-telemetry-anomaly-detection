@@ -239,6 +239,7 @@ feast:
   project: spacecraft_telemetry
   feature_view_name: telemetry_features
   source_path: data/processed/ESA-Mission1/features
+  source_root: data/processed
   ttl_days: 365
 """
 
@@ -251,6 +252,7 @@ class TestFeastConfig:
         assert cfg.ttl_days == 365
         assert cfg.repo_path == Path("feature_repo")
         assert cfg.source_path == Path("data/processed/ESA-Mission1/features")
+        assert cfg.source_root == Path("data/processed")
 
     def test_ttl_zero_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="ttl_days"):
@@ -294,6 +296,7 @@ class TestFeastConfig:
         assert settings.feast.project == "spacecraft_telemetry"
         assert settings.feast.ttl_days == 365
         assert settings.feast.source_path == Path("data/processed/ESA-Mission1/features")
+        assert settings.feast.source_root == Path("data/processed")
 
     def test_feast_env_var_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         config_dir = tmp_path / "configs"

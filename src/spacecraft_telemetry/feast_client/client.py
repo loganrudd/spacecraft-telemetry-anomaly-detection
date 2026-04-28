@@ -83,6 +83,9 @@ def get_online_features_for_channel(
         features=features,
         entity_rows=[{"channel_id": channel_id, "mission_id": mission_id}],
     )
-    # to_dict() returns {feature_ref: [value]} — take the first (only) element.
+    # to_dict() returns {"view_name__feature_name": [value]} — take the first (only)
+    # element and strip the "{view_name}__" prefix so callers get bare feature names.
+    view_name = features[0].split(":")[0] if features else "telemetry_features"
+    prefix = f"{view_name}__"
     raw = response.to_dict()
-    return {key: (values[0] if values else None) for key, values in raw.items()}
+    return {k.removeprefix(prefix): (values[0] if values else None) for k, values in raw.items()}

@@ -312,7 +312,7 @@ def _resolve_feast_settings(
     settings: Settings = ctx.obj["settings"]
     if mission is not None:
         new_source_path = (
-            Path(str(settings.spark.processed_data_dir)) / mission / "features"
+            Path(str(settings.feast.source_root)) / mission / "features"
         )
         settings = settings.model_copy(
             update={"feast": settings.feast.model_copy(update={"source_path": new_source_path})}
