@@ -48,12 +48,21 @@ def apply_definitions(store: FeatureStore) -> dict[str, int]:
     Lazy-imports feature_repo.registry so any config error surfaces with a
     clear traceback at call time, not at module import.
 
+    feature_repo/ lives at the repo root (not inside src/), so its parent
+    directory is added to sys.path before the import if not already present.
+
     Args:
         store: FeatureStore instance from create_feature_store().
 
     Returns:
-        Dict with keys "n_entities" and "n_feature_views" (counts of registered objects).
+        Dict with keys "entities" and "feature_views" (counts of registered objects).
     """
+    import sys
+
+    repo_root = str(Path(store.repo_path).resolve().parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
     from feature_repo.registry import channel, mission, telemetry_features, telemetry_source
 
     project = store.project
@@ -70,7 +79,7 @@ def apply_definitions(store: FeatureStore) -> dict[str, int]:
         n_entities=n_entities,
         n_feature_views=n_feature_views,
     )
-    return {"n_entities": n_entities, "n_feature_views": n_feature_views}
+    return {"entities": n_entities, "feature_views": n_feature_views}
 
 
 def materialize(
