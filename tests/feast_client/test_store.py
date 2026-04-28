@@ -15,7 +15,9 @@ feast = pytest.importorskip("feast")
 
 from feast import FeatureStore  # noqa: E402
 
+from spacecraft_telemetry.core.config import FeastConfig, Settings  # noqa: E402
 from spacecraft_telemetry.feast_client.repo import build_entities, build_feature_view  # noqa: E402
+from spacecraft_telemetry.feast_client.store import apply_definitions  # noqa: E402
 from tests.feast_client.conftest import _BASE_TS, _INTERVAL_S, _N_ROWS  # noqa: E402
 
 
@@ -59,12 +61,20 @@ class TestApply:
         assert {"channel", "mission"} == entity_names
 
     def test_apply_idempotent(self, tmp_feast_repo: Path) -> None:
-        store, channel, mission, fv = _make_store_with_objects(tmp_feast_repo)
+        store = FeatureStore(repo_path=str(tmp_feast_repo))
+        # source_path="source" is resolved relative to repo_root (tmp_feast_repo.parent)
+        # inside apply_definitions, giving the correct hermetic source directory.
+        settings = Settings(
+            feast=FeastConfig(
+                source_path="source",
+                feature_view_name="telemetry_features",
+            )
+        )
 
         # First apply
-        store.apply([channel, mission, fv.source, fv])
+        apply_definitions(store, settings)
         # Second apply must not raise
-        store.apply([channel, mission, fv.source, fv])
+        apply_definitions(store, settings)
 
         assert len(store.list_feature_views()) == 1
 

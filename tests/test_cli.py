@@ -433,3 +433,47 @@ class TestFeastCommands:
 
         assert result.exit_code != 0
         assert "start" in result.output.lower()
+
+    def test_feast_retrieve_historical_with_start(self, runner: CliRunner) -> None:
+        # Asserts that --mode=historical builds a correctly-shaped entity_df and
+        # passes it to get_historical_features.
+        mock_store = MagicMock()
+        captured: dict[str, pd.DataFrame] = {}
+
+        def _capture_historical(store: object, entity_df: pd.DataFrame) -> pd.DataFrame:
+            captured["entity_df"] = entity_df
+            return pd.DataFrame({"rolling_mean_10": [0.5]})
+
+        with (
+            patch(
+                "spacecraft_telemetry.feast_client.store.create_feature_store",
+                return_value=mock_store,
+            ),
+            patch("spacecraft_telemetry.feast_client.store.apply_definitions"),
+            patch(
+                "spacecraft_telemetry.feast_client.client.get_historical_features",
+                side_effect=_capture_historical,
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=local",
+                    "feast",
+                    "retrieve",
+                    "--channel=channel_1",
+                    "--mission=ESA-Mission1",
+                    "--mode=historical",
+                    "--start=2000-01-01",
+                    "--end=2000-01-02",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "entity_df" in captured, "get_historical_features was never called"
+        entity_df = captured["entity_df"]
+        assert list(entity_df["channel_id"].unique()) == ["channel_1"]
+        assert list(entity_df["mission_id"].unique()) == ["ESA-Mission1"]
+        assert "event_timestamp" in entity_df.columns
+        # 1-day window at 90s intervals ≈ 960 rows; just assert it's non-trivially large.
+        assert len(entity_df) > 10

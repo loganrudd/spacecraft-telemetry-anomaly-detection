@@ -46,6 +46,11 @@ def _make_synthetic_df() -> pd.DataFrame:
 
     Row i has all feature values equal to i * 0.01, making point-in-time
     lookups deterministic:  rolling_mean_10 at row 50  == 50 * 0.01 == 0.5.
+
+    Rows 0-8 have NaN for ``rolling_mean_10`` to simulate the rolling-window
+    warmup period (window=10 → first 9 rows have insufficient data).  This
+    lets tests assert that Feast returns NaN for early rows rather than a
+    fabricated value.
     """
     timestamps = [_BASE_TS + pd.Timedelta(seconds=_INTERVAL_S * i) for i in range(_N_ROWS)]
     # Cast to microsecond-precision UTC — matches the format written by Phase 2 Spark pipeline.
@@ -60,7 +65,12 @@ def _make_synthetic_df() -> pd.DataFrame:
     for fd in FEATURE_DEFINITIONS:
         data[fd.name] = [float(i) * 0.01 for i in range(_N_ROWS)]
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    # Simulate rolling_mean_10 warmup: the first 9 rows (window-1) lack enough
+    # prior data points, so they would be NaN in the real Spark output.
+    _ROLLING_MEAN_10_WARMUP = 9  # window=10, so rows 0-8 are NaN
+    df.loc[:_ROLLING_MEAN_10_WARMUP - 1, "rolling_mean_10"] = float("nan")
+    return df
 
 
 # ---------------------------------------------------------------------------

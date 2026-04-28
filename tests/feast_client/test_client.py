@@ -93,6 +93,25 @@ class TestGetHistoricalFeatures:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 0
 
+    def test_handles_warmup_window_returns_nan(self, materialized_store: FeatureStore) -> None:
+        # Row 5 is within the rolling_mean_10 warmup window (rows 0-8 are NaN
+        # in the synthetic fixture because window=10 needs 9 prior rows).
+        row_5_ts = _BASE_TS + pd.Timedelta(seconds=_INTERVAL_S * 5)
+        entity_df = pd.DataFrame(
+            {
+                "channel_id": [_CHANNEL],
+                "mission_id": [_MISSION],
+                "event_timestamp": pd.array([row_5_ts], dtype="datetime64[us, UTC]"),
+            }
+        )
+
+        result = get_historical_features(materialized_store, entity_df)
+
+        assert len(result) == 1, "Expected exactly one row back"
+        assert pd.isna(result["rolling_mean_10"].iloc[0]), (
+            "rolling_mean_10 should be NaN within the warmup window (rows 0-8)"
+        )
+
     def test_feature_subset_selection(self, materialized_store: FeatureStore) -> None:
         t_20 = _BASE_TS + pd.Timedelta(seconds=_INTERVAL_S * 20)
         entity_df = pd.DataFrame(
@@ -112,12 +131,6 @@ class TestGetHistoricalFeatures:
 
 
 class TestGetOnlineFeatures:
-    def test_returns_dict_for_known_channel(self, materialized_store: FeatureStore) -> None:
-        result = get_online_features_for_channel(materialized_store, _CHANNEL, _MISSION)
-
-        assert isinstance(result, dict)
-        assert len(result) > 0
-
     def test_returns_latest_row_values(self, materialized_store: FeatureStore) -> None:
         # Latest row is index (_N_ROWS - 1) == 199; value == 199 * 0.01 == 1.99
         result = get_online_features_for_channel(materialized_store, _CHANNEL, _MISSION)
