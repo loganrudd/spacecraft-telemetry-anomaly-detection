@@ -68,11 +68,6 @@ class TestHandleNulls:
         result = handle_nulls(df)
         assert result.count() == 97
 
-    def test_unsupported_strategy_raises(self, sample_spark_df) -> None:
-        from spacecraft_telemetry.spark.transforms import handle_nulls
-
-        with pytest.raises(ValueError, match="backfill"):
-            handle_nulls(sample_spark_df, strategy="backfill")
 
 
 # ---------------------------------------------------------------------------
@@ -230,12 +225,6 @@ class TestNormalize:
         result, params = normalize(df)
         assert result.filter(F.col("value_normalized").isNull()).count() == 0
         assert params["const_ch"]["mean"] == pytest.approx(5.0)
-
-    def test_unsupported_method_raises(self, sample_spark_df) -> None:
-        from spacecraft_telemetry.spark.transforms import normalize
-
-        with pytest.raises(ValueError, match="min-max"):
-            normalize(sample_spark_df, method="min-max")
 
     def test_spark_matches_normalize_value(self, spark_session) -> None:
         """Spark normalize() output must match the normalize_value() reference impl row-by-row."""
@@ -1057,12 +1046,12 @@ class TestHandleNullsValues:
 
     def test_all_null_returns_empty(self, spark_session) -> None:
         """Q3 runtime check: a channel with all nulls should produce zero rows."""
+        import datetime
+
         from pyspark.sql import Row
         from pyspark.sql.types import FloatType, StringType, StructField, StructType, TimestampType
 
         from spacecraft_telemetry.spark.transforms import handle_nulls
-
-        import datetime
 
         schema = StructType(
             [

@@ -15,6 +15,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
 .PHONY: help setup test test-all lint format typecheck \
         download-sample explore \
         spark-test spark-preprocess \
+        feast-apply feast-materialize feast-test feast-teardown \
         clean
 
 help:          ## Show this help message
@@ -25,8 +26,8 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + extras)
-	$(UV) sync --extra dev
+setup:         ## Install all dependency groups (dev + spark + tracking)
+	$(UV) sync --extra dev --extra spark --extra tracking
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -75,6 +76,25 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=ESA-Mission1)
 	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
 		--mission $(MISSION)
+
+# ---------------------------------------------------------------------------
+# Feast feature store (Phase 3)
+# ---------------------------------------------------------------------------
+
+feast-apply:      ## Register Feast definitions to local registry
+	$(RUN) spacecraft-telemetry feast apply --mission $(MISSION)
+
+feast-materialize: ## Materialize features to online store — incremental (MISSION=ESA-Mission1)
+	$(RUN) spacecraft-telemetry feast materialize --mission $(MISSION)
+
+feast-test:       ## Run only Feast tests
+	$(RUN) python -m pytest tests/feast_client/ -v
+
+feast-teardown:   ## Wipe local registry + online store
+	$(RUN) python -c "\
+from spacecraft_telemetry.core.config import load_settings; \
+from spacecraft_telemetry.feast_client.store import create_feature_store, teardown; \
+teardown(create_feature_store(load_settings('local')))"
 
 # ---------------------------------------------------------------------------
 # Housekeeping
