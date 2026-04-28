@@ -79,7 +79,7 @@ ESA Parquet (Zenodo/GCS)
   → Download + Sample (Phase 1)        ← complete
   → PySpark preprocessing (Phase 2)    ← complete
   → Feast feature store (Phase 3)      ← complete
-  → Telemanom LSTM training (Phase 4)
+  → Telemanom LSTM training (Phase 4)  ← In progress
   → Ray parallel training (Phase 5)
   → Ray Tune HPO (Phase 6)
   → MLflow tracking (Phase 7)
@@ -172,7 +172,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 | 1 | Repo scaffold + data ingestion | ✅ Complete |
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
 | 3 | Feast feature store integration | ✅ Complete |
-| 4 | Telemanom model drop-in | Planned |
+| 4 | Telemanom model drop-in | In progress |
 | 5 | Ray parallel training | Planned |
 | 6 | Ray Tune HPO | Planned |
 | 7 | MLflow integration | Planned |
