@@ -15,6 +15,7 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -48,7 +49,7 @@ def _make_synthetic_df() -> pd.DataFrame:
     lookups deterministic:  rolling_mean_10 at row 50  == 50 * 0.01 == 0.5.
 
     Rows 0-8 have NaN for ``rolling_mean_10`` to simulate the rolling-window
-    warmup period (window=10 → first 9 rows have insufficient data).  This
+    warmup period (window=10 -> first 9 rows have insufficient data).  This
     lets tests assert that Feast returns NaN for early rows rather than a
     fabricated value.
     """
@@ -56,14 +57,18 @@ def _make_synthetic_df() -> pd.DataFrame:
     # Cast to microsecond-precision UTC — matches the format written by Phase 2 Spark pipeline.
     ts_array = pd.array(timestamps, dtype="datetime64[us, UTC]")
 
+    # Vectorised: np.arange broadcast across all feature columns (~1ms vs ~10ms for
+    # 14 separate list comprehensions).
+    values = np.arange(_N_ROWS, dtype=np.float32) * np.float32(0.01)
+
     data: dict[str, Any] = {
         "telemetry_timestamp": ts_array,
         "channel_id": [_CHANNEL] * _N_ROWS,
         "mission_id": [_MISSION] * _N_ROWS,
-        "value_normalized": [float(i) * 0.01 for i in range(_N_ROWS)],
+        "value_normalized": values,
     }
     for fd in FEATURE_DEFINITIONS:
-        data[fd.name] = [float(i) * 0.01 for i in range(_N_ROWS)]
+        data[fd.name] = values.copy()
 
     df = pd.DataFrame(data)
     # Simulate rolling_mean_10 warmup: the first 9 rows (window-1) lack enough
@@ -115,17 +120,41 @@ def tmp_feast_repo(tmp_path: Path) -> Generator[Path, None, None]:
     yield feature_repo_dir
 
 
-@pytest.fixture()
-def materialized_store(tmp_feast_repo: Path) -> Generator[Any, None, None]:
+@pytest.fixture(scope="module")
+def materialized_store(tmp_path_factory: pytest.TempPathFactory) -> Generator[Any, None, None]:
     """FeatureStore with registry applied and online store fully materialized.
 
-    Builds a hermetic FeatureView pointing at the synthetic Parquet source
-    created by tmp_feast_repo.  Uses ttl_days=99999 so the 2000-era fixture
-    data is never considered stale during online retrieval.
+    Module-scoped so the expensive apply + materialize (~700ms) runs once per
+    test module instead of once per test function.  All tests that use this
+    fixture must be read-only — do not mutate the store state.
+
+    Uses tmp_path_factory (module-scoped compatible) rather than tmp_path
+    (function-scoped) to create the hermetic Parquet source and feature_store.yaml.
     """
     from feast import FeatureStore
 
-    source_dir = tmp_feast_repo.parent / "source"
+    tmp_path = tmp_path_factory.mktemp("feast_module")
+
+    # Replicate the layout created by tmp_feast_repo (kept function-scoped for
+    # test_store.py which mutates the registry).
+    parquet_dir = tmp_path / "source" / f"mission_id={_MISSION}" / f"channel_id={_CHANNEL}"
+    parquet_dir.mkdir(parents=True)
+    _make_synthetic_df().to_parquet(parquet_dir / "part.parquet", index=False)
+
+    feature_repo_dir = tmp_path / "feature_repo"
+    data_dir = feature_repo_dir / "data"
+    data_dir.mkdir(parents=True)
+    config: dict[str, Any] = {
+        "project": "spacecraft_telemetry",
+        "provider": "local",
+        "registry": str(data_dir / "registry.db"),
+        "offline_store": {"type": "file"},
+        "online_store": {"type": "sqlite", "path": str(data_dir / "online_store.db")},
+        "entity_key_serialization_version": 2,
+    }
+    (feature_repo_dir / "feature_store.yaml").write_text(yaml.dump(config))
+
+    source_dir = tmp_path / "source"
     channel, mission = build_entities()
     fv = build_feature_view(
         source_path=str(source_dir),
@@ -133,7 +162,7 @@ def materialized_store(tmp_feast_repo: Path) -> Generator[Any, None, None]:
         ttl_days=99999,
     )
 
-    store = FeatureStore(repo_path=str(tmp_feast_repo))
+    store = FeatureStore(repo_path=str(feature_repo_dir))
     store.apply([channel, mission, fv.source, fv])
 
     # Materialize just past the last synthetic data point.

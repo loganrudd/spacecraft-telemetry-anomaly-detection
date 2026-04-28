@@ -487,7 +487,7 @@ def feast_retrieve(
         # O(N log N) point-in-time join on ~29 k rows per 30-day window.
         start_utc = start.replace(tzinfo=UTC) if start.tzinfo is None else start
         end_utc = end_ts.replace(tzinfo=UTC) if end_ts.tzinfo is None else end_ts
-        timestamps = pd.date_range(start=start_utc, end=end_utc, freq="90s", tz="UTC")
+        timestamps = pd.date_range(start=start_utc, end=end_utc, freq="1h", tz="UTC")
         entity_df = pd.DataFrame(
             {
                 "channel_id": channel,
