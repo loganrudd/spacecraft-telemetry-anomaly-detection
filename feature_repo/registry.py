@@ -12,6 +12,7 @@ apply_definitions() so config errors surface with a clear traceback.
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 from feast import Entity, FeatureView, FileSource
 from feast.value_type import ValueType
@@ -21,6 +22,12 @@ from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
 from spacecraft_telemetry.feast_client.repo import build_schema_from_definitions
 
 _settings = load_settings()
+
+# Resolve source_path to absolute so Feast doesn't mis-resolve it relative
+# to repo_path (feature_repo/).  __file__ is feature_repo/registry.py, so
+# its parent's parent is the repo root.
+_repo_root = Path(__file__).parent.parent
+_source_path = str((_repo_root / _settings.feast.source_path).resolve())
 
 channel = Entity(
     name="channel",
@@ -38,7 +45,7 @@ mission = Entity(
 
 telemetry_source = FileSource(
     name="telemetry_features_source",
-    path=str(_settings.feast.source_path),
+    path=_source_path,
     timestamp_field="telemetry_timestamp",
 )
 
