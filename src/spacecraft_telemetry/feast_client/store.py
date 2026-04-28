@@ -5,14 +5,14 @@ Usage:
     from spacecraft_telemetry.feast_client.store import (
         apply_definitions,
         create_feature_store,
+        ensure_applied,
         materialize,
-        teardown,
     )
 
     settings = load_settings()
     store = create_feature_store(settings)
-    apply_definitions(store)
-    materialize(store, end_date=datetime.now(timezone.utc))
+    apply_definitions(store, settings)
+    materialize(store, end_date=datetime.now(UTC))
 """
 
 from __future__ import annotations
@@ -42,33 +42,38 @@ def create_feature_store(settings: Settings) -> FeatureStore:
     return FeatureStore(repo_path=str(repo_path))
 
 
-def apply_definitions(store: FeatureStore) -> dict[str, int]:
+def apply_definitions(store: FeatureStore, settings: Settings) -> dict[str, int]:
     """Register entities and feature views to the Feast registry.
 
-    Lazy-imports feature_repo.registry so any config error surfaces with a
-    clear traceback at call time, not at module import.
-
-    feature_repo/ lives at the repo root (not inside src/), so its parent
-    directory is added to sys.path before the import if not already present.
+    Builds Feast objects directly from feast_client.repo builders — no import
+    of feature_repo.registry, no sys.path mutation.  source_path is resolved
+    to absolute from the repo root so Feast doesn't mis-resolve it relative
+    to repo_path.
 
     Args:
-        store: FeatureStore instance from create_feature_store().
+        store:    FeatureStore instance from create_feature_store().
+        settings: Settings containing feast config (source_path, view_name,
+                  ttl_days).
 
     Returns:
         Dict with keys "entities" and "feature_views" (counts of registered objects).
     """
-    import sys
+    from spacecraft_telemetry.feast_client.repo import build_entities, build_feature_view
 
-    repo_root = str(Path(store.repo_path).resolve().parent)
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
+    repo_root = Path(store.repo_path).resolve().parent
+    source_path = str((repo_root / settings.feast.source_path).resolve())
 
-    from feature_repo.registry import channel, mission, telemetry_features, telemetry_source
+    channel, mission = build_entities()
+    fv = build_feature_view(
+        source_path=source_path,
+        view_name=settings.feast.feature_view_name,
+        ttl_days=settings.feast.ttl_days,
+    )
 
     project = store.project
-    log.info("feast.apply.start", project=project)
+    log.info("feast.apply.start", project=project, source_path=source_path)
 
-    store.apply([channel, mission, telemetry_source, telemetry_features])
+    store.apply([channel, mission, fv.source, fv])
 
     n_entities = len(store.list_entities())
     n_feature_views = len(store.list_feature_views())
@@ -80,6 +85,24 @@ def apply_definitions(store: FeatureStore) -> dict[str, int]:
         n_feature_views=n_feature_views,
     )
     return {"entities": n_entities, "feature_views": n_feature_views}
+
+
+def ensure_applied(store: FeatureStore, settings: Settings) -> None:
+    """Apply definitions only if the registry does not yet exist.
+
+    Used by materialize and retrieve so that a freshly-created store is
+    auto-registered without redundant apply calls on every subsequent run.
+
+    Args:
+        store:    FeatureStore instance from create_feature_store().
+        settings: Settings passed through to apply_definitions if needed.
+    """
+    registry_path = Path(store.repo_path) / "data" / "registry.db"
+    if registry_path.exists():
+        log.debug("feast.apply.skip", reason="registry exists", path=str(registry_path))
+    else:
+        log.info("feast.apply.auto", reason="registry not found, applying now")
+        apply_definitions(store, settings)
 
 
 def materialize(

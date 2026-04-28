@@ -346,7 +346,7 @@ def feast_apply(ctx: click.Context, mission: str | None) -> None:
 
     log.info("feast.apply.start", repo_path=str(settings.feast.repo_path))
     store = create_feature_store(settings)
-    counts = apply_definitions(store)
+    counts = apply_definitions(store, settings)
     click.echo(f"Registry      : {settings.feast.repo_path}/data/registry.db")
     click.echo(f"Entities      : {counts['entities']}")
     click.echo(f"Feature views : {counts['feature_views']}")
@@ -394,8 +394,8 @@ def feast_materialize(
     from datetime import datetime
 
     from spacecraft_telemetry.feast_client.store import (
-        apply_definitions,
         create_feature_store,
+        ensure_applied,
         materialize,
     )
 
@@ -404,8 +404,8 @@ def feast_materialize(
 
     end = end_date or datetime.now(tz=UTC)
     store = create_feature_store(settings)
-    # Ensure definitions are registered before materializing.
-    apply_definitions(store)
+    # Auto-register definitions if the registry doesn't exist yet.
+    ensure_applied(store, settings)
 
     log.info(
         "feast.materialize.cli.start",
@@ -468,11 +468,11 @@ def feast_retrieve(
         get_historical_features,
         get_online_features_for_channel,
     )
-    from spacecraft_telemetry.feast_client.store import apply_definitions, create_feature_store
+    from spacecraft_telemetry.feast_client.store import create_feature_store, ensure_applied
 
     settings = _resolve_feast_settings(ctx, mission)
     store = create_feature_store(settings)
-    apply_definitions(store)
+    ensure_applied(store, settings)
 
     if mode == "online":
         result = get_online_features_for_channel(store, channel_id=channel, mission_id=mission)
@@ -481,9 +481,10 @@ def feast_retrieve(
         if start is None:
             raise click.UsageError("--start is required when --mode=historical")
         end_ts = end or datetime.now(tz=UTC)
-        # Build a small entity_df spanning the requested window using real timestamps
-        # from the offline Parquet. For the CLI we synthesize a grid at 90s intervals;
-        # Phase 4 (training) will supply real telemetry timestamps instead.
+        # NOTE (debug-only): synthesises a regular 90-second grid over the window.
+        # This does NOT honour ESA's irregular sampling — Phase 4 training
+        # supplies real telemetry timestamps instead.  Large windows are slow:
+        # O(N log N) point-in-time join on ~29 k rows per 30-day window.
         start_utc = start.replace(tzinfo=UTC) if start.tzinfo is None else start
         end_utc = end_ts.replace(tzinfo=UTC) if end_ts.tzinfo is None else end_ts
         timestamps = pd.date_range(start=start_utc, end=end_utc, freq="90s", tz="UTC")

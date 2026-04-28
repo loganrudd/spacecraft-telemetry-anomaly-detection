@@ -296,7 +296,10 @@ class TestFeastCommands:
             result = runner.invoke(main, ["--env=local", "feast", "apply"])
 
         assert result.exit_code == 0, result.output
-        mock_apply.assert_called_once_with(mock_store)
+        # apply_definitions(store, settings) — only check store arg; settings vary by env
+        call_args = mock_apply.call_args
+        assert call_args is not None
+        assert call_args.args[0] is mock_store
         assert "Feature views : 1" in result.output
 
     def test_feast_apply_mission_override(

@@ -2,7 +2,7 @@
 
 Public API:
   repo.py   — build_schema_from_definitions, build_entities, build_feature_view, feast_dtype_for
-  store.py  — create_feature_store, apply_definitions, materialize, teardown
+  store.py  — create_feature_store, apply_definitions, ensure_applied, materialize, teardown
   client.py — get_historical_features, get_online_features_for_channel
 """
 
@@ -19,6 +19,7 @@ from spacecraft_telemetry.feast_client.repo import (
 from spacecraft_telemetry.feast_client.store import (
     apply_definitions,
     create_feature_store,
+    ensure_applied,
     materialize,
     teardown,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "build_feature_view",
     "build_schema_from_definitions",
     "create_feature_store",
+    "ensure_applied",
     "feast_dtype_for",
     "get_historical_features",
     "get_online_features_for_channel",

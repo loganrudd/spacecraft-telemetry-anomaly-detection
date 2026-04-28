@@ -1,25 +1,22 @@
-"""Feast feature registry — loaded by the Feast CLI and feast_client.store.
+"""Feast feature registry — thin shim for the Feast CLI.
 
-This file is the adapter between the framework-agnostic FEATURE_DEFINITIONS
-registry and Feast's Entity/FeatureView objects.  Module-level execution is
-intentional: Feast resolves registry contents at import time.
+This file is the entry point for `feast apply` / `feast materialize` run
+directly from the feature_repo/ directory.  All construction logic lives in
+feast_client.repo so production code and this shim share one implementation.
 
-The Feast CLI discovers objects in this file by scanning the feature_repo/
-directory.  feast_client/store.py lazy-imports this module inside
-apply_definitions() so config errors surface with a clear traceback.
+The Feast CLI scans this module for Entity and FeatureView objects at import
+time, so module-level execution is expected and intentional here.
+
+Do NOT import this module from application code — use
+feast_client.store.apply_definitions() instead.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
 from pathlib import Path
 
-from feast import Entity, FeatureView, FileSource
-from feast.value_type import ValueType
-
 from spacecraft_telemetry.core.config import load_settings
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
-from spacecraft_telemetry.feast_client.repo import build_schema_from_definitions
+from spacecraft_telemetry.feast_client.repo import build_entities, build_feature_view
 
 _settings = load_settings()
 
@@ -29,32 +26,11 @@ _settings = load_settings()
 _repo_root = Path(__file__).parent.parent
 _source_path = str((_repo_root / _settings.feast.source_path).resolve())
 
-channel = Entity(
-    name="channel",
-    join_keys=["channel_id"],
-    value_type=ValueType.STRING,
-    description="ESA telemetry channel id (e.g. channel_1)",
+channel, mission = build_entities()
+telemetry_features = build_feature_view(
+    source_path=_source_path,
+    view_name=_settings.feast.feature_view_name,
+    ttl_days=_settings.feast.ttl_days,
 )
-
-mission = Entity(
-    name="mission",
-    join_keys=["mission_id"],
-    value_type=ValueType.STRING,
-    description="ESA mission identifier",
-)
-
-telemetry_source = FileSource(
-    name="telemetry_features_source",
-    path=_source_path,
-    timestamp_field="telemetry_timestamp",
-)
-
-telemetry_features = FeatureView(
-    name=_settings.feast.feature_view_name,
-    entities=[channel, mission],
-    schema=build_schema_from_definitions(FEATURE_DEFINITIONS),
-    source=telemetry_source,
-    ttl=timedelta(days=_settings.feast.ttl_days),
-    online=True,
-    tags={"dataset": "esa-anomaly", "channels_anonymized": "true"},
-)
+# Expose the FileSource as a module-level name so `feast apply` can register it.
+telemetry_source = telemetry_features.batch_source
