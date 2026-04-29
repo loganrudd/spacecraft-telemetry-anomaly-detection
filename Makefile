@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL         := bash
 MISSION       ?= ESA-Mission1
+CHANNEL       ?= channel_1
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
 UV := uv
@@ -16,6 +17,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         download-sample explore \
         spark-test spark-preprocess \
         feast-apply feast-materialize feast-test feast-teardown \
+        model-train model-score model-evaluate model-test \
         clean
 
 help:          ## Show this help message
@@ -26,8 +28,8 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + spark + tracking)
-	$(UV) sync --extra dev --extra spark --extra tracking
+setup:         ## Install all dependency groups (dev + spark + tracking + ml)
+	$(UV) sync --extra dev --extra spark --extra tracking --extra ml
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -95,6 +97,25 @@ feast-teardown:   ## Wipe local registry + online store
 from spacecraft_telemetry.core.config import load_settings; \
 from spacecraft_telemetry.feast_client.store import create_feature_store, teardown; \
 teardown(create_feature_store(load_settings('local')))"
+
+# ---------------------------------------------------------------------------
+# Telemanom model (Phase 4)
+# ---------------------------------------------------------------------------
+
+model-train:      ## Train Telemanom LSTM on one channel (MISSION=…, CHANNEL=channel_1)
+	$(RUN) spacecraft-telemetry model train \
+		--mission $(MISSION) --channel $(CHANNEL)
+
+model-score:      ## Score a trained model against its test split (MISSION=…, CHANNEL=…)
+	$(RUN) spacecraft-telemetry model score \
+		--mission $(MISSION) --channel $(CHANNEL)
+
+model-evaluate:   ## Train + score end-to-end (Phase 4 single-channel demo)
+	$(RUN) spacecraft-telemetry model evaluate \
+		--mission $(MISSION) --channel $(CHANNEL)
+
+model-test:       ## Run only model tests (fast; excludes @pytest.mark.slow)
+	$(RUN) pytest tests/model/ -m "not slow" -v
 
 # ---------------------------------------------------------------------------
 # Housekeeping

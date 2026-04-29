@@ -497,3 +497,183 @@ def feast_retrieve(
         )
         df = get_historical_features(store, entity_df)
         click.echo(df.to_string())
+
+
+# ---------------------------------------------------------------------------
+# model group
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+def model() -> None:
+    """Telemanom LSTM training + scoring commands."""
+
+
+@model.command("train")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option("--channel", required=True, help="Channel ID (e.g. channel_1).")
+@click.option(
+    "--epochs",
+    type=int,
+    default=None,
+    help="Override model.epochs from config.",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=None,
+    help="Override model.batch_size from config.",
+)
+@click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "mps", "cuda"]),
+    default=None,
+    help="Override model.device from config.",
+)
+@click.pass_context
+def model_train(
+    ctx: click.Context,
+    mission: str,
+    channel: str,
+    epochs: int | None,
+    batch_size: int | None,
+    device: str | None,
+) -> None:
+    """Train a TelemanomLSTM on a single telemetry channel.
+
+    Reads windowed Parquet from spark.processed_data_dir/{mission}/train/ and
+    writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
+
+    Examples:
+
+        # Default config
+        spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
+
+        # Quick dev run
+        spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1 \\
+            --epochs 5 --device cpu
+    """
+    from spacecraft_telemetry.model.training import train_channel
+
+    settings = ctx.obj["settings"]
+    model_overrides: dict[str, object] = {}
+    if epochs is not None:
+        model_overrides["epochs"] = epochs
+    if batch_size is not None:
+        model_overrides["batch_size"] = batch_size
+    if device is not None:
+        model_overrides["device"] = device
+    if model_overrides:
+        settings = settings.model_copy(
+            update={"model": settings.model.model_copy(update=model_overrides)}
+        )
+
+    result = train_channel(settings, mission, channel)
+
+    from spacecraft_telemetry.model.io import artifact_paths
+    paths = artifact_paths(settings, mission, channel)
+
+    click.echo(f"Mission      : {mission}")
+    click.echo(f"Channel      : {channel}")
+    click.echo(f"Epochs run   : {result.epochs_run}")
+    click.echo(f"Best epoch   : {result.best_epoch}")
+    click.echo(f"Best val loss: {result.best_val_loss:.6f}")
+    click.echo(f"Artifacts    : {paths.root}")
+
+
+@model.command("score")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option("--channel", required=True, help="Channel ID (e.g. channel_1).")
+@click.pass_context
+def model_score(
+    ctx: click.Context,
+    mission: str,
+    channel: str,
+) -> None:
+    """Score a trained model against its test split and persist metrics.
+
+    Loads model artifacts from model.artifacts_dir/{mission}/{channel}/ and
+    reads test Parquet from spark.processed_data_dir/{mission}/test/.
+    Writes errors.npy, threshold.json, metrics.json to the artifacts dir.
+
+    Examples:
+
+        spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
+    """
+    from spacecraft_telemetry.model.scoring import score_channel
+
+    settings = ctx.obj["settings"]
+    metrics = score_channel(settings, mission, channel)
+
+    click.echo(f"Mission  : {mission}")
+    click.echo(f"Channel  : {channel}")
+    click.echo(f"Precision: {metrics['precision']:.4f}")
+    click.echo(f"Recall   : {metrics['recall']:.4f}")
+    click.echo(f"F1       : {metrics['f1']:.4f}")
+    click.echo(f"F0.5     : {metrics['f0_5']:.4f}")
+
+
+@model.command("evaluate")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option("--channel", required=True, help="Channel ID (e.g. channel_1).")
+@click.option("--epochs", type=int, default=None, help="Override model.epochs from config.")
+@click.option("--batch-size", type=int, default=None, help="Override model.batch_size from config.")
+@click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "mps", "cuda"]),
+    default=None,
+    help="Override model.device from config.",
+)
+@click.pass_context
+def model_evaluate(
+    ctx: click.Context,
+    mission: str,
+    channel: str,
+    epochs: int | None,
+    batch_size: int | None,
+    device: str | None,
+) -> None:
+    """Train then score a single channel end-to-end (Phase 4 demo convenience).
+
+    Equivalent to running `model train` followed by `model score`.
+
+    Examples:
+
+        spacecraft-telemetry model evaluate --mission ESA-Mission1 --channel channel_1
+    """
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+
+    settings = ctx.obj["settings"]
+    model_overrides: dict[str, object] = {}
+    if epochs is not None:
+        model_overrides["epochs"] = epochs
+    if batch_size is not None:
+        model_overrides["batch_size"] = batch_size
+    if device is not None:
+        model_overrides["device"] = device
+    if model_overrides:
+        settings = settings.model_copy(
+            update={"model": settings.model.model_copy(update=model_overrides)}
+        )
+
+    result = train_channel(settings, mission, channel)
+
+    from spacecraft_telemetry.model.io import artifact_paths
+    paths = artifact_paths(settings, mission, channel)
+
+    click.echo(f"Mission      : {mission}")
+    click.echo(f"Channel      : {channel}")
+    click.echo(f"--- train ---")
+    click.echo(f"Epochs run   : {result.epochs_run}")
+    click.echo(f"Best epoch   : {result.best_epoch}")
+    click.echo(f"Best val loss: {result.best_val_loss:.6f}")
+    click.echo(f"Artifacts    : {paths.root}")
+
+    metrics = score_channel(settings, mission, channel)
+
+    click.echo(f"--- score ---")
+    click.echo(f"Precision: {metrics['precision']:.4f}")
+    click.echo(f"Recall   : {metrics['recall']:.4f}")
+    click.echo(f"F1       : {metrics['f1']:.4f}")
+    click.echo(f"F0.5     : {metrics['f0_5']:.4f}")

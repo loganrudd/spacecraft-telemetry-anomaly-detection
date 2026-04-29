@@ -2,15 +2,15 @@
 
 End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detection using the [ESA Anomaly Dataset](https://zenodo.org/records/12528696).
 
-**Status: Phase 3 of 12 complete — Feast Feature Store Integration**
+**Status: Phase 4 of 12 complete — Telemanom LSTM Model**
 
 ## Tech Stack
 
 - Python 3.12, uv
 - PySpark 4.1 (preprocessing — Phase 2 ✅)
 - Feast 0.47 (feature store — Phase 3 ✅)
+- PyTorch (Telemanom LSTM — Phase 4 ✅)
 - Ray 2.x Core + Tune (parallel training, HPO — Phases 5–6)
-- PyTorch (Telemanom LSTM — Phase 4)
 - MLflow 3.x (experiment tracking, model registry — Phase 7)
 - Evidently (drift monitoring — Phase 8)
 - FastAPI + SSE (serving — Phase 9)
@@ -62,7 +62,12 @@ make feast-test
 # Run only the Spark tests
 make spark-test
 
-# Or call the CLI directly
+# Train Telemanom LSTM on a single channel (requires spark-preprocess first)
+make model-evaluate MISSION=ESA-Mission1 CHANNEL=channel_1
+
+# Or call the model CLI directly
+uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
 uv run spacecraft-telemetry --help
 uv run spacecraft-telemetry download --mission ESA-Mission1 --sample
 uv run spacecraft-telemetry explore --mission ESA-Mission1
@@ -70,6 +75,9 @@ uv run spacecraft-telemetry spark preprocess --mission ESA-Mission1
 uv run spacecraft-telemetry feast apply --mission ESA-Mission1
 uv run spacecraft-telemetry feast materialize --mission ESA-Mission1
 uv run spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1
+uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry model evaluate --mission ESA-Mission1 --channel channel_1
 ```
 
 ## Architecture
@@ -79,7 +87,7 @@ ESA Parquet (Zenodo/GCS)
   → Download + Sample (Phase 1)        ← complete
   → PySpark preprocessing (Phase 2)    ← complete
   → Feast feature store (Phase 3)      ← complete
-  → Telemanom LSTM training (Phase 4)  ← In progress
+  → Telemanom LSTM training (Phase 4)  ← complete
   → Ray parallel training (Phase 5)
   → Ray Tune HPO (Phase 6)
   → MLflow tracking (Phase 7)
@@ -89,6 +97,48 @@ ESA Parquet (Zenodo/GCS)
   → GCP deployment (Phase 11)
   → Documentation + polish (Phase 12)
 
+```
+
+## Phase 4 Components
+
+| Module | Description |
+|--------|-------------|
+| `model/architecture.py` | `TelemanomLSTM`: 2-layer LSTM (hidden=80, dropout=0.3) → linear head. `build_model(cfg)` factory. |
+| `model/dataset.py` | `load_windowed_parquet` reads Phase 2 train/test Parquet via PyArrow (no Spark at training time). `WindowedSequenceDataset`, `make_dataloaders`. |
+| `model/training.py` | `train_channel(settings, mission, channel)` — Adam + MSE, early stopping, per-call seed. Returns `TrainingResult`. |
+| `model/scoring.py` | Torch-free at module level. EWMA error smoothing, causal rolling threshold, run-length anomaly flagging, precision/recall/F1/F0.5. `score_channel` persists artifacts. |
+| `model/io.py` | `_write_bytes`/`_read_bytes` indirection point (Phase 5 will widen to `gs://`). `save_model`/`load_model` via `BytesIO`. `artifact_paths` for consistent directory layout. |
+| `model/device.py` | `resolve_device(setting)` — auto-selects CUDA→MPS→CPU; raises on unavailable explicit backend. |
+
+### Model Artifact Layout
+
+```
+models/
+  {mission}/
+    {channel}/
+      model.pt                 # LSTM state dict (BytesIO serialized)
+      model_config.json        # Architecture config (load_model ignores current Settings)
+      normalization_params.json
+      errors.npy               # Smoothed prediction errors for the test split
+      threshold.json           # Rolling threshold array + window + z params
+      metrics.json             # precision, recall, f1, f0_5
+      train_log.json           # Per-epoch train/val loss
+```
+
+### Model Commands
+
+```bash
+# Full end-to-end: train + score on one channel
+make model-evaluate MISSION=ESA-Mission1 CHANNEL=channel_1
+
+# Train only (saves model.pt + train_log.json)
+make model-train MISSION=ESA-Mission1 CHANNEL=channel_1
+
+# Score only (requires trained model)
+make model-score MISSION=ESA-Mission1 CHANNEL=channel_1
+
+# Fast model tests (excludes @pytest.mark.slow training loop tests)
+make model-test
 ```
 
 ## Phase 3 Components
@@ -172,7 +222,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 | 1 | Repo scaffold + data ingestion | ✅ Complete |
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
 | 3 | Feast feature store integration | ✅ Complete |
-| 4 | Telemanom model drop-in | In progress |
+| 4 | Telemanom model drop-in | ✅ Complete |
 | 5 | Ray parallel training | Planned |
 | 6 | Ray Tune HPO | Planned |
 | 7 | MLflow integration | Planned |

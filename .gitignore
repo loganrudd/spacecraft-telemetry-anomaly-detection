@@ -37,6 +37,9 @@ data/sample/
 .env
 .env.local
 
+# Model artifacts (local dev only — Phase 7 migrates to MLflow model registry)
+models/
+
 # MLflow
 mlruns/
 mlartifacts/
