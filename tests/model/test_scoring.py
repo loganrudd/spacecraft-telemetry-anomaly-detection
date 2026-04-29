@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -200,3 +202,157 @@ def test_dynamic_threshold_detects_injected_spike() -> None:
     assert np.any(flags[99:104]), (
         "Injected spike at indices 100–102 was not detected by flag_anomalies"
     )
+
+
+# ---------------------------------------------------------------------------
+# predict() — unit tests (require torch)
+# ---------------------------------------------------------------------------
+
+torch = pytest.importorskip("torch")
+
+
+def test_predict_output_shape() -> None:
+    """predict() must return a 1-D array of length N."""
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+    from spacecraft_telemetry.core.config import ModelConfig
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
+    model = build_model(cfg)
+    rng = np.random.default_rng(0)
+    values = rng.standard_normal((20, 10)).astype(np.float32)
+    device = torch.device("cpu")
+
+    out = predict(model, values, device, batch_size=8)
+
+    assert out.shape == (20,), f"Expected shape (20,), got {out.shape}"
+    assert out.dtype == np.float32
+
+
+def test_predict_dtype_is_float32() -> None:
+    """Output dtype must be float32 regardless of batch size."""
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+    from spacecraft_telemetry.core.config import ModelConfig
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
+    model = build_model(cfg)
+    values = np.ones((5, 10), dtype=np.float32)
+
+    out = predict(model, values, torch.device("cpu"), batch_size=5)
+    assert out.dtype == np.float32
+
+
+def test_predict_batched_matches_single_pass() -> None:
+    """Batched predict must produce the same values as a single forward pass."""
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+    from spacecraft_telemetry.core.config import ModelConfig
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
+    model = build_model(cfg)
+    model.eval()
+    rng = np.random.default_rng(1)
+    values = rng.standard_normal((20, 10)).astype(np.float32)
+    device = torch.device("cpu")
+
+    # Reference: single forward pass over all 20 samples at once.
+    with torch.no_grad():
+        x_all = torch.from_numpy(values).unsqueeze(-1)  # (20, 10, 1)
+        expected = model(x_all).squeeze(1).cpu().numpy()
+
+    # predict() with batch_size=8 splits into [8, 8, 4].
+    out = predict(model, values, device, batch_size=8)
+
+    np.testing.assert_allclose(out, expected, rtol=1e-5)
+
+
+def test_predict_sets_eval_mode() -> None:
+    """predict() must call model.eval() — verified by checking training=False."""
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+    from spacecraft_telemetry.core.config import ModelConfig
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
+    model = build_model(cfg)
+    model.train()  # force training mode before calling predict
+    values = np.ones((4, 10), dtype=np.float32)
+
+    predict(model, values, torch.device("cpu"), batch_size=4)
+
+    assert not model.training, "predict() should leave the model in eval mode"
+
+
+# ---------------------------------------------------------------------------
+# score_channel — integration test (slow)
+# ---------------------------------------------------------------------------
+
+
+def _override_settings_for_scoring(
+    base: "object",
+    processed_dir: Path,
+    artifacts_dir: Path,
+) -> "object":
+    """Return a Settings copy pointing at tmp_path directories."""
+    return base.model_copy(  # type: ignore[attr-defined]
+        update={
+            "spark": base.spark.model_copy(  # type: ignore[attr-defined]
+                update={"processed_data_dir": processed_dir}
+            ),
+            "model": base.model.model_copy(  # type: ignore[attr-defined]
+                update={"artifacts_dir": artifacts_dir}
+            ),
+        }
+    )
+
+
+@pytest.mark.slow
+def test_score_channel_artifacts_and_metrics(
+    tiny_windowed_parquet: "object",
+    tmp_path: Path,
+) -> None:
+    """score_channel must write artifacts and return a well-formed metrics dict.
+
+    Mirrors test_train_channel_runs_and_saves_artifacts on the scoring side.
+    Trains a tiny model first (the same pattern as the training integration test),
+    then calls score_channel and validates:
+    - returned dict has all expected keys with float values in [0, 1]
+    - support count keys are non-negative integers
+    - errors.npy, threshold.npy, threshold_config.json, metrics.json all exist on disk
+    """
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.model.io import artifact_paths
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import WindowedParquetFixture
+
+    fx: WindowedParquetFixture = tiny_windowed_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test"),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+    # Train first — score_channel requires model artifacts to exist.
+    train_channel(settings, fx.mission, fx.channel)
+
+    metrics = score_channel(settings, fx.mission, fx.channel)
+
+    # --- metrics dict contract ---
+    float_keys = {"precision", "recall", "f1", "f0_5"}
+    int_keys = {"n_true_positive_labels", "n_predicted_positive_labels"}
+    assert float_keys | int_keys == set(metrics.keys()), (
+        f"Unexpected keys: {set(metrics.keys())}"
+    )
+    for k in float_keys:
+        assert isinstance(metrics[k], float), f"{k} must be float"
+        assert 0.0 <= metrics[k] <= 1.0, f"{k}={metrics[k]} out of [0,1]"
+    for k in int_keys:
+        assert isinstance(metrics[k], int), f"{k} must be int"
+        assert metrics[k] >= 0, f"{k} must be non-negative"
+
+    # --- artifact files ---
+    paths = artifact_paths(settings, fx.mission, fx.channel)
+    assert Path(paths.errors).exists(), "errors.npy not written"
+    assert Path(paths.threshold).exists(), "threshold.npy not written"
+    assert Path(paths.threshold_config).exists(), "threshold_config.json not written"
+    assert Path(paths.metrics).exists(), "metrics.json not written"

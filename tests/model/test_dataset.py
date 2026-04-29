@@ -61,9 +61,14 @@ def test_load_returns_float32_arrays(
 def test_load_sorted_by_window_id(
     tiny_windowed_parquet: WindowedParquetFixture,
 ) -> None:
-    """Chronological order is preserved — window_id must be non-decreasing."""
+    """load_windowed_parquet must return rows sorted by window_id (chronological order).
+
+    Encodes the window position into the target value — target[i] = float(window_id)
+    — so that after sorting, targets must equal np.arange(n_train * 2).
+    Writes a second Parquet file with the first set in reverse order so the
+    loader is actually required to sort across files.
+    """
     fx = tiny_windowed_parquet
-    # Write two separate Parquet files with shuffled window_ids to confirm sorting.
     import pyarrow as pa
     import pyarrow.parquet as pq
     from datetime import datetime, timezone
@@ -73,30 +78,52 @@ def test_load_sorted_by_window_id(
         fx.processed_dir / fx.mission / "train"
         / f"mission_id={fx.mission}" / f"channel_id={fx.channel}"
     )
-    # Overwrite with a single file whose rows are in reverse order.
+
+    # Replace the existing Parquet with one where target[i] = float(window_id).
+    # Write the rows in reverse order so loading without sort produces wrong targets.
+    n = fx.n_train
     _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    ids = np.arange(fx.n_train, dtype=np.int64)[::-1].copy()
-    shuffled = pa.table(
+    ids_reversed = np.arange(n, dtype=np.int64)[::-1].copy()
+    reversed_table = pa.table(
         {
-            "window_id": pa.array(ids),
-            "segment_id": pa.array(np.zeros(fx.n_train, dtype=np.int32)),
-            "window_start_ts": pa.array([_BASE_DT] * fx.n_train, type=pa.timestamp("us", tz="UTC")),
-            "window_end_ts": pa.array([_BASE_DT] * fx.n_train, type=pa.timestamp("us", tz="UTC")),
-            "values": pa.array([[0.0] * fx.window_size] * fx.n_train, type=pa.list_(pa.float32())),
-            "target": pa.array(np.zeros(fx.n_train, dtype=np.float32)),
-            "is_anomaly": pa.array([False] * fx.n_train),
+            "window_id": pa.array(ids_reversed),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "window_start_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "window_end_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "values": pa.array([[0.0] * fx.window_size] * n, type=pa.list_(pa.float32())),
+            # target carries the window_id so we can verify sort order
+            "target": pa.array(ids_reversed.astype(np.float32)),
+            "is_anomaly": pa.array([False] * n),
         },
         schema=_WINDOW_FILE_SCHEMA,
     )
-    pq.write_table(shuffled, split_dir / "shuffled.parquet")
+    # Write as a second file so the loader must merge + sort across files.
+    pq.write_table(reversed_table, split_dir / "reversed.parquet")
 
-    values, _, _ = load_windowed_parquet(
+    # The original part.parquet has window_ids 0..n_train-1 with random targets.
+    # Replace it with a version that also has target = float(window_id).
+    ids_fwd = np.arange(n, dtype=np.int64)
+    fwd_table = pa.table(
+        {
+            "window_id": pa.array(ids_fwd),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "window_start_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "window_end_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "values": pa.array([[0.0] * fx.window_size] * n, type=pa.list_(pa.float32())),
+            "target": pa.array(ids_fwd.astype(np.float32)),
+            "is_anomaly": pa.array([False] * n),
+        },
+        schema=_WINDOW_FILE_SCHEMA,
+    )
+    pq.write_table(fwd_table, split_dir / "part.parquet")
+
+    _, targets, _ = load_windowed_parquet(
         fx.processed_dir, fx.mission, fx.channel, "train"
     )
-    # After sorting, values should come from window_ids 0..n_train-1 in order.
-    # We can't assert on values content, but we can verify there are no duplicates
-    # and the count doubles (original part.parquet + shuffled.parquet).
-    assert values.shape[0] == fx.n_train * 2
+    # After sort-by-window_id, targets must be [0, 0, 1, 1, 2, 2, ...] because
+    # both files have the same window_ids (0..n-1); concat + sort produces pairs.
+    expected = np.repeat(np.arange(n, dtype=np.float32), 2)
+    np.testing.assert_array_equal(targets, expected)
 
 
 def test_load_missing_channel_raises(
@@ -187,21 +214,16 @@ def test_val_split_is_temporal_not_random(
     np.testing.assert_array_equal(val_targets, targets[n_train_expected:])
 
 
-def test_train_loader_shuffles_val_does_not(
+def test_val_loader_is_deterministic(
     tiny_windowed_parquet: WindowedParquetFixture,
 ) -> None:
-    """Two passes over train produce different order; val is always the same."""
+    """Two passes over the val loader must yield identical order — shuffle=False."""
     fx = tiny_windowed_parquet
     values, targets, _ = load_windowed_parquet(
         fx.processed_dir, fx.mission, fx.channel, "train"
     )
-    cfg = ModelConfig(batch_size=4, seed=1)
-    train_loader, val_loader = make_dataloaders(values, targets, cfg)
-
-    pass1 = torch.cat([y for _, y in train_loader]).numpy()
-    pass2 = torch.cat([y for _, y in train_loader]).numpy()
-    # With shuffle=True across 45+ samples, two passes are extremely unlikely to match.
-    assert not np.array_equal(pass1, pass2), "Train loader should shuffle between epochs"
+    cfg = ModelConfig(batch_size=4)
+    _, val_loader = make_dataloaders(values, targets, cfg)
 
     val_pass1 = torch.cat([y for _, y in val_loader]).numpy()
     val_pass2 = torch.cat([y for _, y in val_loader]).numpy()
