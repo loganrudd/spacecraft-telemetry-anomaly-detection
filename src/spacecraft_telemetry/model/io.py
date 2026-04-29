@@ -58,13 +58,14 @@ class ModelArtifactPaths:
     """Paths for all artifacts produced by training and scoring a single channel."""
 
     root: Path | str
-    model: Path | str       # model.pt         — serialized state dict
-    config: Path | str      # model_config.json — architecture hyperparams
-    norm: Path | str        # normalization_params.json — copied from Spark output
-    errors: Path | str      # errors.npy        — per-window prediction errors (scoring)
-    threshold: Path | str   # threshold.json    — threshold series + config (scoring)
-    metrics: Path | str     # metrics.json      — precision/recall/F0.5 (scoring)
-    train_log: Path | str   # train_log.json    — per-epoch train/val losses (training)
+    model: Path | str              # model.pt              — serialized state dict
+    config: Path | str             # model_config.json     — architecture hyperparams
+    norm: Path | str               # normalization_params.json — copied from Spark output
+    errors: Path | str             # errors.npy            — per-window prediction errors (scoring)
+    threshold: Path | str          # threshold.npy         — rolling threshold series (scoring)
+    threshold_config: Path | str   # threshold_config.json — {window, z} params (scoring)
+    metrics: Path | str            # metrics.json          — precision/recall/F0.5 (scoring)
+    train_log: Path | str          # train_log.json        — per-epoch train/val losses (training)
 
 
 def artifact_paths(settings: Settings, mission: str, channel: str) -> ModelArtifactPaths:
@@ -76,7 +77,8 @@ def artifact_paths(settings: Settings, mission: str, channel: str) -> ModelArtif
         config=root / "model_config.json",
         norm=root / "normalization_params.json",
         errors=root / "errors.npy",
-        threshold=root / "threshold.json",
+        threshold=root / "threshold.npy",
+        threshold_config=root / "threshold_config.json",
         metrics=root / "metrics.json",
         train_log=root / "train_log.json",
     )
@@ -211,9 +213,22 @@ def save_metrics(paths: ModelArtifactPaths, metrics: dict[str, Any]) -> None:
     _write_bytes(paths.metrics, json.dumps(metrics, indent=2).encode())
 
 
-def save_threshold(paths: ModelArtifactPaths, data: dict[str, Any]) -> None:
-    """Write threshold series and config to threshold.json."""
-    _write_bytes(paths.threshold, json.dumps(data, indent=2).encode())
+def save_threshold(
+    paths: ModelArtifactPaths,
+    threshold: "Any",
+    config: dict[str, Any],
+) -> None:
+    """Serialize threshold series as threshold.npy and params as threshold_config.json.
+
+    Mirrors the save_errors pattern — series as binary .npy, config as JSON.
+    Keeps model_config.json architecture-only (threshold params are scoring concerns).
+    """
+    import numpy as np
+
+    buf = _io.BytesIO()
+    np.save(buf, threshold)
+    _write_bytes(paths.threshold, buf.getvalue())
+    _write_bytes(paths.threshold_config, json.dumps(config, indent=2).encode())
 
 
 def save_errors(paths: ModelArtifactPaths, errors: "Any") -> None:

@@ -116,6 +116,12 @@ def make_dataloaders(
     from torch.utils.data import DataLoader
 
     n = len(values)
+    if n < 2:
+        raise ValueError(
+            f"Too few windows ({n}) to create a train/val split. "
+            "Need at least 2 windows (1 train + 1 val). "
+            "Increase the time series length or decrease --window-size."
+        )
     n_val = max(1, int(n * model_config.val_fraction))
     n_train = n - n_val
 

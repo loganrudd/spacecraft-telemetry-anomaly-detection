@@ -77,7 +77,6 @@ uv run spacecraft-telemetry feast materialize --mission ESA-Mission1
 uv run spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1
 uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
 uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
-uv run spacecraft-telemetry model evaluate --mission ESA-Mission1 --channel channel_1
 ```
 
 ## Architecture
@@ -120,8 +119,9 @@ models/
       model_config.json        # Architecture config (load_model ignores current Settings)
       normalization_params.json
       errors.npy               # Smoothed prediction errors for the test split
-      threshold.json           # Rolling threshold array + window + z params
-      metrics.json             # precision, recall, f1, f0_5
+      threshold.npy            # Rolling threshold series
+      threshold_config.json    # Threshold params: {window, z}
+      metrics.json             # precision, recall, f1, f0_5, support counts
       train_log.json           # Per-epoch train/val loss
 ```
 

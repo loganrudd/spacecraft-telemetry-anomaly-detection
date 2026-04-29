@@ -139,6 +139,9 @@ def evaluate(
     fp = int(np.sum(~is_anomaly_true & is_anomaly_pred))
     fn = int(np.sum(is_anomaly_true & ~is_anomaly_pred))
 
+    n_true_positive_labels = int(np.sum(is_anomaly_true))
+    n_predicted_positive_labels = int(np.sum(is_anomaly_pred))
+
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
@@ -154,7 +157,14 @@ def evaluate(
         else 0.0
     )
 
-    return {"precision": precision, "recall": recall, "f1": f1, "f0_5": f0_5}
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "f0_5": f0_5,
+        "n_true_positive_labels": n_true_positive_labels,
+        "n_predicted_positive_labels": n_predicted_positive_labels,
+    }
 
 
 def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, Any]:
@@ -199,11 +209,8 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     save_errors(paths, smoothed)
     save_threshold(
         paths,
-        {
-            "threshold": threshold.tolist(),
-            "window": cfg.threshold_window,
-            "z": cfg.threshold_z,
-        },
+        threshold,
+        {"window": cfg.threshold_window, "z": cfg.threshold_z},
     )
     save_metrics(paths, metrics)
 

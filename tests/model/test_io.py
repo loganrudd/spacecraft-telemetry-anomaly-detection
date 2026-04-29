@@ -50,6 +50,8 @@ def test_artifact_paths_layout(tmp_path: Path) -> None:
     root = tmp_path / "models" / "ESA-Mission1" / "channel_1"
     assert Path(paths.model) == root / "model.pt"
     assert Path(paths.config) == root / "model_config.json"
+    assert Path(paths.threshold) == root / "threshold.npy"
+    assert Path(paths.threshold_config) == root / "threshold_config.json"
     assert Path(paths.train_log) == root / "train_log.json"
 
 
@@ -70,7 +72,8 @@ def test_save_then_load_round_trip(tmp_path: Path) -> None:
         config=root / "model_config.json",
         norm=root / "normalization_params.json",
         errors=root / "errors.npy",
-        threshold=root / "threshold.json",
+        threshold=root / "threshold.npy",
+        threshold_config=root / "threshold_config.json",
         metrics=root / "metrics.json",
         train_log=root / "train_log.json",
     )
@@ -106,7 +109,8 @@ def test_load_model_uses_saved_architecture_not_current_settings(
         config=root / "model_config.json",
         norm=root / "normalization_params.json",
         errors=root / "errors.npy",
-        threshold=root / "threshold.json",
+        threshold=root / "threshold.npy",
+        threshold_config=root / "threshold_config.json",
         metrics=root / "metrics.json",
         train_log=root / "train_log.json",
     )
@@ -134,7 +138,8 @@ def test_save_train_log_writes_json(tmp_path: Path) -> None:
         config=root / "model_config.json",
         norm=root / "normalization_params.json",
         errors=root / "errors.npy",
-        threshold=root / "threshold.json",
+        threshold=root / "threshold.npy",
+        threshold_config=root / "threshold_config.json",
         metrics=root / "metrics.json",
         train_log=root / "train_log.json",
     )

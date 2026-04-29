@@ -139,6 +139,9 @@ def test_evaluate_known_confusion() -> None:
     # F0.5 with beta=0.5, beta²=0.25, p=r=2/3:
     # = 1.25 * (2/3)² / (0.25*(2/3) + 2/3) = 1.25*(4/9) / (5/6) = (5/9)*(6/5) = 2/3
     assert abs(metrics["f0_5"] - 2 / 3) < 1e-9
+    # TP=2 (idx 0,4), FP=1 (idx 2) → 3 ground-truth positives, 3 predicted positives
+    assert metrics["n_true_positive_labels"] == 3
+    assert metrics["n_predicted_positive_labels"] == 3
 
 
 def test_evaluate_all_correct() -> None:
@@ -148,6 +151,8 @@ def test_evaluate_all_correct() -> None:
     assert metrics["recall"] == 1.0
     assert metrics["f1"] == 1.0
     assert metrics["f0_5"] == 1.0
+    assert metrics["n_true_positive_labels"] == 2
+    assert metrics["n_predicted_positive_labels"] == 2
 
 
 def test_evaluate_no_positive_predictions() -> None:
@@ -159,6 +164,8 @@ def test_evaluate_no_positive_predictions() -> None:
     assert metrics["recall"] == 0.0
     assert metrics["f1"] == 0.0
     assert metrics["f0_5"] == 0.0
+    assert metrics["n_true_positive_labels"] == 2
+    assert metrics["n_predicted_positive_labels"] == 0
 
 
 def test_evaluate_no_actual_positives() -> None:
@@ -167,6 +174,8 @@ def test_evaluate_no_actual_positives() -> None:
     pred = np.array([True, False, True])
     metrics = evaluate(true, pred)
     assert metrics["recall"] == 0.0
+    assert metrics["n_true_positive_labels"] == 0
+    assert metrics["n_predicted_positive_labels"] == 2
 
 
 # ---------------------------------------------------------------------------

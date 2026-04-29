@@ -111,7 +111,9 @@ model-score:      ## Score a trained model against its test split (MISSION=…, 
 		--mission $(MISSION) --channel $(CHANNEL)
 
 model-evaluate:   ## Train + score end-to-end (Phase 4 single-channel demo)
-	$(RUN) spacecraft-telemetry model evaluate \
+	$(RUN) spacecraft-telemetry model train \
+		--mission $(MISSION) --channel $(CHANNEL) && \
+	$(RUN) spacecraft-telemetry model score \
 		--mission $(MISSION) --channel $(CHANNEL)
 
 model-test:       ## Run only model tests (fast; excludes @pytest.mark.slow)
