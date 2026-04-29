@@ -1,17 +1,17 @@
 """Telemanom anomaly scoring — pure numpy/pandas, no torch dependency.
 
 Importable in Phase 9 (FastAPI serving) without a PyTorch install.
-The thresholding and evaluation functions are importable without PyTorch — 
+The thresholding and evaluation functions are importable without PyTorch —
 only predict() and score_channel() require it.
 
 Pipeline:
-    values, targets, is_anomaly_true = load_windowed_parquet(..., "test")
-    preds    = predict(model, values, device, batch_size)
+    loader, target_timestamps, window_is_anomaly = make_test_dataloader(...)
+    preds, targets = predict(model, loader, device)
     errors   = preds - targets                       # per-window residuals
     smoothed = smooth_errors(errors, span)           # EWMA of |errors|
     thresh   = dynamic_threshold(smoothed, window, z)
     flags    = flag_anomalies(smoothed, thresh, min_run_length)
-    metrics  = evaluate(is_anomaly_true, flags)
+    metrics  = evaluate(window_is_anomaly, flags)
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from spacecraft_telemetry.core.logging import get_logger
 
 if TYPE_CHECKING:
     import torch
+    from torch.utils.data import DataLoader
 
     from spacecraft_telemetry.model.architecture import TelemanomLSTM
 
@@ -34,25 +35,31 @@ log = get_logger(__name__)
 
 def predict(
     model: "TelemanomLSTM",
-    values: np.ndarray[Any, np.dtype[np.float32]],
+    loader: "DataLoader[tuple[torch.Tensor, torch.Tensor]]",
     device: "torch.device",
-    batch_size: int,
-) -> np.ndarray[Any, np.dtype[np.float32]]:
-    """Run the LSTM forward in batches; return shape (N,) predictions."""
+) -> "tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.float32]]]":
+    """Run the LSTM forward over all batches; return (predictions, targets).
+
+    Both arrays are shape (N,) float32 and in DataLoader iteration order
+    (i.e. the same order as the window index, since the test loader does not
+    shuffle).
+    """
     import torch
 
     model.eval()
-    n = len(values)
-    predictions = np.zeros(n, dtype=np.float32)
+    all_preds: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    all_targets: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
     with torch.no_grad():
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            x = torch.from_numpy(values[start:end]).unsqueeze(-1).to(device)
+        for x, y in loader:
+            x = x.to(device)
             pred: torch.Tensor = model(x).squeeze(1)
-            predictions[start:end] = pred.cpu().numpy()
+            all_preds.append(pred.cpu().numpy())
+            all_targets.append(y.numpy())
 
-    return predictions
+    predictions = np.concatenate(all_preds).astype(np.float32)
+    targets = np.concatenate(all_targets).astype(np.float32)
+    return predictions, targets
 
 
 def smooth_errors(
@@ -173,7 +180,7 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     Writes errors.npy, threshold.json, metrics.json to the artifacts dir.
     Returns the metrics dict {precision, recall, f1, f0_5}.
     """
-    from spacecraft_telemetry.model.dataset import load_windowed_parquet
+    from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
     from spacecraft_telemetry.model.io import (
         artifact_paths,
@@ -188,18 +195,17 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     paths = artifact_paths(settings, mission, channel)
 
     model, _, saved_window_size = load_model(paths, device)
-
-    values, targets, is_anomaly_true = load_windowed_parquet(
-        settings.spark.processed_data_dir, mission, channel, "test"
-    )
-    if values.shape[1] != saved_window_size:
+    if cfg.window_size != saved_window_size:
         raise ValueError(
-            f"Parquet window_size={values.shape[1]} does not match the value the "
-            f"model was trained on (window_size={saved_window_size}). "
-            "Re-run the Spark pipeline and re-train with consistent settings."
+            f"settings.model.window_size={cfg.window_size} does not match the "
+            f"value the model was trained on (window_size={saved_window_size}). "
+            "Re-train with consistent settings."
         )
 
-    preds = predict(model, values, device, cfg.inference_batch_size)
+    loader, _target_timestamps, is_anomaly_true = make_test_dataloader(
+        settings, mission, channel
+    )
+    preds, targets = predict(model, loader, device)
     errors = preds - targets
     smoothed = smooth_errors(errors, cfg.error_smoothing_window)
     threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)

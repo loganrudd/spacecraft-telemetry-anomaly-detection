@@ -1,4 +1,4 @@
-"""Tests for spark.transforms — handle_nulls, detect_gaps, normalize."""
+"""Tests for spark.transforms — handle_nulls, detect_gaps, normalize, label_timesteps."""
 
 from __future__ import annotations
 
@@ -498,242 +498,6 @@ class TestAddRollingFeatures:
 
 
 # ---------------------------------------------------------------------------
-# create_windows
-# ---------------------------------------------------------------------------
-
-
-class TestCreateWindows:
-    """Tests for create_windows().
-
-    Uses small synthetic DataFrames (≤20 rows) with value_normalized already
-    set, isolated from upstream transforms.
-    """
-
-    @pytest.fixture()
-    def ten_row_df(self, spark_session):
-        """10 rows, single segment, value_normalized = [0.0 .. 9.0]."""
-        import pandas as pd
-
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=10, freq="90s"),
-                "value_normalized": [float(i) for i in range(10)],
-                "channel_id": ["ch1"] * 10,
-                "mission_id": ["m1"] * 10,
-                "segment_id": [0] * 10,
-            }
-        )
-        return spark_session.createDataFrame(pdf)
-
-    # ------------------------------------------------------------------
-    # Row count
-    # ------------------------------------------------------------------
-
-    def test_window_count_10_rows_window_3(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        # N=10, ws=3, ph=1 → max(0, 10 - 3 - 1 + 1) = 7 windows
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        assert result.count() == 7
-
-    def test_short_segment_produces_zero_windows(self, spark_session) -> None:
-        import pandas as pd
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        # 2 rows < window_size=3 + prediction_horizon=1 → 0 windows
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=2, freq="90s"),
-                "value_normalized": [1.0, 2.0],
-                "channel_id": ["ch1"] * 2,
-                "mission_id": ["m1"] * 2,
-                "segment_id": [0] * 2,
-            }
-        )
-        df = spark_session.createDataFrame(pdf)
-        result = create_windows(df, window_size=3, prediction_horizon=1)
-        assert result.count() == 0
-
-    def test_exact_minimum_segment_produces_one_window(self, spark_session) -> None:
-        import pandas as pd
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        # N = window_size + prediction_horizon = 3 + 1 = 4 → exactly 1 window
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=4, freq="90s"),
-                "value_normalized": [0.0, 1.0, 2.0, 3.0],
-                "channel_id": ["ch1"] * 4,
-                "mission_id": ["m1"] * 4,
-                "segment_id": [0] * 4,
-            }
-        )
-        df = spark_session.createDataFrame(pdf)
-        result = create_windows(df, window_size=3, prediction_horizon=1)
-        assert result.count() == 1
-
-    def test_prediction_horizon_2_reduces_count(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        # N=10, ws=3, ph=2 → max(0, 10 - 3 - 2 + 1) = 6 windows
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=2)
-        assert result.count() == 6
-
-    # ------------------------------------------------------------------
-    # Values array correctness
-    # ------------------------------------------------------------------
-
-    def test_values_array_length_equals_window_size(self, ten_row_df) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        bad = result.filter(F.size("values") != 3).count()
-        assert bad == 0
-
-    def test_first_window_values(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        first = result.orderBy("window_start_ts").first()
-        assert first is not None
-        assert list(first["values"]) == pytest.approx([0.0, 1.0, 2.0], abs=1e-5)
-
-    def test_last_window_values(self, ten_row_df) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        last = result.orderBy(F.col("window_start_ts").desc()).first()
-        assert last is not None
-        assert list(last["values"]) == pytest.approx([6.0, 7.0, 8.0], abs=1e-5)
-
-    def test_values_are_oldest_first(self, ten_row_df) -> None:
-        """collect_list with an ordered window must preserve ascending order."""
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        rows = result.orderBy("window_start_ts").collect()
-        for row in rows:
-            vals = list(row["values"])
-            assert vals == sorted(vals), f"Values not ascending: {vals}"
-
-    # ------------------------------------------------------------------
-    # Target correctness
-    # ------------------------------------------------------------------
-
-    def test_first_window_target(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        first = result.orderBy("window_start_ts").first()
-        assert first is not None
-        # values=[0,1,2], next value is 3.0
-        assert first["target"] == pytest.approx(3.0, abs=1e-5)
-
-    def test_prediction_horizon_2_target(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=2)
-        first = result.orderBy("window_start_ts").first()
-        assert first is not None
-        # values=[0,1,2], target 2 steps ahead = 4.0
-        assert first["target"] == pytest.approx(4.0, abs=1e-5)
-
-    def test_no_null_targets(self, ten_row_df) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        assert result.filter(F.col("target").isNull()).count() == 0
-
-    # ------------------------------------------------------------------
-    # Timestamps
-    # ------------------------------------------------------------------
-
-    def test_window_start_before_window_end(self, ten_row_df) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        bad = result.filter(F.col("window_start_ts") >= F.col("window_end_ts")).count()
-        assert bad == 0
-
-    # ------------------------------------------------------------------
-    # Segment boundary isolation
-    # ------------------------------------------------------------------
-
-    def test_windows_do_not_cross_segment_boundaries(self, spark_session) -> None:
-        import pandas as pd
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        # Two segments: segment 0 values [0..9], segment 1 values [100..109]
-        n = 10
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n * 2, freq="90s"),
-                "value_normalized": [float(i) for i in range(n)]
-                + [float(100 + i) for i in range(n)],
-                "channel_id": ["ch1"] * (n * 2),
-                "mission_id": ["m1"] * (n * 2),
-                "segment_id": [0] * n + [1] * n,
-            }
-        )
-        df = spark_session.createDataFrame(pdf)
-        result = create_windows(df, window_size=3, prediction_horizon=1)
-
-        assert result.count() == 14  # 7 from each segment
-
-        # Every value in segment 0 windows must be < 100
-        for row in result.filter(F.col("segment_id") == 0).collect():
-            assert all(v < 100 for v in row["values"]), (
-                f"Cross-segment leak in seg 0: {row['values']}"
-            )
-
-        # Every value in segment 1 windows must be >= 100
-        for row in result.filter(F.col("segment_id") == 1).collect():
-            assert all(v >= 100 for v in row["values"]), (
-                f"Cross-segment leak in seg 1: {row['values']}"
-            )
-
-    # ------------------------------------------------------------------
-    # Output schema
-    # ------------------------------------------------------------------
-
-    def test_output_column_names(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        expected = {
-            "window_id",
-            "channel_id",
-            "mission_id",
-            "segment_id",
-            "window_start_ts",
-            "window_end_ts",
-            "values",
-            "target",
-        }
-        assert set(result.columns) == expected
-
-    def test_window_id_is_unique(self, ten_row_df) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(ten_row_df, window_size=3, prediction_horizon=1)
-        total = result.count()
-        distinct = result.select("window_id").distinct().count()
-        assert total == distinct
-
-
-# ---------------------------------------------------------------------------
 # temporal_train_test_split
 # ---------------------------------------------------------------------------
 
@@ -790,111 +554,86 @@ class TestTemporalTrainTestSplit:
 
 
 # ---------------------------------------------------------------------------
-# join_anomaly_labels
+# label_timesteps
 # ---------------------------------------------------------------------------
 
 
-class TestJoinAnomalyLabels:
-    """Tests for join_anomaly_labels().
+class TestLabelTimesteps:
+    """Tests for label_timesteps().
 
-    Uses a minimal windows DataFrame (no 'values' array) since the function
-    only requires window_id, channel_id, window_start_ts, window_end_ts.
+    label_timesteps replaces join_anomaly_labels + exclude_anomalies_from_train.
+    It adds an is_anomaly boolean per timestep via a broadcast join on
+    (channel_id, ts >= start_time, ts < end_time).
     """
 
     @pytest.fixture()
-    def windows_df(self, spark_session):
-        """4 windows: 3 overlapping the label segments, 1 nominal."""
+    def series_df(self, spark_session):
+        """10 timestep rows for channel_1, regular 90s intervals."""
         import pandas as pd
 
         base = pd.Timestamp("2000-01-01")
-        # Label segments (from labels_pd fixture):
-        #   seg 1: rows 10-14 → base+900s .. base+1260s
-        #   seg 2: rows 40-44 → base+3600s .. base+3960s
-        #   seg 3: rows 70-74 → base+6300s .. base+6660s
         pdf = pd.DataFrame(
             {
-                "window_id": [0, 1, 2, 3],
-                "channel_id": ["channel_1"] * 4,
-                "mission_id": ["ESA-Mission1"] * 4,
-                "segment_id": [0] * 4,
-                "window_start_ts": [
-                    base + pd.Timedelta(seconds=900),  # overlaps label seg 1
-                    base + pd.Timedelta(seconds=3600),  # overlaps label seg 2
-                    base + pd.Timedelta(seconds=6300),  # overlaps label seg 3
-                    base + pd.Timedelta(seconds=2000),  # nominal (between labels)
-                ],
-                "window_end_ts": [
-                    base + pd.Timedelta(seconds=1260),
-                    base + pd.Timedelta(seconds=3960),
-                    base + pd.Timedelta(seconds=6660),
-                    base + pd.Timedelta(seconds=2270),
-                ],
-                "target": [1.0] * 4,
+                "telemetry_timestamp": [base + pd.Timedelta(seconds=90 * i) for i in range(10)],
+                "value_normalized": [float(i) for i in range(10)],
+                "channel_id": ["channel_1"] * 10,
+                "mission_id": ["ESA-Mission1"] * 10,
+                "segment_id": [0] * 10,
             }
         )
         return spark_session.createDataFrame(pdf)
 
     @pytest.fixture()
-    def labels_spark_df(self, spark_session):
-        """Spark labels DF matching the conftest labels_pd segments."""
+    def labels_df(self, spark_session):
+        """One anomaly segment covering rows 3-5 (ts 270s-450s)."""
         import pandas as pd
 
         base = pd.Timestamp("2000-01-01")
         pdf = pd.DataFrame(
             {
-                "anomaly_id": ["id_1", "id_1", "id_2"],
-                "channel_id": ["channel_1", "channel_1", "channel_1"],
-                "start_time": [
-                    base + pd.Timedelta(seconds=90 * 10),
-                    base + pd.Timedelta(seconds=90 * 40),
-                    base + pd.Timedelta(seconds=90 * 70),
-                ],
-                "end_time": [
-                    base + pd.Timedelta(seconds=90 * 14),
-                    base + pd.Timedelta(seconds=90 * 44),
-                    base + pd.Timedelta(seconds=90 * 74),
-                ],
+                "anomaly_id": ["a1"],
+                "channel_id": ["channel_1"],
+                "start_time": [base + pd.Timedelta(seconds=270)],  # row 3
+                "end_time": [base + pd.Timedelta(seconds=450)],    # row 5
             }
         )
         return spark_session.createDataFrame(pdf)
 
-    def test_is_anomaly_column_added(self, windows_df, labels_spark_df) -> None:
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+    def test_is_anomaly_column_added(self, series_df, labels_df) -> None:
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
-        result = join_anomaly_labels(windows_df, labels_spark_df)
+        result = label_timesteps(series_df, labels_df)
         assert "is_anomaly" in result.columns
 
-    def test_row_count_preserved(self, windows_df, labels_spark_df) -> None:
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+    def test_row_count_preserved(self, series_df, labels_df) -> None:
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
-        result = join_anomaly_labels(windows_df, labels_spark_df)
-        assert result.count() == windows_df.count()
+        result = label_timesteps(series_df, labels_df)
+        assert result.count() == series_df.count()
 
-    def test_overlapping_windows_flagged(self, windows_df, labels_spark_df) -> None:
+    def test_anomalous_rows_flagged(self, spark_session, series_df, labels_df) -> None:
+        """Rows 3 and 4 fall inside [270s, 450s); row 5 at ts=450s is outside (half-open)."""
         from pyspark.sql import functions as F
 
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
-        result = join_anomaly_labels(windows_df, labels_spark_df)
-        anomaly_ids = {
-            r["window_id"]
-            for r in result.filter(F.col("is_anomaly")).select("window_id").collect()
+        result = label_timesteps(series_df, labels_df)
+        anomalous = {
+            int(r["value_normalized"])
+            for r in result.filter(F.col("is_anomaly")).collect()
         }
-        assert 0 in anomaly_ids  # overlaps label seg 1
-        assert 1 in anomaly_ids  # overlaps label seg 2
-        assert 2 in anomaly_ids  # overlaps label seg 3
+        assert anomalous == {3, 4}  # rows with value_normalized 3.0 and 4.0
 
-    def test_nominal_window_not_flagged(self, windows_df, labels_spark_df) -> None:
+    def test_nominal_rows_not_flagged(self, series_df, labels_df) -> None:
         from pyspark.sql import functions as F
 
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
-        result = join_anomaly_labels(windows_df, labels_spark_df)
-        row = result.filter(F.col("window_id") == 3).first()
-        assert row is not None
-        assert row["is_anomaly"] is False
+        result = label_timesteps(series_df, labels_df)
+        nominal_count = result.filter(~F.col("is_anomaly")).count()
+        assert nominal_count == 8  # 10 total - 2 anomalous
 
-    def test_empty_labels_all_false(self, windows_df, spark_session) -> None:
+    def test_empty_labels_all_false(self, series_df, spark_session) -> None:
         from pyspark.sql import functions as F
         from pyspark.sql.types import (
             StringType,
@@ -903,108 +642,38 @@ class TestJoinAnomalyLabels:
             TimestampType,
         )
 
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
         empty_labels = spark_session.createDataFrame(
             [],
-            schema=StructType(
-                [
-                    StructField("anomaly_id", StringType()),
-                    StructField("channel_id", StringType()),
-                    StructField("start_time", TimestampType()),
-                    StructField("end_time", TimestampType()),
-                ]
-            ),
+            schema=StructType([
+                StructField("anomaly_id", StringType()),
+                StructField("channel_id", StringType()),
+                StructField("start_time", TimestampType()),
+                StructField("end_time", TimestampType()),
+            ]),
         )
-        result = join_anomaly_labels(windows_df, empty_labels)
+        result = label_timesteps(series_df, empty_labels)
         assert result.filter(F.col("is_anomaly")).count() == 0
 
-
-# ---------------------------------------------------------------------------
-# exclude_anomalies_from_train
-# ---------------------------------------------------------------------------
-
-
-class TestExcludeAnomaliesFromTrain:
-    """Tests for exclude_anomalies_from_train().
-
-    Uses a tiny synthetic DataFrame with a known mix of True/False is_anomaly flags.
-    """
-
-    @pytest.fixture()
-    def flagged_df(self, spark_session):
-        """5 rows: 2 anomalies (ids 0, 2) and 3 nominal (ids 1, 3, 4)."""
-        import pandas as pd
-
-        pdf = pd.DataFrame(
-            {
-                "window_id": list(range(5)),
-                "is_anomaly": [True, False, True, False, False],
-                "value_normalized": [float(i) for i in range(5)],
-            }
-        )
-        return spark_session.createDataFrame(pdf)
-
-    def test_anomaly_rows_removed(self, flagged_df) -> None:
-        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
-
-        result = exclude_anomalies_from_train(flagged_df)
-        assert result.count() == 3
-
-    def test_no_anomaly_rows_in_result(self, flagged_df) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
-
-        result = exclude_anomalies_from_train(flagged_df)
-        assert result.filter(F.col("is_anomaly")).count() == 0
-
-    def test_nominal_window_ids_preserved(self, flagged_df) -> None:
-        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
-
-        result = exclude_anomalies_from_train(flagged_df)
-        ids = {r["window_id"] for r in result.select("window_id").collect()}
-        assert ids == {1, 3, 4}
-
-    def test_all_nominal_unchanged(self, spark_session) -> None:
-        """DataFrame with no anomalies is returned as-is."""
-        import pandas as pd
-
-        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
-
-        pdf = pd.DataFrame(
-            {
-                "window_id": list(range(3)),
-                "is_anomaly": [False, False, False],
-                "value_normalized": [1.0, 2.0, 3.0],
-            }
-        )
-        df = spark_session.createDataFrame(pdf)
-        result = exclude_anomalies_from_train(df)
-        assert result.count() == 3
-
-    def test_all_anomaly_returns_empty_with_correct_schema(self, spark_session) -> None:
-        """T2: all-anomaly input produces an empty DataFrame with the right columns."""
+    def test_missing_channel_all_false(self, series_df, spark_session) -> None:
+        """Labels for a different channel_id do not flag this channel's rows."""
         import pandas as pd
         from pyspark.sql import functions as F
 
-        from spacecraft_telemetry.spark.transforms import exclude_anomalies_from_train
+        from spacecraft_telemetry.spark.transforms import label_timesteps
 
+        base = pd.Timestamp("2000-01-01")
         pdf = pd.DataFrame(
             {
-                "window_id": list(range(5)),
-                "is_anomaly": [True, True, True, True, True],
-                "value_normalized": [float(i) for i in range(5)],
-                "channel_id": ["ch1"] * 5,
+                "anomaly_id": ["a1"],
+                "channel_id": ["other_channel"],  # different channel
+                "start_time": [base + pd.Timedelta(seconds=270)],
+                "end_time": [base + pd.Timedelta(seconds=450)],
             }
         )
-        df = spark_session.createDataFrame(pdf)
-        result = exclude_anomalies_from_train(df)
-
-        assert result.count() == 0
-        assert "window_id" in result.columns
-        assert "is_anomaly" in result.columns
-        assert "value_normalized" in result.columns
+        other_labels = spark_session.createDataFrame(pdf)
+        result = label_timesteps(series_df, other_labels)
         assert result.filter(F.col("is_anomaly")).count() == 0
 
 
@@ -1133,142 +802,3 @@ class TestDetectGapsValues:
         assert len(gaps) == 1
         assert float(gaps[0]["value"]) == pytest.approx(3.0, abs=1e-5)
 
-
-# ---------------------------------------------------------------------------
-# T3: create_windows parametrized over realistic window sizes
-# ---------------------------------------------------------------------------
-
-
-class TestCreateWindowsLargeWindows:
-    """T3: Verify window count and values-array length hold across realistic window sizes.
-
-    Tests use a 300-row fixture so window_size=250 produces windows.
-    Expected count formula: max(0, N - window_size - prediction_horizon + 1).
-    """
-
-    @pytest.fixture()
-    def three_hundred_row_df(self, spark_session):
-        import pandas as pd
-
-        n = 300
-        pdf = pd.DataFrame(
-            {
-                "telemetry_timestamp": pd.date_range("2000-01-01", periods=n, freq="90s"),
-                "value_normalized": [float(i) for i in range(n)],
-                "channel_id": ["ch1"] * n,
-                "mission_id": ["m1"] * n,
-                "segment_id": [0] * n,
-            }
-        )
-        return spark_session.createDataFrame(pdf)
-
-    @pytest.mark.parametrize(
-        "window_size",
-        [3, 10, 50, 250],
-        ids=["ws3", "ws10", "ws50", "ws250"],
-    )
-    def test_window_count_formula(self, three_hundred_row_df, window_size) -> None:
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        ph = 1
-        n = 300
-        expected = max(0, n - window_size - ph + 1)
-        result = create_windows(
-            three_hundred_row_df, window_size=window_size, prediction_horizon=ph
-        )
-        assert result.count() == expected
-
-    @pytest.mark.parametrize(
-        "window_size",
-        [3, 10, 50, 250],
-        ids=["ws3", "ws10", "ws50", "ws250"],
-    )
-    def test_values_array_length(self, three_hundred_row_df, window_size) -> None:
-        from pyspark.sql import functions as F
-
-        from spacecraft_telemetry.spark.transforms import create_windows
-
-        result = create_windows(
-            three_hundred_row_df, window_size=window_size, prediction_horizon=1
-        )
-        bad = result.filter(F.size("values") != window_size).count()
-        assert bad == 0, f"Some windows had values array != {window_size} elements"
-
-
-# ---------------------------------------------------------------------------
-# T4: join_anomaly_labels boundary semantics
-# ---------------------------------------------------------------------------
-
-
-class TestJoinAnomalyLabelsBoundaries:
-    """T4: Verify the strict half-open interval semantics of join_anomaly_labels.
-
-    The join uses strict > and <, so boundary-touching windows are NOT anomalous.
-    """
-
-    @pytest.fixture()
-    def label_df(self, spark_session):
-        """Single label: start=100s, end=200s from epoch."""
-        import pandas as pd
-
-        base = pd.Timestamp("2000-01-01")
-        pdf = pd.DataFrame(
-            {
-                "anomaly_id": ["L1"],
-                "channel_id": ["ch1"],
-                "start_time": [base + pd.Timedelta(seconds=100)],
-                "end_time": [base + pd.Timedelta(seconds=200)],
-            }
-        )
-        return spark_session.createDataFrame(pdf)
-
-    @pytest.mark.parametrize(
-        "win_start_s,win_end_s,expected_anomaly,description",
-        [
-            # Boundary-touching: window ends exactly when label starts → NOT anomaly
-            (50, 100, False, "window_end == label_start"),
-            # Boundary-touching: window starts exactly when label ends → NOT anomaly
-            (200, 250, False, "window_start == label_end"),
-            # Clearly inside
-            (120, 180, True, "window fully inside label"),
-            # Window starts exactly when label starts → IS anomaly
-            (100, 150, True, "window_start == label_start"),
-            # Window ends exactly when label ends → IS anomaly
-            (150, 200, True, "window_end == label_end"),
-            # Clearly outside before label
-            (0, 50, False, "window entirely before label"),
-            # Clearly outside after label
-            (250, 300, False, "window entirely after label"),
-        ],
-    )
-    def test_boundary_semantics(
-        self,
-        spark_session,
-        label_df,
-        win_start_s,
-        win_end_s,
-        expected_anomaly,
-        description,
-    ) -> None:
-        import pandas as pd
-
-        from spacecraft_telemetry.spark.transforms import join_anomaly_labels
-
-        base = pd.Timestamp("2000-01-01")
-        pdf = pd.DataFrame(
-            {
-                "window_id": [0],
-                "channel_id": ["ch1"],
-                "mission_id": ["m1"],
-                "segment_id": [0],
-                "window_start_ts": [base + pd.Timedelta(seconds=win_start_s)],
-                "window_end_ts": [base + pd.Timedelta(seconds=win_end_s)],
-                "target": [0.0],
-            }
-        )
-        df = spark_session.createDataFrame(pdf)
-        result = join_anomaly_labels(df, label_df)
-        row = result.collect()[0]
-        assert row["is_anomaly"] is expected_anomaly, (
-            f"{description}: expected is_anomaly={expected_anomaly}, got {row['is_anomaly']}"
-        )

@@ -17,6 +17,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from spacecraft_telemetry.core.config import load_settings
+from spacecraft_telemetry.spark.session import create_spark_session
+
 
 def _java_major_version() -> int | None:
     """Return the installed Java major version, or None if java is not found."""
@@ -35,7 +38,7 @@ def _java_major_version() -> int | None:
 
 @pytest.fixture(scope="session")
 def spark_session():
-    """Start a minimal local SparkSession. Skip all Spark tests if JVM fails.
+    """Start a local SparkSession using test.yaml spark config. Skip all Spark tests if JVM fails.
 
     PySpark 4.1 requires Java 17 or 21. Java 22+ removed javax.security.auth.Subject
     APIs that Hadoop's FileSystem still calls, causing file I/O to fail even though
@@ -51,18 +54,9 @@ def spark_session():
         )
 
     try:
-        from pyspark.sql import SparkSession
-
-        session = (
-            SparkSession.builder.appName("spacecraft-telemetry-test")
-            .master("local[1]")
-            .config("spark.driver.memory", "512m")
-            .config("spark.ui.enabled", "false")
-            .config(
-                "spark.hadoop.fs.viewfs.overload.scheme.target.file.impl",
-                "org.apache.hadoop.fs.LocalFileSystem",
-            )
-            .getOrCreate()
+        settings = load_settings("test")
+        session = create_spark_session(
+            settings.spark, app_name="spacecraft-telemetry-test"
         )
         session.sparkContext.setLogLevel("ERROR")
         yield session

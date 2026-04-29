@@ -6,7 +6,6 @@ in a few seconds. Excluded from the default CI run (pytest -m "not slow").
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -16,10 +15,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.core.config import ModelConfig, Settings
+from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.model.io import artifact_paths
 from spacecraft_telemetry.model.training import TrainingResult, train_channel
-from tests.model.conftest import WindowedParquetFixture, _WINDOW_FILE_SCHEMA
+from tests.model.conftest import SeriesParquetFixture, _SERIES_FILE_SCHEMA
 
 
 # ---------------------------------------------------------------------------
@@ -54,24 +53,26 @@ def _write_const_parquet(
     n: int,
     window_size: int,
     value: float = 0.0,
-    target: float = 0.0,
 ) -> None:
-    """Write a windowed Parquet where every window has the same constant value/target."""
+    """Write per-timestep series Parquet where every row has the same constant value."""
+    from datetime import datetime, timezone
+
     _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    base_ts = pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC"))
+    timestamps = [
+        pa.scalar(
+            _BASE_DT.timestamp() + i * 90,
+            type=pa.timestamp("s", tz="UTC"),
+        ).cast(pa.timestamp("us", tz="UTC"))
+        for i in range(n)
+    ]
     table = pa.table(
         {
-            "window_id": pa.array(np.arange(n, dtype=np.int64)),
+            "telemetry_timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array([value] * n, type=pa.float32()),
             "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
-            "window_start_ts": base_ts,
-            "window_end_ts": base_ts,
-            "values": pa.array(
-                [[value] * window_size] * n, type=pa.list_(pa.float32())
-            ),
-            "target": pa.array(np.full(n, target, dtype=np.float32)),
             "is_anomaly": pa.array([False] * n),
         },
-        schema=_WINDOW_FILE_SCHEMA,
+        schema=_SERIES_FILE_SCHEMA,
     )
     split_dir = (
         processed_dir / mission / "train"
@@ -88,13 +89,13 @@ def _write_const_parquet(
 
 @pytest.mark.slow
 def test_train_channel_runs_and_saves_artifacts(
-    tiny_windowed_parquet: WindowedParquetFixture,
+    tiny_series_parquet: SeriesParquetFixture,
     tmp_path: Path,
 ) -> None:
     """train_channel returns a TrainingResult and writes model.pt + train_log.json."""
     from spacecraft_telemetry.core.config import load_settings
 
-    fx = tiny_windowed_parquet
+    fx = tiny_series_parquet
     settings = _override_settings(
         load_settings("test"),
         processed_dir=fx.processed_dir,
@@ -116,13 +117,13 @@ def test_train_channel_runs_and_saves_artifacts(
 
 @pytest.mark.slow
 def test_train_channel_result_structure_matches_epochs(
-    tiny_windowed_parquet: WindowedParquetFixture,
+    tiny_series_parquet: SeriesParquetFixture,
     tmp_path: Path,
 ) -> None:
     """val_losses length must equal epochs_run; best_val_loss must be the min val loss."""
     from spacecraft_telemetry.core.config import load_settings
 
-    fx = tiny_windowed_parquet
+    fx = tiny_series_parquet
     settings = _override_settings(
         load_settings("test"),
         processed_dir=fx.processed_dir,
@@ -149,7 +150,7 @@ def test_early_stopping_triggers(tmp_path: Path) -> None:
     # val_loss ≈ 0.  Epoch 1 does not improve strictly → patience=1 → stop.
     _write_const_parquet(
         processed_dir, mission, channel, n=30, window_size=window_size,
-        value=0.0, target=0.0,
+        value=0.0,
     )
 
     # Write normalization_params.json required by train_channel.
@@ -167,14 +168,8 @@ def test_early_stopping_triggers(tmp_path: Path) -> None:
             "early_stopping_patience": 1,
             "hidden_dim": 4,
             "batch_size": 8,
-            "window_size": window_size,  # not a ModelConfig field — ignored
+            "window_size": window_size,
         },
-    )
-    # Remove window_size — it lives in SparkConfig, not ModelConfig
-    settings = settings.model_copy(
-        update={
-            "spark": settings.spark.model_copy(update={"window_size": window_size}),
-        }
     )
 
     result = train_channel(settings, mission, channel)

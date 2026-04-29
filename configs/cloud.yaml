@@ -22,8 +22,6 @@ spark:
   processed_data_dir: data/processed  # overridden by SPACECRAFT_SPARK__PROCESSED_DATA_DIR=gs://... in deployment
   driver_memory: "4g"
   num_cores: 8
-  window_size: 250
-  prediction_horizon: 1
   train_fraction: 0.8
   normalization: z-score
   gap_multiplier: 3.0
@@ -46,6 +44,8 @@ model:
   learning_rate: 0.001
   batch_size: 64
   epochs: 35
+  window_size: 250
+  prediction_horizon: 1
   early_stopping_patience: 5
   val_fraction: 0.1
   seed: 42

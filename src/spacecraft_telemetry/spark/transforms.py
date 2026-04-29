@@ -11,7 +11,7 @@ from typing import Literal
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, FloatType
+from pyspark.sql.types import FloatType
 from pyspark.sql.window import WindowSpec
 
 from spacecraft_telemetry.core.logging import get_logger
@@ -269,81 +269,6 @@ def add_rolling_features(
 
 
 # ---------------------------------------------------------------------------
-# Windowing for LSTM input
-# ---------------------------------------------------------------------------
-
-
-def create_windows(
-    df: DataFrame,
-    window_size: int = 250,
-    prediction_horizon: int = 1,
-) -> DataFrame:
-    """Create sliding-window sequences for Telemanom LSTM input.
-
-    Each output row is one training or evaluation example:
-      values         — Array<Float> of window_size consecutive value_normalized
-                       readings in ascending timestamp order (oldest first)
-      target         — value_normalized at window_end + prediction_horizon steps
-      window_start_ts / window_end_ts — timestamps bracketing the input window
-
-    Windows are strictly contained within a single (channel_id, segment_id)
-    partition, so they never span gap boundaries from detect_gaps().
-
-    Segments with fewer than (window_size + prediction_horizon) rows produce
-    zero windows and are silently excluded (count logged at INFO).
-
-    Number of windows per segment of length N:
-        max(0, N - window_size - prediction_horizon + 1)
-
-    Args:
-        df: DataFrame with columns: telemetry_timestamp, value_normalized,
-            channel_id, mission_id, segment_id.
-        window_size: Length of each input sequence (Telemanom default: 250).
-        prediction_horizon: Steps ahead to forecast (default: 1 = next reading).
-
-    Returns:
-        DataFrame with columns: window_id (LongType), channel_id, mission_id,
-        segment_id, window_start_ts (TimestampType), window_end_ts (TimestampType),
-        values (Array<Float>, length == window_size), target (FloatType).
-        is_anomaly is added separately in join_anomaly_labels().
-    """
-    w = Window.partitionBy("channel_id", "segment_id").orderBy("telemetry_timestamp")
-    vals_w = w.rowsBetween(-(window_size - 1), 0)
-
-    df = (
-        df.withColumn("values", F.collect_list("value_normalized").over(vals_w))
-        .withColumn("window_end_ts", F.col("telemetry_timestamp"))
-        .withColumn("window_start_ts", F.min("telemetry_timestamp").over(vals_w))
-        .withColumn("target", F.lead("value_normalized", prediction_horizon).over(w))
-    )
-
-    # Drop rows where the trailing window is shorter than window_size (early rows
-    # in a segment) or where no target exists (final prediction_horizon rows).
-    df = df.filter(F.size("values") == window_size).filter(F.col("target").isNotNull())
-
-    df = df.withColumn("window_id", F.monotonically_increasing_id())
-
-    windows_count = df.count()
-    log.info(
-        "create_windows",
-        window_size=window_size,
-        prediction_horizon=prediction_horizon,
-        windows_count=windows_count,
-    )
-
-    return df.select(
-        "window_id",
-        "channel_id",
-        "mission_id",
-        "segment_id",
-        "window_start_ts",
-        "window_end_ts",
-        F.col("values").cast(ArrayType(FloatType())).alias("values"),
-        F.col("target").cast(FloatType()).alias("target"),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Train/test split and anomaly label join
 # ---------------------------------------------------------------------------
 
@@ -390,72 +315,53 @@ def temporal_train_test_split(
     return train, test
 
 
-def join_anomaly_labels(df: DataFrame, labels_df: DataFrame) -> DataFrame:
-    """Add is_anomaly boolean column by joining window time ranges against anomaly labels.
+def label_timesteps(df: DataFrame, labels_df: DataFrame) -> DataFrame:
+    """Add per-timestep is_anomaly boolean column.
 
-    A window is anomalous if it overlaps any label segment for the same channel_id.
-    Overlap uses strict inequalities:
+    A timestep is anomalous iff it falls inside any [start_time, end_time)
+    half-open label segment for the same channel_id. Boundary semantics:
+    start_time is inclusive, end_time is exclusive.
 
-        window_end_ts > label.start_time  AND  window_start_ts < label.end_time
-
-    This is the standard half-open interval overlap condition. Boundary-touching windows
-    are NOT anomalous: a window whose end_ts equals a label's start_time is excluded, and
-    a window whose start_ts equals a label's end_time is excluded. Channels absent from
-    labels_df are treated as fully nominal (all False).
+    Channels absent from labels_df are treated as fully nominal (all False).
 
     Args:
-        df: Windows DataFrame with 'window_id', 'channel_id', 'window_start_ts',
-            'window_end_ts' columns.
+        df: DataFrame with 'telemetry_timestamp' and 'channel_id' columns.
         labels_df: Labels DataFrame with 'channel_id', 'start_time', 'end_time'.
 
     Returns:
         DataFrame with 'is_anomaly' (BooleanType) column added.
     """
-    win = df.alias("win")
+    ts_df = df.alias("ts")
     lbl = labels_df.alias("lbl")
 
-    # Left join: one row per (window, overlapping label) pair.
-    # Overlap condition: window_end > label_start AND window_start < label_end.
-    # Labels are always a small CSV (~KB); broadcast ships them to each executor
-    # rather than shuffling the large windows DataFrame.
-    matched = win.join(
+    # Left join: one row per (timestep, matching label) pair.
+    # Half-open interval: ts >= start_time AND ts < end_time.
+    # Labels are always a small CSV (~KB); broadcast avoids shuffling the series.
+    matched = ts_df.join(
         F.broadcast(lbl),
         on=(
-            (F.col("win.channel_id") == F.col("lbl.channel_id"))
-            & (F.col("win.window_end_ts") > F.col("lbl.start_time"))
-            & (F.col("win.window_start_ts") < F.col("lbl.end_time"))
+            (F.col("ts.channel_id") == F.col("lbl.channel_id"))
+            & (F.col("ts.telemetry_timestamp") >= F.col("lbl.start_time"))
+            & (F.col("ts.telemetry_timestamp") < F.col("lbl.end_time"))
         ),
         how="left",
     ).select(
-        F.col("win.window_id"),
+        F.col("ts.channel_id"),
+        F.col("ts.telemetry_timestamp"),
         F.col("lbl.start_time").isNotNull().alias("_matched"),
     )
 
-    # Collapse: any match → is_anomaly=True for that window_id.
-    flags = matched.groupBy("window_id").agg(F.max("_matched").cast("boolean").alias("is_anomaly"))
+    # Collapse: any match for this (channel_id, telemetry_timestamp) → is_anomaly=True.
+    flags = matched.groupBy("channel_id", "telemetry_timestamp").agg(
+        F.max("_matched").cast("boolean").alias("is_anomaly")
+    )
 
-    result = df.join(flags, on="window_id", how="left").withColumn(
+    result = df.join(
+        flags, on=["channel_id", "telemetry_timestamp"], how="left"
+    ).withColumn(
         "is_anomaly",
         F.coalesce(F.col("is_anomaly"), F.lit(False)),
     )
 
-    log.info("join_anomaly_labels")
-    return result
-
-
-def exclude_anomalies_from_train(train_df: DataFrame) -> DataFrame:
-    """Remove anomalous windows from the training set.
-
-    Telemanom trains on nominal data only — it learns the normal pattern and flags
-    deviations at inference time. Anomaly windows are kept in the test set for
-    evaluation.
-
-    Args:
-        train_df: Windows DataFrame with 'is_anomaly' (BooleanType) column.
-
-    Returns:
-        DataFrame with all is_anomaly=True rows removed.
-    """
-    result = train_df.filter(~F.col("is_anomaly"))
-    log.info("exclude_anomalies_from_train")
+    log.info("label_timesteps")
     return result

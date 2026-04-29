@@ -211,22 +211,40 @@ def test_dynamic_threshold_detects_injected_spike() -> None:
 torch = pytest.importorskip("torch")
 
 
+def _make_predict_loader(
+    n: int,
+    window_size: int,
+    batch_size: int = 8,
+    seed: int = 0,
+) -> "torch.utils.data.DataLoader[tuple[torch.Tensor, torch.Tensor]]":
+    """Build a synthetic DataLoader of (x, y) pairs for predict() tests."""
+    rng = np.random.default_rng(seed)
+    x_np = rng.standard_normal((n, window_size)).astype(np.float32)
+    y_np = rng.standard_normal(n).astype(np.float32)
+    dataset = torch.utils.data.TensorDataset(
+        torch.from_numpy(x_np).unsqueeze(-1),  # (n, W, 1)
+        torch.from_numpy(y_np),                 # (n,)
+    )
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
 def test_predict_output_shape() -> None:
-    """predict() must return a 1-D array of length N."""
+    """predict() must return two 1-D arrays (preds, targets) each of length N."""
     from spacecraft_telemetry.model.architecture import build_model
     from spacecraft_telemetry.model.scoring import predict
     from spacecraft_telemetry.core.config import ModelConfig
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
-    rng = np.random.default_rng(0)
-    values = rng.standard_normal((20, 10)).astype(np.float32)
+    loader = _make_predict_loader(20, window_size=cfg.window_size, batch_size=8)
     device = torch.device("cpu")
 
-    out = predict(model, values, device, batch_size=8)
+    preds, targets = predict(model, loader, device)
 
-    assert out.shape == (20,), f"Expected shape (20,), got {out.shape}"
-    assert out.dtype == np.float32
+    assert preds.shape == (20,), f"Expected preds shape (20,), got {preds.shape}"
+    assert targets.shape == (20,), f"Expected targets shape (20,), got {targets.shape}"
+    assert preds.dtype == np.float32
+    assert targets.dtype == np.float32
 
 
 def test_predict_dtype_is_float32() -> None:
@@ -237,10 +255,11 @@ def test_predict_dtype_is_float32() -> None:
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
-    values = np.ones((5, 10), dtype=np.float32)
+    loader = _make_predict_loader(5, window_size=cfg.window_size, batch_size=5)
 
-    out = predict(model, values, torch.device("cpu"), batch_size=5)
-    assert out.dtype == np.float32
+    preds, targets = predict(model, loader, torch.device("cpu"))
+    assert preds.dtype == np.float32
+    assert targets.dtype == np.float32
 
 
 def test_predict_batched_matches_single_pass() -> None:
@@ -253,18 +272,25 @@ def test_predict_batched_matches_single_pass() -> None:
     model = build_model(cfg)
     model.eval()
     rng = np.random.default_rng(1)
-    values = rng.standard_normal((20, 10)).astype(np.float32)
+    n, W = 20, cfg.window_size
+    x_np = rng.standard_normal((n, W)).astype(np.float32)
+    y_np = rng.standard_normal(n).astype(np.float32)
     device = torch.device("cpu")
 
     # Reference: single forward pass over all 20 samples at once.
     with torch.no_grad():
-        x_all = torch.from_numpy(values).unsqueeze(-1)  # (20, 10, 1)
+        x_all = torch.from_numpy(x_np).unsqueeze(-1)  # (20, W, 1)
         expected = model(x_all).squeeze(1).cpu().numpy()
 
-    # predict() with batch_size=8 splits into [8, 8, 4].
-    out = predict(model, values, device, batch_size=8)
+    # predict() with batch_size=8 splits into batches.
+    dataset = torch.utils.data.TensorDataset(
+        torch.from_numpy(x_np).unsqueeze(-1),
+        torch.from_numpy(y_np),
+    )
+    loader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False)
+    preds, _ = predict(model, loader, device)
 
-    np.testing.assert_allclose(out, expected, rtol=1e-5)
+    np.testing.assert_allclose(preds, expected, rtol=1e-5)
 
 
 def test_predict_sets_eval_mode() -> None:
@@ -276,9 +302,9 @@ def test_predict_sets_eval_mode() -> None:
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
     model.train()  # force training mode before calling predict
-    values = np.ones((4, 10), dtype=np.float32)
+    loader = _make_predict_loader(4, window_size=cfg.window_size, batch_size=4)
 
-    predict(model, values, torch.device("cpu"), batch_size=4)
+    predict(model, loader, torch.device("cpu"))
 
     assert not model.training, "predict() should leave the model in eval mode"
 
@@ -308,7 +334,7 @@ def _override_settings_for_scoring(
 
 @pytest.mark.slow
 def test_score_channel_artifacts_and_metrics(
-    tiny_windowed_parquet: "object",
+    tiny_series_parquet: "object",
     tmp_path: Path,
 ) -> None:
     """score_channel must write artifacts and return a well-formed metrics dict.
@@ -324,9 +350,9 @@ def test_score_channel_artifacts_and_metrics(
     from spacecraft_telemetry.model.io import artifact_paths
     from spacecraft_telemetry.model.scoring import score_channel
     from spacecraft_telemetry.model.training import train_channel
-    from tests.model.conftest import WindowedParquetFixture
+    from tests.model.conftest import SeriesParquetFixture
 
-    fx: WindowedParquetFixture = tiny_windowed_parquet  # type: ignore[assignment]
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
     settings = _override_settings_for_scoring(
         load_settings("test"),
         processed_dir=fx.processed_dir,

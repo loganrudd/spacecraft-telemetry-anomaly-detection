@@ -1,8 +1,8 @@
 """Shared fixtures for Telemanom model tests.
 
-Key fixture: tiny_windowed_parquet — writes synthetic windowed Parquet in the
-Hive-partitioned layout produced by the Spark pipeline (Phase 2), so model
-tests can run without Spark. Matches WINDOW_SCHEMA from spark/schemas.py.
+Key fixture: tiny_series_parquet — writes synthetic per-timestep series Parquet in
+the Hive-partitioned layout produced by the Spark pipeline (Phase 2.5+), so model
+tests can run without Spark.  Matches SERIES_SCHEMA from spark/schemas.py.
 
 Layout:
     {processed_dir}/ESA-Mission1/train/mission_id=ESA-Mission1/channel_id=channel_1/part.parquet
@@ -18,12 +18,13 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+from spacecraft_telemetry.core.config import load_settings as _load_settings
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -31,20 +32,33 @@ import pytest
 
 _MISSION = "ESA-Mission1"
 _CHANNEL = "channel_1"
-_WINDOW_SIZE = 10
-_N_TRAIN = 50
-_N_TEST = 20
 
-# PyArrow schema matching WINDOW_SCHEMA from spark/schemas.py,
+# Read window params from test.yaml so fixtures stay in sync with config.
+_test_model_cfg = _load_settings("test").model
+_WINDOW_SIZE = _test_model_cfg.window_size
+_PREDICTION_HORIZON = _test_model_cfg.prediction_horizon
+_SPAN = _WINDOW_SIZE + _PREDICTION_HORIZON
+
+# Train split: 3 clean segments so that on-the-fly windowing produces a
+# predictable number of valid windows.
+#   segment 0: 60 rows  → max(0, 60 - span + 1) valid windows
+#   segment 1: 30 rows  → max(0, 30 - span + 1) valid windows
+#   segment 2: 10 rows  → max(0, 10 - span + 1) valid windows (0 when span > 10)
+_SEG_SIZES_TRAIN = (60, 30, 10)
+_N_TRAIN_WINDOWS = sum(max(0, s - _SPAN + 1) for s in _SEG_SIZES_TRAIN)
+
+# Test split: 1 segment of 30 rows → last 5 rows are anomalous.
+_N_TEST_ROWS = 30
+_N_TEST_WINDOWS = max(0, _N_TEST_ROWS - _SPAN + 1)
+_ANOMALY_ROWS = 5       # last 5 rows of test segment are anomalous
+
+# PyArrow schema matching SERIES_SCHEMA from spark/schemas.py,
 # minus the Hive partition columns (mission_id, channel_id).
-_WINDOW_FILE_SCHEMA = pa.schema(
+_SERIES_FILE_SCHEMA = pa.schema(
     [
-        pa.field("window_id", pa.int64()),
+        pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC")),
+        pa.field("value_normalized", pa.float32()),
         pa.field("segment_id", pa.int32()),
-        pa.field("window_start_ts", pa.timestamp("us", tz="UTC")),
-        pa.field("window_end_ts", pa.timestamp("us", tz="UTC")),
-        pa.field("values", pa.list_(pa.float32())),
-        pa.field("target", pa.float32()),
         pa.field("is_anomaly", pa.bool_()),
     ]
 )
@@ -56,13 +70,15 @@ _WINDOW_FILE_SCHEMA = pa.schema(
 
 
 @dataclass(frozen=True)
-class WindowedParquetFixture:
+class SeriesParquetFixture:
     processed_dir: Path
     mission: str
     channel: str
     window_size: int
-    n_train: int
-    n_test: int
+    prediction_horizon: int
+    n_train_windows: int
+    n_test_rows: int
+    n_test_windows: int
 
 
 # ---------------------------------------------------------------------------
@@ -70,37 +86,50 @@ class WindowedParquetFixture:
 # ---------------------------------------------------------------------------
 
 
-def _make_window_table(
-    n: int,
-    window_size: int,
-    id_offset: int = 0,
-    anomaly_fraction: float = 0.0,
-    split: Literal["train", "test"] = "train",
+def _make_series_table(
+    seg_sizes: tuple[int, ...],
+    anomaly_tail: int = 0,
 ) -> pa.Table:
-    """Build a PyArrow Table with n synthetic windows."""
-    _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    base_ts = pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC"))
-    rng = np.random.default_rng(seed=42 + id_offset)
-    raw_values = rng.standard_normal((n, window_size)).astype(np.float32)
-    targets = rng.standard_normal(n).astype(np.float32)
+    """Build a PyArrow Table with per-timestep rows.
 
-    # Mark the last anomaly_fraction of test windows as anomalies
-    is_anomaly = np.zeros(n, dtype=bool)
-    if anomaly_fraction > 0 and split == "test":
-        anomaly_start = int(n * (1 - anomaly_fraction))
-        is_anomaly[anomaly_start:] = True
+    ``seg_sizes``: tuple of row counts per segment (segment IDs = 0, 1, 2, …).
+    ``anomaly_tail``: number of rows at the end of the *last* segment to mark
+        as anomalous.
+    """
+    _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    rng = np.random.default_rng(seed=42)
+
+    timestamps: list[pa.Scalar] = []
+    values: list[float] = []
+    seg_ids: list[int] = []
+    is_anomaly: list[bool] = []
+
+    t_offset = 0
+    for seg_id, size in enumerate(seg_sizes):
+        for i in range(size):
+            ts = pa.scalar(
+                _BASE_DT.timestamp() + (t_offset + i) * 90,  # 90-second cadence
+                type=pa.timestamp("s", tz="UTC"),
+            ).cast(pa.timestamp("us", tz="UTC"))
+            timestamps.append(ts)
+            values.append(float(rng.standard_normal(1)[0]))
+            seg_ids.append(seg_id)
+            is_anomaly.append(False)
+        t_offset += size
+
+    # Mark the tail of the last segment as anomalous.
+    if anomaly_tail > 0:
+        for i in range(len(is_anomaly) - anomaly_tail, len(is_anomaly)):
+            is_anomaly[i] = True
 
     return pa.table(
         {
-            "window_id": pa.array(np.arange(id_offset, id_offset + n, dtype=np.int64)),
-            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
-            "window_start_ts": base_ts,
-            "window_end_ts": base_ts,
-            "values": pa.array(raw_values.tolist(), type=pa.list_(pa.float32())),
-            "target": pa.array(targets, type=pa.float32()),
-            "is_anomaly": pa.array(is_anomaly),
+            "telemetry_timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(values, type=pa.float32()),
+            "segment_id": pa.array(seg_ids, type=pa.int32()),
+            "is_anomaly": pa.array(is_anomaly, type=pa.bool_()),
         },
-        schema=_WINDOW_FILE_SCHEMA,
+        schema=_SERIES_FILE_SCHEMA,
     )
 
 
@@ -115,30 +144,46 @@ def _write_partition(table: pa.Table, partition_dir: Path) -> None:
 
 
 @pytest.fixture()
-def tiny_windowed_parquet(tmp_path: Path) -> WindowedParquetFixture:
-    """Write synthetic windowed Parquet in Spark's Hive-partitioned layout.
+def tiny_series_parquet(tmp_path: Path) -> SeriesParquetFixture:
+    """Write synthetic series Parquet in Spark's Hive-partitioned layout.
 
-    50 train windows + 20 test windows, window_size=10, single channel.
-    Test windows have 25% anomaly rate (last 5 rows marked is_anomaly=True).
+    Train: 3 segments (60 + 30 + 10 rows).  Segment 2 is too short for any
+    window, so only segments 0 and 1 contribute valid windows (50 + 20 = 70).
+    Test: 1 segment of 30 rows, last 5 marked anomalous.  All 20 windows
+    cross no boundaries, so all are included in the test index.
     """
     processed_dir = tmp_path / "processed"
 
-    train_dir = processed_dir / _MISSION / "train" / f"mission_id={_MISSION}" / f"channel_id={_CHANNEL}"
-    test_dir = processed_dir / _MISSION / "test" / f"mission_id={_MISSION}" / f"channel_id={_CHANNEL}"
+    train_dir = (
+        processed_dir / _MISSION / "train"
+        / f"mission_id={_MISSION}" / f"channel_id={_CHANNEL}"
+    )
+    test_dir = (
+        processed_dir / _MISSION / "test"
+        / f"mission_id={_MISSION}" / f"channel_id={_CHANNEL}"
+    )
 
-    _write_partition(_make_window_table(_N_TRAIN, _WINDOW_SIZE, id_offset=0, split="train"), train_dir)
-    _write_partition(_make_window_table(_N_TEST, _WINDOW_SIZE, id_offset=_N_TRAIN, anomaly_fraction=0.25, split="test"), test_dir)
+    _write_partition(
+        _make_series_table(_SEG_SIZES_TRAIN, anomaly_tail=0),
+        train_dir,
+    )
+    _write_partition(
+        _make_series_table((_N_TEST_ROWS,), anomaly_tail=_ANOMALY_ROWS),
+        test_dir,
+    )
 
-    # Write normalization_params.json so train_channel can copy it into artifacts.
+    # normalization_params.json — needed by save_norm_params in training.
     norm_file = processed_dir / _MISSION / "normalization_params.json"
     norm_file.parent.mkdir(parents=True, exist_ok=True)
     norm_file.write_text(json.dumps({_CHANNEL: {"mean": 0.0, "std": 1.0}}))
 
-    return WindowedParquetFixture(
+    return SeriesParquetFixture(
         processed_dir=processed_dir,
         mission=_MISSION,
         channel=_CHANNEL,
         window_size=_WINDOW_SIZE,
-        n_train=_N_TRAIN,
-        n_test=_N_TEST,
+        prediction_horizon=_PREDICTION_HORIZON,
+        n_train_windows=_N_TRAIN_WINDOWS,
+        n_test_rows=_N_TEST_ROWS,
+        n_test_windows=_N_TEST_WINDOWS,
     )

@@ -111,24 +111,24 @@ def read_labels(spark: SparkSession, path: Path) -> DataFrame:
     )
 
 
-def write_windows(
+def write_series(
     df: DataFrame,
     output_path: Path,
     mode: str = "overwrite",
 ) -> None:
-    """Write windowed LSTM-input data as partitioned Parquet.
+    """Write per-timestep series data as partitioned Parquet.
 
     Partition layout: {output_path}/mission_id={M}/channel_id={C}/part-*.parquet
-    Downstream Phase 4 (PyTorch training) reads a single channel partition without
-    scanning the full dataset.
+    PyTorch DataLoader reads a single channel partition and windows on-the-fly,
+    so window_size is not baked into the on-disk schema (see Plan 002.5).
 
     Args:
-        df: DataFrame conforming to WINDOW_SCHEMA. Must have mission_id and
+        df: DataFrame conforming to SERIES_SCHEMA. Must have mission_id and
             channel_id columns — they become the partition directory names.
         output_path: Root output directory (e.g. data/processed/ESA-Mission1/train/).
         mode: Spark write mode. "overwrite" replaces existing data (default).
     """
-    log.info("write_windows", output_path=str(output_path), mode=mode)
+    log.info("write_series", output_path=str(output_path), mode=mode)
     (df.write.mode(mode).partitionBy("mission_id", "channel_id").parquet(str(output_path)))
 
 

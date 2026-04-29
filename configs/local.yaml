@@ -19,8 +19,6 @@ spark:
   processed_data_dir: data/processed
   driver_memory: "1536m"
   num_cores: 2
-  window_size: 250
-  prediction_horizon: 1
   train_fraction: 0.8
   normalization: z-score
   gap_multiplier: 3.0
@@ -41,6 +39,8 @@ model:
   learning_rate: 0.001
   batch_size: 64
   epochs: 35
+  window_size: 250
+  prediction_horizon: 1
   early_stopping_patience: 5
   val_fraction: 0.1
   seed: 42

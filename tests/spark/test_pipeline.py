@@ -3,8 +3,9 @@
 Each test runs the full pipeline on synthetic data (100 rows, 1 channel) and
 validates that output files exist, schemas are correct, and counts make sense.
 
-Test settings use window_size=3 so that synthetic 100-row channels produce
-windows (the default window_size=250 requires > 250 rows per segment).
+The pipeline now writes per-timestep series rows (SERIES_SCHEMA) rather than
+pre-materialised sliding windows. Window construction is deferred to the
+PyTorch DataLoader (model/dataset.py).
 """
 
 from __future__ import annotations
@@ -30,8 +31,6 @@ def settings(pipeline_input_dir: Path, tmp_path: Path):
         data=DataConfig(sample_data_dir=pipeline_input_dir),
         spark=SparkConfig(
             processed_data_dir=output_dir,
-            window_size=3,
-            prediction_horizon=1,
             train_fraction=0.8,
             feature_windows=[10],
         ),
@@ -60,10 +59,9 @@ class TestSummaryDict:
         assert set(summary.keys()) == {
             "channels_processed",
             "rows_in",
-            "windows_out",
             "feature_rows_out",
-            "train_windows",
-            "test_windows",
+            "train_rows",
+            "test_rows",
         }
 
     def test_channels_processed_equals_one(self, spark_session, settings) -> None:
@@ -78,25 +76,25 @@ class TestSummaryDict:
         summary = run_preprocessing(spark_session, settings, "ESA-Mission1")
         assert summary["rows_in"] == 100
 
-    def test_windows_out_equals_train_plus_test(self, spark_session, settings) -> None:
+    def test_train_plus_test_equals_rows_in(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         summary = run_preprocessing(spark_session, settings, "ESA-Mission1")
-        assert summary["windows_out"] == summary["train_windows"] + summary["test_windows"]
+        assert summary["train_rows"] + summary["test_rows"] == summary["rows_in"]
 
-    def test_train_windows_positive(self, spark_session, settings) -> None:
+    def test_train_rows_positive(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         summary = run_preprocessing(spark_session, settings, "ESA-Mission1")
-        # 80 train rows, ws=3, ph=1 → 77 windows before anomaly exclusion
-        assert summary["train_windows"] > 0
+        # 100 rows, train_fraction=0.8 → 80 train rows
+        assert summary["train_rows"] > 0
 
-    def test_test_windows_equals_17(self, spark_session, settings) -> None:
+    def test_test_rows_equals_20(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         summary = run_preprocessing(spark_session, settings, "ESA-Mission1")
-        # 20 test rows, ws=3, ph=1 → max(0, 20-3-1+1) = 17 windows; no anomaly labels overlap
-        assert summary["test_windows"] == 17
+        # 100 rows, train_fraction=0.8 → last 20 rows go to test
+        assert summary["test_rows"] == 20
 
     def test_feature_rows_out_equals_rows_in(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
@@ -182,13 +180,14 @@ class TestOutputSchemas:
         df = spark_session.read.parquet(str(_output(settings) / "train"))
         assert "is_anomaly" in df.columns
 
-    def test_train_has_values_and_target(self, spark_session, settings) -> None:
+    def test_train_has_series_schema_columns(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         df = spark_session.read.parquet(str(_output(settings) / "train"))
-        assert "values" in df.columns
-        assert "target" in df.columns
+        assert "value_normalized" in df.columns
+        assert "telemetry_timestamp" in df.columns
+        assert "segment_id" in df.columns
 
     def test_test_has_is_anomaly_column(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
