@@ -111,8 +111,10 @@ def make_dataloaders(
 
     Val split: the last val_fraction of windows (time-ordered, contiguous tail).
     Train DataLoader shuffles; val DataLoader does not.
-    num_workers=0 on all platforms — MPS does not support num_workers > 0 on macOS.
+    num_workers=0 on MPS (macOS); cloud.yaml sets num_workers=4 for CUDA nodes.
+    pin_memory is enabled automatically when CUDA is available.
     """
+    import torch
     from torch.utils.data import DataLoader
 
     n = len(values)
@@ -128,16 +130,21 @@ def make_dataloaders(
     train_ds = WindowedSequenceDataset(values[:n_train], targets[:n_train])
     val_ds = WindowedSequenceDataset(values[n_train:], targets[n_train:])
 
+    # pin_memory speeds up host→GPU transfers; only effective with CUDA.
+    # num_workers=0 is required on MPS (macOS); cloud.yaml sets num_workers=4.
+    _pin = torch.cuda.is_available()
     train_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
         train_ds,
         batch_size=model_config.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=model_config.num_workers,
+        pin_memory=_pin,
     )
     val_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
         val_ds,
         batch_size=model_config.batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=model_config.num_workers,
+        pin_memory=_pin,
     )
     return train_loader, val_loader

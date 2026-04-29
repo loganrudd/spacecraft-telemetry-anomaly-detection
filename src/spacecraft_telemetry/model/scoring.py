@@ -199,7 +199,7 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
             "Re-run the Spark pipeline and re-train with consistent settings."
         )
 
-    preds = predict(model, values, device, cfg.batch_size)
+    preds = predict(model, values, device, cfg.inference_batch_size)
     errors = preds - targets
     smoothed = smooth_errors(errors, cfg.error_smoothing_window)
     threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)

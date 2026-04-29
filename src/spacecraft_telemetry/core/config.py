@@ -142,18 +142,29 @@ class ModelConfig(BaseModel):
     seed: int = 42
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     artifacts_dir: Path = Path("models")
+    # DataLoader workers — 0 on MPS/macOS; 4 on cloud GPU nodes
+    num_workers: int = 0
     # Scoring (Hundman §3.1 / §3.2 rolling-window simplification)
+    inference_batch_size: int = 256
     error_smoothing_window: int = 30
     threshold_window: int = 250
     threshold_z: float = 3.0
     threshold_min_anomaly_len: int = 3
 
     @field_validator("hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
-                     "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len")
+                     "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
+                     "inference_batch_size")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("num_workers")
+    @classmethod
+    def non_negative_int(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"num_workers must be >= 0, got {v}")
         return v
 
     @field_validator("val_fraction")

@@ -55,3 +55,5 @@ model:
   threshold_window: 250
   threshold_z: 3.0
   threshold_min_anomaly_len: 3
+  num_workers: 4
+  inference_batch_size: 256
