@@ -14,6 +14,7 @@ are encoded in directory names, exactly as Spark writes them.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,6 +128,11 @@ def tiny_windowed_parquet(tmp_path: Path) -> WindowedParquetFixture:
 
     _write_partition(_make_window_table(_N_TRAIN, _WINDOW_SIZE, id_offset=0, split="train"), train_dir)
     _write_partition(_make_window_table(_N_TEST, _WINDOW_SIZE, id_offset=_N_TRAIN, anomaly_fraction=0.25, split="test"), test_dir)
+
+    # Write normalization_params.json so train_channel can copy it into artifacts.
+    norm_file = processed_dir / _MISSION / "normalization_params.json"
+    norm_file.parent.mkdir(parents=True, exist_ok=True)
+    norm_file.write_text(json.dumps({_CHANNEL: {"mean": 0.0, "std": 1.0}}))
 
     return WindowedParquetFixture(
         processed_dir=processed_dir,

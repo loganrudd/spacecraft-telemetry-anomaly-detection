@@ -9,15 +9,17 @@ Wraps arrays in a torch Dataset and produces train/val DataLoaders.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import torch
-from torch.utils.data import DataLoader, Dataset
 
 from spacecraft_telemetry.core.config import ModelConfig
+
+if TYPE_CHECKING:
+    import torch
+    from torch.utils.data import DataLoader, Dataset
 
 
 def load_windowed_parquet(
@@ -74,38 +76,45 @@ def load_windowed_parquet(
     return values, targets, is_anomaly
 
 
-class WindowedSequenceDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
+class WindowedSequenceDataset:
     """Wraps windowed numpy arrays for use with a PyTorch DataLoader.
+
+    Implements __len__ and __getitem__ so torch DataLoader accepts it without
+    requiring Dataset as a base class (duck typing). This keeps the module
+    importable without a PyTorch install.
 
     Each item: (x, y) where:
         x: (W, 1) float32 tensor  — window values, unsqueezed for LSTM input
         y: ()     float32 tensor  — one-step-ahead target (scalar)
     """
 
-    def __init__(self, values: np.ndarray[tuple[int, int], np.dtype[np.float32]], targets: np.ndarray[tuple[int], np.dtype[np.float32]]) -> None:
+    def __init__(self, values: np.ndarray[Any, np.dtype[np.float32]], targets: np.ndarray[Any, np.dtype[np.float32]]) -> None:
+        import torch
         self._values = torch.from_numpy(values)    # (N, W)
         self._targets = torch.from_numpy(targets)  # (N,)
 
     def __len__(self) -> int:
         return len(self._values)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> "tuple[torch.Tensor, torch.Tensor]":
         x = self._values[idx].unsqueeze(-1)  # (W,) → (W, 1)
         y = self._targets[idx]               # scalar
         return x, y
 
 
 def make_dataloaders(
-    values: np.ndarray[tuple[int, int], np.dtype[np.float32]],
-    targets: np.ndarray[tuple[int], np.dtype[np.float32]],
+    values: np.ndarray[Any, np.dtype[np.float32]],
+    targets: np.ndarray[Any, np.dtype[np.float32]],
     model_config: ModelConfig,
-) -> tuple[DataLoader[tuple[torch.Tensor, torch.Tensor]], DataLoader[tuple[torch.Tensor, torch.Tensor]]]:
+) -> "tuple[DataLoader[tuple[torch.Tensor, torch.Tensor]], DataLoader[tuple[torch.Tensor, torch.Tensor]]]":
     """Split values/targets into train/val DataLoaders.
 
     Val split: the last val_fraction of windows (time-ordered, contiguous tail).
     Train DataLoader shuffles; val DataLoader does not.
     num_workers=0 on all platforms — MPS does not support num_workers > 0 on macOS.
     """
+    from torch.utils.data import DataLoader
+
     n = len(values)
     n_val = max(1, int(n * model_config.val_fraction))
     n_train = n - n_val

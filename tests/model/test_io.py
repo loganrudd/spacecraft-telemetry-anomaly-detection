@@ -75,11 +75,11 @@ def test_save_then_load_round_trip(tmp_path: Path) -> None:
         train_log=root / "train_log.json",
     )
 
-    save_model(model, paths, cfg)
+    save_model(model, paths, cfg, window_size=10)
     assert Path(paths.model).exists()
     assert Path(paths.config).exists()
 
-    loaded_model, loaded_cfg = load_model(paths, torch.device("cpu"))
+    loaded_model, loaded_cfg, loaded_window_size = load_model(paths, torch.device("cpu"))
     loaded_model.eval()
 
     x = torch.zeros(2, 10, 1)
@@ -88,6 +88,7 @@ def test_save_then_load_round_trip(tmp_path: Path) -> None:
 
     assert loaded_cfg.hidden_dim == cfg.hidden_dim
     assert loaded_cfg.num_layers == cfg.num_layers
+    assert loaded_window_size == 10
 
 
 def test_load_model_uses_saved_architecture_not_current_settings(
@@ -109,12 +110,13 @@ def test_load_model_uses_saved_architecture_not_current_settings(
         metrics=root / "metrics.json",
         train_log=root / "train_log.json",
     )
-    save_model(model, paths, saved_cfg)
+    save_model(model, paths, saved_cfg, window_size=250)
 
     # Reload — current ModelConfig default has hidden_dim=80 (the class default).
-    loaded_model, loaded_cfg = load_model(paths, torch.device("cpu"))
+    loaded_model, loaded_cfg, loaded_window_size = load_model(paths, torch.device("cpu"))
     assert loaded_model.hidden_dim == 16
     assert loaded_cfg.hidden_dim == 16
+    assert loaded_window_size == 250
 
 
 # ---------------------------------------------------------------------------

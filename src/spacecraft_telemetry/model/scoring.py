@@ -1,8 +1,8 @@
 """Telemanom anomaly scoring — pure numpy/pandas, no torch dependency.
 
 Importable in Phase 9 (FastAPI serving) without a PyTorch install.
-The only torch usage is inside predict(), which accepts a pre-loaded model
-object but does not import torch at module level.
+The thresholding and evaluation functions are importable without PyTorch — 
+only predict() and score_channel() require it.
 
 Pipeline:
     values, targets, is_anomaly_true = load_windowed_parquet(..., "test")
@@ -177,11 +177,17 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     device = resolve_device(cfg.device)
     paths = artifact_paths(settings, mission, channel)
 
-    model, _ = load_model(paths, device)
+    model, _, saved_window_size = load_model(paths, device)
 
     values, targets, is_anomaly_true = load_windowed_parquet(
         settings.spark.processed_data_dir, mission, channel, "test"
     )
+    if values.shape[1] != saved_window_size:
+        raise ValueError(
+            f"Parquet window_size={values.shape[1]} does not match the value the "
+            f"model was trained on (window_size={saved_window_size}). "
+            "Re-run the Spark pipeline and re-train with consistent settings."
+        )
 
     preds = predict(model, values, device, cfg.batch_size)
     errors = preds - targets

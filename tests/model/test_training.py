@@ -152,6 +152,12 @@ def test_early_stopping_triggers(tmp_path: Path) -> None:
         value=0.0, target=0.0,
     )
 
+    # Write normalization_params.json required by train_channel.
+    import json as _json
+    norm_file = processed_dir / mission / "normalization_params.json"
+    norm_file.parent.mkdir(parents=True, exist_ok=True)
+    norm_file.write_text(_json.dumps({channel: {"mean": 0.0, "std": 1.0}}))
+
     settings = _override_settings(
         load_settings("test"),
         processed_dir=processed_dir,

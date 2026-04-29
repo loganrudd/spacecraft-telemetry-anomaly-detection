@@ -223,7 +223,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
 | 3 | Feast feature store integration | ✅ Complete |
 | 4 | Telemanom model drop-in | ✅ Complete |
-| 5 | Ray parallel training | Planned |
+| 5 | Ray parallel training | In progress |
 | 6 | Ray Tune HPO | Planned |
 | 7 | MLflow integration | Planned |
 | 8 | Evidently monitoring | Planned |

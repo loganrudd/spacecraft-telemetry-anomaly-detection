@@ -91,6 +91,7 @@ def save_model(
     model: "TelemanomLSTM",
     paths: ModelArtifactPaths,
     model_config: ModelConfig,
+    window_size: int,
 ) -> None:
     """Serialize model weights and architecture config via BytesIO, then write.
 
@@ -98,6 +99,8 @@ def save_model(
     to _write_bytes so the same function works for gs:// URIs in Phase 5.
     Architecture hyperparams are saved separately so load_model can reconstruct
     the correct TelemanomLSTM regardless of the current Settings.model defaults.
+    window_size is saved so scoring can validate that loaded Parquet matches
+    the sequence length the model was trained on.
     """
     import torch
 
@@ -110,6 +113,7 @@ def save_model(
             "hidden_dim": model_config.hidden_dim,
             "num_layers": model_config.num_layers,
             "dropout": model_config.dropout,
+            "window_size": window_size,
         },
         indent=2,
     ).encode()
@@ -119,11 +123,17 @@ def save_model(
 def load_model(
     paths: ModelArtifactPaths,
     device: "torch.device",
-) -> "tuple[TelemanomLSTM, ModelConfig]":
+) -> "tuple[TelemanomLSTM, ModelConfig, int]":
     """Reconstruct TelemanomLSTM from saved config and weights.
 
     Uses the saved model_config.json (not current Settings.model) so a model
     trained at hidden_dim=80 loads correctly after config defaults change.
+
+    Returns:
+        model:        Reconstructed TelemanomLSTM with weights loaded.
+        model_config: Architecture hyperparams from the saved JSON.
+        window_size:  Sequence length the model was trained on — callers should
+                      validate that loaded Parquet data matches this value.
     """
     import torch
 
@@ -135,6 +145,7 @@ def load_model(
         num_layers=saved["num_layers"],
         dropout=saved["dropout"],
     )
+    window_size: int = saved["window_size"]
     model = build_model(model_config)
 
     buf = _io.BytesIO(_read_bytes(paths.model))
@@ -142,7 +153,44 @@ def load_model(
     model.load_state_dict(state_dict)
     model.to(device)
 
-    return model, model_config
+    return model, model_config, window_size
+
+
+# ---------------------------------------------------------------------------
+# Normalization params copy (called by training.py after save_model)
+# ---------------------------------------------------------------------------
+
+
+def save_norm_params(
+    paths: ModelArtifactPaths,
+    processed_data_dir: Path | str,
+    mission: str,
+    channel: str,
+) -> None:
+    """Copy the per-channel normalization params into the model artifact directory.
+
+    Reads {processed_data_dir}/{mission}/normalization_params.json, extracts
+    the entry for `channel`, and writes it to paths.norm so the artifact
+    directory is self-contained for Phase 9 serving (no dependency on the
+    upstream Spark output layout at inference time).
+
+    Raises:
+        FileNotFoundError: If normalization_params.json doesn't exist.
+        KeyError:          If `channel` has no entry in the params file.
+    """
+    source = Path(processed_data_dir) / mission / "normalization_params.json"
+    if not source.exists():
+        raise FileNotFoundError(
+            f"normalization_params.json not found: {source}. "
+            "Run the Spark preprocessing pipeline first."
+        )
+    all_params: dict[str, Any] = json.loads(source.read_bytes())
+    if channel not in all_params:
+        raise KeyError(
+            f"Channel {channel!r} not found in {source}. "
+            f"Available channels: {list(all_params.keys())[:10]}..."
+        )
+    _write_bytes(paths.norm, json.dumps(all_params[channel], indent=2).encode())
 
 
 # ---------------------------------------------------------------------------

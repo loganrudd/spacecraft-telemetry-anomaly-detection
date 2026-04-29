@@ -25,7 +25,7 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.model.architecture import build_model
 from spacecraft_telemetry.model.dataset import load_windowed_parquet, make_dataloaders
 from spacecraft_telemetry.model.device import resolve_device
-from spacecraft_telemetry.model.io import artifact_paths, save_model, save_train_log
+from spacecraft_telemetry.model.io import artifact_paths, save_model, save_norm_params, save_train_log
 
 log = get_logger(__name__)
 
@@ -159,7 +159,8 @@ def train_channel(
         model.load_state_dict(best_state)
 
     paths = artifact_paths(settings, mission, channel)
-    save_model(model, paths, cfg)
+    save_model(model, paths, cfg, window_size=settings.spark.window_size)
+    save_norm_params(paths, settings.spark.processed_data_dir, mission, channel)
     save_train_log(
         paths,
         [
