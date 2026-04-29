@@ -1,0 +1,230 @@
+"""Tests for model.dataset — load_windowed_parquet, WindowedSequenceDataset, make_dataloaders."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from spacecraft_telemetry.core.config import ModelConfig
+from spacecraft_telemetry.model.dataset import (
+    WindowedSequenceDataset,
+    load_windowed_parquet,
+    make_dataloaders,
+)
+from tests.model.conftest import WindowedParquetFixture
+
+
+# ---------------------------------------------------------------------------
+# load_windowed_parquet
+# ---------------------------------------------------------------------------
+
+
+def test_load_train_returns_expected_shapes(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    fx = tiny_windowed_parquet
+    values, targets, is_anomaly = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    assert values.shape == (fx.n_train, fx.window_size)
+    assert targets.shape == (fx.n_train,)
+    assert is_anomaly.shape == (fx.n_train,)
+
+
+def test_load_test_returns_expected_shapes(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    fx = tiny_windowed_parquet
+    values, targets, is_anomaly = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "test"
+    )
+    assert values.shape == (fx.n_test, fx.window_size)
+    assert targets.shape == (fx.n_test,)
+    assert is_anomaly.shape == (fx.n_test,)
+
+
+def test_load_returns_float32_arrays(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    assert values.dtype == np.float32
+    assert targets.dtype == np.float32
+
+
+def test_load_sorted_by_window_id(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    """load_windowed_parquet must return rows sorted by window_id (chronological order).
+
+    Encodes the window position into the target value — target[i] = float(window_id)
+    — so that after sorting, targets must equal np.arange(n_train * 2).
+    Writes a second Parquet file with the first set in reverse order so the
+    loader is actually required to sort across files.
+    """
+    fx = tiny_windowed_parquet
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from datetime import datetime, timezone
+    from tests.model.conftest import _WINDOW_FILE_SCHEMA
+
+    split_dir = (
+        fx.processed_dir / fx.mission / "train"
+        / f"mission_id={fx.mission}" / f"channel_id={fx.channel}"
+    )
+
+    # Replace the existing Parquet with one where target[i] = float(window_id).
+    # Write the rows in reverse order so loading without sort produces wrong targets.
+    n = fx.n_train
+    _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ids_reversed = np.arange(n, dtype=np.int64)[::-1].copy()
+    reversed_table = pa.table(
+        {
+            "window_id": pa.array(ids_reversed),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "window_start_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "window_end_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "values": pa.array([[0.0] * fx.window_size] * n, type=pa.list_(pa.float32())),
+            # target carries the window_id so we can verify sort order
+            "target": pa.array(ids_reversed.astype(np.float32)),
+            "is_anomaly": pa.array([False] * n),
+        },
+        schema=_WINDOW_FILE_SCHEMA,
+    )
+    # Write as a second file so the loader must merge + sort across files.
+    pq.write_table(reversed_table, split_dir / "reversed.parquet")
+
+    # The original part.parquet has window_ids 0..n_train-1 with random targets.
+    # Replace it with a version that also has target = float(window_id).
+    ids_fwd = np.arange(n, dtype=np.int64)
+    fwd_table = pa.table(
+        {
+            "window_id": pa.array(ids_fwd),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "window_start_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "window_end_ts": pa.array([_BASE_DT] * n, type=pa.timestamp("us", tz="UTC")),
+            "values": pa.array([[0.0] * fx.window_size] * n, type=pa.list_(pa.float32())),
+            "target": pa.array(ids_fwd.astype(np.float32)),
+            "is_anomaly": pa.array([False] * n),
+        },
+        schema=_WINDOW_FILE_SCHEMA,
+    )
+    pq.write_table(fwd_table, split_dir / "part.parquet")
+
+    _, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    # After sort-by-window_id, targets must be [0, 0, 1, 1, 2, 2, ...] because
+    # both files have the same window_ids (0..n-1); concat + sort produces pairs.
+    expected = np.repeat(np.arange(n, dtype=np.float32), 2)
+    np.testing.assert_array_equal(targets, expected)
+
+
+def test_load_missing_channel_raises(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    fx = tiny_windowed_parquet
+    with pytest.raises(FileNotFoundError, match="channel_id=nonexistent"):
+        load_windowed_parquet(
+            fx.processed_dir, fx.mission, "nonexistent", "train"
+        )
+
+
+def test_load_existing_dir_no_parquet_raises(
+    tmp_path: Path,
+) -> None:
+    empty_dir = (
+        tmp_path / "processed" / "ESA-Mission1" / "train"
+        / "mission_id=ESA-Mission1" / "channel_id=channel_1"
+    )
+    empty_dir.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="no .parquet files"):
+        load_windowed_parquet(tmp_path / "processed", "ESA-Mission1", "channel_1", "train")
+
+
+# ---------------------------------------------------------------------------
+# WindowedSequenceDataset
+# ---------------------------------------------------------------------------
+
+
+def test_dataset_len(tiny_windowed_parquet: WindowedParquetFixture) -> None:
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    ds = WindowedSequenceDataset(values, targets)
+    assert len(ds) == fx.n_train
+
+
+def test_dataset_item_shapes(tiny_windowed_parquet: WindowedParquetFixture) -> None:
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    ds = WindowedSequenceDataset(values, targets)
+    x, y = ds[0]
+    assert x.shape == (fx.window_size, 1), f"Expected ({fx.window_size}, 1), got {x.shape}"
+    assert y.shape == torch.Size([])  # scalar
+
+
+# ---------------------------------------------------------------------------
+# make_dataloaders
+# ---------------------------------------------------------------------------
+
+
+def test_dataloader_yields_unsqueezed_input(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    """First batch x must have shape (B, W, 1) after collation."""
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    cfg = ModelConfig(batch_size=8)
+    train_loader, _ = make_dataloaders(values, targets, cfg)
+    x_batch, _ = next(iter(train_loader))
+    assert x_batch.shape == (8, fx.window_size, 1)
+
+
+def test_val_split_is_temporal_not_random(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    """Val set must be the contiguous tail of the training array."""
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    cfg = ModelConfig(val_fraction=0.2)
+    n_val = max(1, int(fx.n_train * 0.2))
+    n_train_expected = fx.n_train - n_val
+
+    train_loader, val_loader = make_dataloaders(values, targets, cfg)
+
+    assert len(train_loader.dataset) == n_train_expected  # type: ignore[arg-type]
+    assert len(val_loader.dataset) == n_val               # type: ignore[arg-type]
+
+    # Val targets must equal the tail of the original targets array.
+    val_targets = torch.cat([y for _, y in val_loader]).numpy()
+    np.testing.assert_array_equal(val_targets, targets[n_train_expected:])
+
+
+def test_val_loader_is_deterministic(
+    tiny_windowed_parquet: WindowedParquetFixture,
+) -> None:
+    """Two passes over the val loader must yield identical order — shuffle=False."""
+    fx = tiny_windowed_parquet
+    values, targets, _ = load_windowed_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    cfg = ModelConfig(batch_size=4)
+    _, val_loader = make_dataloaders(values, targets, cfg)
+
+    val_pass1 = torch.cat([y for _, y in val_loader]).numpy()
+    val_pass2 = torch.cat([y for _, y in val_loader]).numpy()
+    np.testing.assert_array_equal(val_pass1, val_pass2)

@@ -33,3 +33,20 @@ feast:
   source_path: data/processed/ESA-Mission1/features
   source_root: data/processed
   ttl_days: 365
+
+model:
+  hidden_dim: 80
+  num_layers: 2
+  dropout: 0.3
+  learning_rate: 0.001
+  batch_size: 64
+  epochs: 35
+  early_stopping_patience: 5
+  val_fraction: 0.1
+  seed: 42
+  device: auto
+  artifacts_dir: models
+  error_smoothing_window: 30
+  threshold_window: 250
+  threshold_z: 3.0
+  threshold_min_anomaly_len: 3
