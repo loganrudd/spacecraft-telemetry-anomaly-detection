@@ -540,8 +540,9 @@ def model_train(
 ) -> None:
     """Train a TelemanomLSTM on a single telemetry channel.
 
-    Reads windowed Parquet from spark.processed_data_dir/{mission}/train/ and
-    writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
+    Reads per-timestep series Parquet from spark.processed_data_dir/{mission}/train/
+    and writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
+    Windows are constructed on-the-fly by the DataLoader (Plan 002.5).
 
     Examples:
 

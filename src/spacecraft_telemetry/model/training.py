@@ -3,7 +3,7 @@
 Entrypoint: train_channel(settings, mission, channel) -> TrainingResult
 
 Follows the Explore → Plan → Execute discipline:
-- Reads windowed Parquet written by Phase 2 Spark pipeline.
+- Reads per-timestep series Parquet written by Phase 2 Spark pipeline (Plan 002.5).
 - Trains a TelemanomLSTM with early stopping on the val split.
 - Persists model weights, architecture config, and per-epoch loss log via model.io.
 
