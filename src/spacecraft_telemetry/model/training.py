@@ -100,32 +100,32 @@ def train_channel(
     for epoch in range(cfg.epochs):
         # --- train pass ---
         model.train()
-        epoch_train_loss_t = torch.tensor(0.0, device=device)
+        epoch_train_loss = 0.0
         n_train = 0
         for x, y in train_loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
+            x = x.to(device)
+            y = y.to(device)
             optimizer.zero_grad()
             pred = model(x).squeeze(1)
             loss = loss_fn(pred, y)
             loss.backward()
             optimizer.step()
-            epoch_train_loss_t += loss.detach() * len(x)
+            epoch_train_loss += loss.item() * len(x)
             n_train += len(x)
-        epoch_train_loss = (epoch_train_loss_t / n_train).item()
+        epoch_train_loss /= n_train
 
         # --- val pass ---
         model.eval()
-        epoch_val_loss_t = torch.tensor(0.0, device=device)
+        epoch_val_loss = 0.0
         n_val = 0
         with torch.no_grad():
             for x, y in val_loader:
-                x = x.to(device, non_blocking=True)
-                y = y.to(device, non_blocking=True)
+                x = x.to(device)
+                y = y.to(device)
                 pred = model(x).squeeze(1)
-                epoch_val_loss_t += loss_fn(pred, y).detach() * len(x)
+                epoch_val_loss += loss_fn(pred, y).item() * len(x)
                 n_val += len(x)
-        epoch_val_loss = (epoch_val_loss_t / n_val).item()
+        epoch_val_loss /= n_val
 
         train_losses.append(epoch_train_loss)
         val_losses.append(epoch_val_loss)
