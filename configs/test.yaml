@@ -18,8 +18,6 @@ spark:
   processed_data_dir: data/processed  # overridden to tmp_path in Spark tests
   driver_memory: "512m"
   num_cores: 1
-  window_size: 10   # small for fast tests
-  prediction_horizon: 1
   train_fraction: 0.8
   normalization: z-score
   gap_multiplier: 3.0
@@ -40,6 +38,8 @@ model:
   learning_rate: 0.001
   batch_size: 8
   epochs: 2
+  window_size: 10
+  prediction_horizon: 1
   early_stopping_patience: 5
   val_fraction: 0.1
   seed: 42

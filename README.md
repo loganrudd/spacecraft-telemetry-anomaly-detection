@@ -39,6 +39,24 @@ make test
 # Lint
 make lint
 
+# Remove build artifacts and Python caches (safe, instant)
+make clean
+
+# Remove Spark output (re-run spark-preprocess to rebuild)
+make clean-processed
+
+# Remove trained model artifacts (re-run model-train to rebuild)
+make clean-models
+
+# Wipe Feast local registry and online store (re-run feast-apply + feast-materialize)
+make clean-feast
+
+# Remove downloaded raw + sample data (re-run download-sample)
+make clean-data
+
+# Remove everything
+make clean-all
+
 # Download ESA Anomaly Dataset sample from Zenodo (~1% of one mission)
 # Requires internet access — downloads ~300MB, saves ~3MB Parquet sample
 make download-sample MISSION=ESA-Mission1
@@ -103,7 +121,7 @@ ESA Parquet (Zenodo/GCS)
 | Module | Description |
 |--------|-------------|
 | `model/architecture.py` | `TelemanomLSTM`: 2-layer LSTM (hidden=80, dropout=0.3) → linear head. `build_model(cfg)` factory. |
-| `model/dataset.py` | `load_windowed_parquet` reads Phase 2 train/test Parquet via PyArrow (no Spark at training time). `WindowedSequenceDataset`, `make_dataloaders`. |
+| `model/dataset.py` | Reads per-timestep series Parquet via PyArrow (Plan 002.5 — no pre-materialized windows). `_build_window_index` constructs LSTM windows on-the-fly. `make_dataloaders`, `make_test_dataloader`. |
 | `model/training.py` | `train_channel(settings, mission, channel)` — Adam + MSE, early stopping, per-call seed. Returns `TrainingResult`. |
 | `model/scoring.py` | Torch-free at module level. EWMA error smoothing, causal rolling threshold, run-length anomaly flagging, precision/recall/F1/F0.5. `score_channel` persists artifacts. |
 | `model/io.py` | `_write_bytes`/`_read_bytes` indirection point (Phase 5 will widen to `gs://`). `save_model`/`load_model` via `BytesIO`. `artifact_paths` for consistent directory layout. |
@@ -197,8 +215,8 @@ features = get_online_features_for_channel(store, channel_id="channel_1", missio
 
 | Module | Description |
 |--------|-------------|
-| `spark/transforms.py` | `handle_nulls`, `detect_gaps`, `normalize`, `add_rolling_features`, `create_windows`, `temporal_train_test_split`, `join_anomaly_labels`, `exclude_anomalies_from_train` |
-| `spark/io.py` | `read_channel`, `read_labels`, `write_features`, `write_windows` — partitioned Parquet I/O |
+| `spark/transforms.py` | `handle_nulls`, `detect_gaps`, `normalize`, `add_rolling_features`, `label_timesteps`, `temporal_train_test_split` |
+| `spark/io.py` | `read_channel`, `read_labels`, `write_features`, `write_series` — partitioned Parquet I/O |
 | `spark/pipeline.py` | `run_preprocessing` — full preprocessing orchestration (read → clean → normalize → features + windows) |
 | `spark/session.py` | `create_spark_session` factory (local mode for dev, configurable for Dataproc) |
 | `spark/schemas.py` | Explicit `StructType` schemas for all pipeline stages |
@@ -211,8 +229,8 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 | Directory | Contents |
 |-----------|----------|
 | `features/` | One row per timestamp: `value_normalized`, rolling mean/std/min/max at windows [10, 50, 100] samples, `rate_of_change`. Partitioned by `mission_id` + `channel_id`. For Feast (Phase 3). |
-| `train/` | Sliding-window sequences (default 250 samples each) for LSTM training. Anomaly-labeled windows excluded. |
-| `test/` | Sliding-window sequences for LSTM evaluation. Includes labeled anomaly windows for scoring. |
+| `train/` | Per-timestep series rows (`value_normalized`, `segment_id`, `is_anomaly`). Windows built on-the-fly by the DataLoader at training time (Plan 002.5). |
+| `test/` | Per-timestep series rows for LSTM evaluation. Includes anomalous timesteps for scoring (not excluded at Spark time). |
 | `normalization_params.json` | Per-channel mean + std for applying the same z-score transform at inference time. |
 
 ## Roadmap

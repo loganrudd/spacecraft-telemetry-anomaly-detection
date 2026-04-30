@@ -3,7 +3,7 @@
 Entrypoint: train_channel(settings, mission, channel) -> TrainingResult
 
 Follows the Explore → Plan → Execute discipline:
-- Reads windowed Parquet written by Phase 2 Spark pipeline.
+- Reads per-timestep series Parquet written by Phase 2 Spark pipeline (Plan 002.5).
 - Trains a TelemanomLSTM with early stopping on the val split.
 - Persists model weights, architecture config, and per-epoch loss log via model.io.
 
@@ -23,7 +23,7 @@ import torch.nn as nn
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.model.architecture import build_model
-from spacecraft_telemetry.model.dataset import load_windowed_parquet, make_dataloaders
+from spacecraft_telemetry.model.dataset import make_dataloaders
 from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import artifact_paths, save_model, save_norm_params, save_train_log
 
@@ -81,10 +81,7 @@ def train_channel(
         hidden_dim=cfg.hidden_dim,
     )
 
-    values, targets, _ = load_windowed_parquet(
-        settings.spark.processed_data_dir, mission, channel, "train"
-    )
-    train_loader, val_loader = make_dataloaders(values, targets, cfg)
+    train_loader, val_loader = make_dataloaders(settings, mission, channel)
 
     model = build_model(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
@@ -161,7 +158,7 @@ def train_channel(
         model.load_state_dict(best_state)
 
     paths = artifact_paths(settings, mission, channel)
-    save_model(model, paths, cfg, window_size=settings.spark.window_size)
+    save_model(model, paths, cfg, window_size=settings.model.window_size)
     save_norm_params(paths, settings.spark.processed_data_dir, mission, channel)
     save_train_log(
         paths,

@@ -9,11 +9,9 @@ Defining schemas here (rather than relying on inference) ensures:
 from __future__ import annotations
 
 from pyspark.sql.types import (
-    ArrayType,
     BooleanType,
     FloatType,
     IntegerType,
-    LongType,
     StringType,
     StructField,
     StructType,
@@ -90,20 +88,20 @@ def _build_feature_schema() -> StructType:
 FEATURE_SCHEMA = _build_feature_schema()
 
 # ---------------------------------------------------------------------------
-# Windowed LSTM input (written to data/processed/{mission}/train/ and test/)
+# Per-timestep series (written to data/processed/{mission}/train/ and test/)
 # ---------------------------------------------------------------------------
-# One row per sliding window. Consumed by PyTorch Dataset in Phase 4.
+# One row per telemetry timestep. Windows are constructed on-the-fly in the
+# PyTorch DataLoader (Phase 4+), so window_size is a DataLoader parameter,
+# not baked into the on-disk schema. This avoids the 250× storage inflation
+# of pre-materialized windows (see Plan 002.5).
 
-WINDOW_SCHEMA = StructType(
+SERIES_SCHEMA = StructType(
     [
-        StructField("window_id", LongType(), nullable=False),
-        StructField("channel_id", StringType(), nullable=False),
-        StructField("mission_id", StringType(), nullable=False),
-        StructField("segment_id", IntegerType(), nullable=False),
-        StructField("window_start_ts", TimestampType(), nullable=False),
-        StructField("window_end_ts", TimestampType(), nullable=False),
-        StructField("values", ArrayType(FloatType(), containsNull=False), nullable=False),
-        StructField("target", FloatType(), nullable=False),
-        StructField("is_anomaly", BooleanType(), nullable=False),
+        StructField("telemetry_timestamp", TimestampType(), nullable=False),
+        StructField("value_normalized",    FloatType(),     nullable=False),
+        StructField("channel_id",          StringType(),    nullable=False),
+        StructField("mission_id",          StringType(),    nullable=False),
+        StructField("segment_id",          IntegerType(),   nullable=False),
+        StructField("is_anomaly",          BooleanType(),   nullable=False),
     ]
 )

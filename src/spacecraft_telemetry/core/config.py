@@ -54,8 +54,6 @@ class SparkConfig(BaseModel):
     processed_data_dir: Path = Path("data/processed")
     driver_memory: str = "1536m"
     num_cores: int = 2
-    window_size: int = 250
-    prediction_horizon: int = 1
     train_fraction: float = 0.8
     normalization: Literal["z-score"] = "z-score"
     gap_multiplier: float = 3.0
@@ -68,7 +66,7 @@ class SparkConfig(BaseModel):
             raise ValueError(f"train_fraction must be in (0, 1), got {v}")
         return v
 
-    @field_validator("window_size", "num_cores", "prediction_horizon")
+    @field_validator("num_cores")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:
@@ -137,6 +135,8 @@ class ModelConfig(BaseModel):
     learning_rate: float = 1e-3
     batch_size: int = 64
     epochs: int = 35
+    window_size: int = 250
+    prediction_horizon: int = 1
     early_stopping_patience: int = 5
     val_fraction: float = 0.1
     seed: int = 42
@@ -153,7 +153,7 @@ class ModelConfig(BaseModel):
 
     @field_validator("hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
                      "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
-                     "inference_batch_size")
+                     "inference_batch_size", "window_size", "prediction_horizon")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:

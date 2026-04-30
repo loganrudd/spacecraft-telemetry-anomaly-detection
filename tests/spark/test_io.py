@@ -1,4 +1,4 @@
-"""Tests for spark.io — read_channel, read_labels, write_windows, write_features."""
+"""Tests for spark.io — read_channel, read_labels, write_series, write_features."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from spacecraft_telemetry.spark.io import (
     read_channel,
     read_labels,
     write_features,
-    write_windows,
+    write_series,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,35 +127,35 @@ class TestReadLabels:
 
 
 # ---------------------------------------------------------------------------
-# write_windows
+# write_series
 # ---------------------------------------------------------------------------
 
 
-class TestWriteWindows:
+class TestWriteSeries:
     def test_writes_parquet_files(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
-        out = tmp_path / "windows"
-        write_windows(sample_spark_df, out)
+        out = tmp_path / "series"
+        write_series(sample_spark_df, out)
         result = spark_session.read.parquet(str(out))
         assert result.count() == 100
 
     def test_partition_directories_created(self, sample_spark_df, tmp_path: Path) -> None:
-        out = tmp_path / "windows"
-        write_windows(sample_spark_df, out)
+        out = tmp_path / "series"
+        write_series(sample_spark_df, out)
         assert (out / "mission_id=ESA-Mission1").is_dir()
         assert (out / "mission_id=ESA-Mission1" / "channel_id=channel_1").is_dir()
 
     def test_overwrite_does_not_duplicate(
         self, spark_session, sample_spark_df, tmp_path: Path
     ) -> None:
-        out = tmp_path / "windows"
-        write_windows(sample_spark_df, out)
-        write_windows(sample_spark_df, out)  # second write overwrites, not appends
+        out = tmp_path / "series"
+        write_series(sample_spark_df, out)
+        write_series(sample_spark_df, out)  # second write overwrites, not appends
         result = spark_session.read.parquet(str(out))
         assert result.count() == 100
 
     def test_schema_roundtrip(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
-        out = tmp_path / "windows"
-        write_windows(sample_spark_df, out)
+        out = tmp_path / "series"
+        write_series(sample_spark_df, out)
         result = spark_session.read.parquet(str(out))
         # Partition columns (mission_id, channel_id) are recovered from path metadata
         assert "telemetry_timestamp" in result.columns

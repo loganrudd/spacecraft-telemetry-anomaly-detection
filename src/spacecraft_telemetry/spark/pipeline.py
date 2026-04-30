@@ -1,10 +1,11 @@
 """Spark preprocessing pipeline orchestration.
 
-Orchestrates: read → null-fill → gap-detect → normalize → branch:
+Orchestrates: read → null-fill → gap-detect → normalize → label_timesteps → branch:
   Features: add_rolling_features → write features/
-  Windows:  create_windows → temporal_split → label_join → exclude_anomalies → write train/ + test/
+  Series:   temporal_train_test_split → write_series train/ + test/
 
 Processes channels sequentially to respect the M1 RAM constraint (512 m driver).
+Windowing is deferred to the PyTorch DataLoader (Plan 002.5).
 """
 
 from __future__ import annotations
@@ -19,14 +20,12 @@ from pyspark.sql import functions as F
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, FeatureDefinition
-from spacecraft_telemetry.spark.io import read_channel, read_labels, write_features, write_windows
+from spacecraft_telemetry.spark.io import read_channel, read_labels, write_features, write_series
 from spacecraft_telemetry.spark.transforms import (
     add_rolling_features,
-    create_windows,
     detect_gaps,
-    exclude_anomalies_from_train,
     handle_nulls,
-    join_anomaly_labels,
+    label_timesteps,
     normalize,
     temporal_train_test_split,
 )
@@ -57,8 +56,8 @@ def run_preprocessing(
         mission: Mission name matching a subdirectory in the data dir (e.g. "ESA-Mission1").
 
     Returns:
-        Summary dict: {channels_processed, rows_in, windows_out, feature_rows_out,
-        train_windows, test_windows}.
+        Summary dict: {channels_processed, rows_in, feature_rows_out,
+        train_rows, test_rows}.
 
     Raises:
         FileNotFoundError: If no channel Parquet files are found in the channels directory.
@@ -75,8 +74,8 @@ def run_preprocessing(
         raise FileNotFoundError(f"No channel Parquet files found in {channel_dir}")
 
     # Read labels once — shared across all channels.
-    # join_anomaly_labels applies F.broadcast() so Spark ships the small labels
-    # table to each executor rather than shuffling the large windows DataFrame.
+    # label_timesteps applies F.broadcast() so Spark ships the small labels
+    # table to each executor rather than shuffling the large series DataFrame.
     labels_df = None
     if labels_path.exists():
         labels_df = read_labels(spark, labels_path)
@@ -103,10 +102,9 @@ def run_preprocessing(
             shutil.rmtree(out_dir)
 
     normalization_params: dict[str, dict[str, float]] = {}
-    windows_per_channel: dict[str, int] = {}
     total_rows_in = 0
-    total_train_windows = 0
-    total_test_windows = 0
+    total_train_rows = 0
+    total_test_rows = 0
 
     for channel_path in channel_paths:
         channel_id = channel_path.stem
@@ -124,66 +122,57 @@ def run_preprocessing(
         n_rows = normalized.count()
         total_rows_in += n_rows
 
-        # Features branch: rolling stats → write for Feast (Phase 3)
+        # Attach per-timestep anomaly flags before branching.
+        if labels_df is not None:
+            labeled = label_timesteps(normalized, labels_df)
+        else:
+            # No labels file: mark everything nominal so the schema stays consistent.
+            labeled = normalized.withColumn("is_anomaly", F.lit(False))
+
+        # Features branch: rolling stats → write for Feast (Phase 3).
+        # Uses normalized (without is_anomaly) to keep the feature schema clean.
         features_df = add_rolling_features(normalized, feature_defs=feature_defs)
         cols_to_write = [c for c in feature_output_cols if c in features_df.columns]
         write_features(features_df.select(*cols_to_write), features_out, mode="append")
 
-        # Windows branch: split first so no window straddles the train/test boundary.
-        train_norm, test_norm = temporal_train_test_split(
-            normalized, train_fraction=cfg.train_fraction
-        )
-        train_w = create_windows(
-            train_norm,
-            window_size=cfg.window_size,
-            prediction_horizon=cfg.prediction_horizon,
-        )
-        test_w = create_windows(
-            test_norm,
-            window_size=cfg.window_size,
-            prediction_horizon=cfg.prediction_horizon,
+        # Series branch: temporal split → write per-timestep rows.
+        # Anomaly exclusion is a DataLoader concern (skip_anomalous_windows flag),
+        # so the full labeled series (including anomalous rows) is written to train/.
+        series_cols = [
+            "telemetry_timestamp", "value_normalized",
+            "channel_id", "mission_id", "segment_id", "is_anomaly",
+        ]
+        train_series, test_series = temporal_train_test_split(
+            labeled.select(*series_cols), train_fraction=cfg.train_fraction
         )
 
-        if labels_df is not None:
-            train_w = join_anomaly_labels(train_w, labels_df)
-            test_w = join_anomaly_labels(test_w, labels_df)
-        else:
-            # No labels file: mark everything nominal so the schema stays consistent.
-            train_w = train_w.withColumn("is_anomaly", F.lit(False))
-            test_w = test_w.withColumn("is_anomaly", F.lit(False))
-
-        # Telemanom trains on nominal data only.
-        clean_train = exclude_anomalies_from_train(train_w)
-
-        # Count per channel to track data quality and filter normalization params.
-        train_count = clean_train.count()
-        test_count = test_w.count()
-        windows_per_channel[channel_id] = train_count + test_count
-        total_train_windows += train_count
-        total_test_windows += test_count
+        train_count = train_series.count()
+        test_count = test_series.count()
+        total_train_rows += train_count
+        total_test_rows += test_count
 
         if train_count == 0:
-            # Channel has no nominal training windows — no model will be trained.
+            # Channel produced no training rows — no model will be trained.
             # Omit from normalization_params so Phase 9 ignores this channel.
             log.warning(
-                "pipeline.channel.no_train_windows",
+                "pipeline.channel.no_train_rows",
                 channel_id=channel_id,
                 mission=mission,
-                test_windows=test_count,
+                test_rows=test_count,
             )
         else:
             normalization_params.update(params)
 
-        write_windows(clean_train, train_out, mode="append")
-        write_windows(test_w, test_out, mode="append")
+        write_series(train_series, train_out, mode="append")
+        write_series(test_series, test_out, mode="append")
 
         normalized.unpersist()
         log.info(
             "pipeline.channel.done",
             channel_id=channel_id,
             rows=n_rows,
-            train_windows=train_count,
-            test_windows=test_count,
+            train_rows=train_count,
+            test_rows=test_count,
         )
 
     # Persist normalization params — required at inference time (Phase 9) to apply
@@ -193,19 +182,12 @@ def run_preprocessing(
     params_path.parent.mkdir(parents=True, exist_ok=True)
     params_path.write_text(json.dumps(normalization_params, indent=2))
 
-    log.info(
-        "pipeline.windows_per_channel",
-        mission=mission,
-        windows_per_channel=windows_per_channel,
-    )
-
     summary: dict[str, int] = {
         "channels_processed": len(channel_paths),
         "rows_in": total_rows_in,
-        "windows_out": total_train_windows + total_test_windows,
         "feature_rows_out": total_rows_in,  # add_rolling_features preserves row count
-        "train_windows": total_train_windows,
-        "test_windows": total_test_windows,
+        "train_rows": total_train_rows,
+        "test_rows": total_test_rows,
     }
     log.info("pipeline.complete", mission=mission, **summary)
     return summary

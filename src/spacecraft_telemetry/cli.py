@@ -220,13 +220,6 @@ def spark() -> None:
     help="Ignored — reads from sample_data_dir (already sampled in ingest phase).",
 )
 @click.option(
-    "--window-size",
-    type=int,
-    default=None,
-    show_default=True,
-    help="LSTM sliding-window length (overrides config, default 250).",
-)
-@click.option(
     "--train-fraction",
     type=float,
     default=None,
@@ -238,22 +231,18 @@ def spark_preprocess(
     ctx: click.Context,
     mission: str,
     sample_fraction: float | None,
-    window_size: int | None,
     train_fraction: float | None,
 ) -> None:
     """Run the Spark preprocessing pipeline for one mission.
 
     Reads channel Parquet files from sample_data_dir/{mission}/channels/,
-    processes them (null-fill → gap-detect → normalize → features + windows),
+    processes them (null-fill → gap-detect → normalize → label → features + series),
     and writes partitioned Parquet to spark.processed_data_dir/{mission}/.
 
     Examples:
 
-        # Default settings (window_size=250, train_fraction=0.8)
+        # Default settings (train_fraction=0.8)
         spacecraft-telemetry spark preprocess --mission ESA-Mission1
-
-        # Quick dev run with smaller windows
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --window-size 50
     """
     from spacecraft_telemetry.spark.pipeline import run_preprocessing
     from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
@@ -263,8 +252,6 @@ def spark_preprocess(
 
     # Apply CLI overrides to SparkConfig.
     spark_overrides: dict[str, object] = {}
-    if window_size is not None:
-        spark_overrides["window_size"] = window_size
     if train_fraction is not None:
         spark_overrides["train_fraction"] = train_fraction
     if spark_overrides:
@@ -275,7 +262,6 @@ def spark_preprocess(
     log.info(
         "spark.preprocess.start",
         mission=mission,
-        window_size=settings.spark.window_size,
         train_fraction=settings.spark.train_fraction,
     )
 
@@ -289,9 +275,8 @@ def spark_preprocess(
     click.echo(f"Channels processed: {summary['channels_processed']}")
     click.echo(f"Rows in           : {summary['rows_in']:,}")
     click.echo(f"Feature rows out  : {summary['feature_rows_out']:,}")
-    click.echo(f"Train windows     : {summary['train_windows']:,}")
-    click.echo(f"Test windows      : {summary['test_windows']:,}")
-    click.echo(f"Total windows     : {summary['windows_out']:,}")
+    click.echo(f"Train rows        : {summary['train_rows']:,}")
+    click.echo(f"Test rows         : {summary['test_rows']:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +515,18 @@ def model() -> None:
     default=None,
     help="Override model.device from config.",
 )
+@click.option(
+    "--window-size",
+    type=int,
+    default=None,
+    help="Override model.window_size from config (LSTM sliding-window length).",
+)
+@click.option(
+    "--prediction-horizon",
+    type=int,
+    default=None,
+    help="Override model.prediction_horizon from config.",
+)
 @click.pass_context
 def model_train(
     ctx: click.Context,
@@ -538,11 +535,14 @@ def model_train(
     epochs: int | None,
     batch_size: int | None,
     device: str | None,
+    window_size: int | None,
+    prediction_horizon: int | None,
 ) -> None:
     """Train a TelemanomLSTM on a single telemetry channel.
 
-    Reads windowed Parquet from spark.processed_data_dir/{mission}/train/ and
-    writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
+    Reads per-timestep series Parquet from spark.processed_data_dir/{mission}/train/
+    and writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
+    Windows are constructed on-the-fly by the DataLoader (Plan 002.5).
 
     Examples:
 
@@ -563,6 +563,10 @@ def model_train(
         model_overrides["batch_size"] = batch_size
     if device is not None:
         model_overrides["device"] = device
+    if window_size is not None:
+        model_overrides["window_size"] = window_size
+    if prediction_horizon is not None:
+        model_overrides["prediction_horizon"] = prediction_horizon
     if model_overrides:
         settings = settings.model_copy(
             update={"model": settings.model.model_copy(update=model_overrides)}
