@@ -39,6 +39,24 @@ make test
 # Lint
 make lint
 
+# Remove build artifacts and Python caches (safe, instant)
+make clean
+
+# Remove Spark output (re-run spark-preprocess to rebuild)
+make clean-processed
+
+# Remove trained model artifacts (re-run model-train to rebuild)
+make clean-models
+
+# Wipe Feast local registry and online store (re-run feast-apply + feast-materialize)
+make clean-feast
+
+# Remove downloaded raw + sample data (re-run download-sample)
+make clean-data
+
+# Remove everything
+make clean-all
+
 # Download ESA Anomaly Dataset sample from Zenodo (~1% of one mission)
 # Requires internet access — downloads ~300MB, saves ~3MB Parquet sample
 make download-sample MISSION=ESA-Mission1
