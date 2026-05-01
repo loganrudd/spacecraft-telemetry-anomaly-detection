@@ -193,6 +193,36 @@ class ModelConfig(BaseModel):
         return v
 
 
+class RayConfig(BaseModel):
+    """Ray cluster and task resource configuration."""
+
+    num_cpus: int = 2                  # passed to ray.init() — constrains local parallelism
+    num_gpus_per_task: float = 0.0     # 0.0 = CPU-only; 0.25 on T4 packs 4 models per GPU
+    max_retries: int = 3               # @ray.remote max_retries for preemptible-VM resilience
+    address: str | None = None         # None = start local cluster; "auto" = attach to existing
+
+    @field_validator("num_cpus")
+    @classmethod
+    def positive_cpus(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"num_cpus must be >= 1, got {v}")
+        return v
+
+    @field_validator("num_gpus_per_task")
+    @classmethod
+    def non_negative_gpus(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"num_gpus_per_task must be >= 0, got {v}")
+        return v
+
+    @field_validator("max_retries")
+    @classmethod
+    def non_negative_retries(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"max_retries must be >= 0, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -231,6 +261,7 @@ class Settings(BaseSettings):
     spark: SparkConfig = SparkConfig()
     feast: FeastConfig = FeastConfig()
     model: ModelConfig = ModelConfig()
+    ray: RayConfig = RayConfig()
 
     @classmethod
     def settings_customise_sources(
