@@ -41,6 +41,7 @@ tracking = [
 ]
 gcp = [
     "google-cloud-storage>=2.10",
+    "gcsfs>=2024.2",
 ]
 dev = [
     "pytest>=8.0",
