@@ -60,7 +60,8 @@ def _read_bytes(path: Path | str) -> bytes:
 
         fs = gcsfs.GCSFileSystem()
         with fs.open(path_str, "rb") as f:
-            return f.read()  # type: ignore[return-value]
+            data: bytes = f.read()
+        return data
     return Path(path).read_bytes()
 
 
@@ -86,7 +87,7 @@ class ModelArtifactPaths:
 
 def artifact_paths(settings: Settings, mission: str, channel: str) -> ModelArtifactPaths:
     """Return the canonical artifact paths for a mission/channel pair."""
-    root = settings.model.artifacts_dir / mission / channel
+    root = Path(settings.model.artifacts_dir) / mission / channel
     return ModelArtifactPaths(
         root=root,
         model=root / "model.pt",

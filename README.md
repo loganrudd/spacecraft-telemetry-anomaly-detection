@@ -2,7 +2,7 @@
 
 End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detection using the [ESA Anomaly Dataset](https://zenodo.org/records/12528696).
 
-**Status: Phase 4 of 12 complete — Telemanom LSTM Model**
+**Status: Phase 5 of 12 complete — Ray Parallel Training**
 
 ## Tech Stack
 
@@ -30,7 +30,7 @@ End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detectio
 ## What Works Today
 
 ```bash
-# Install all dependencies (includes Feast)
+# Install all dependencies
 make setup
 
 # Run all tests (Spark tests need JDK 21 — skip gracefully if absent)
@@ -84,9 +84,27 @@ make spark-test
 # Train Telemanom LSTM on a single channel (requires spark-preprocess first)
 make model-evaluate MISSION=ESA-Mission1 CHANNEL=channel_1
 
-# Or call the model CLI directly
-uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
-uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
+# Train all preprocessed channels in parallel with Ray
+make ray-train-all MISSION=ESA-Mission1
+
+# Score all trained channels in parallel with Ray
+make ray-score-all MISSION=ESA-Mission1
+
+# Smoke test: train exactly 1 channel via Ray (fast sanity check)
+make ray-train-smoke MISSION=ESA-Mission1
+
+# Run Ray training unit tests (excludes slow integration tests)
+make ray-test
+
+# Ray three-step workflow (Phase 5 → Phase 6 → Phase 5b)
+# 1. Train all channels
+uv run spacecraft-telemetry ray train-all --mission ESA-Mission1
+# 2. (Phase 6) Run HPO → produces tuned_configs.json
+# 3. Score all channels, optionally applying HPO output
+uv run spacecraft-telemetry ray score-all --mission ESA-Mission1
+uv run spacecraft-telemetry ray score-all --mission ESA-Mission1 --tuned-configs tuned_configs.json
+
+# Or call other CLI commands directly
 uv run spacecraft-telemetry --help
 uv run spacecraft-telemetry download --mission ESA-Mission1 --sample
 uv run spacecraft-telemetry explore --mission ESA-Mission1
@@ -106,7 +124,7 @@ ESA Parquet (Zenodo/GCS)
   → PySpark preprocessing (Phase 2)    ← complete
   → Feast feature store (Phase 3)      ← complete
   → Telemanom LSTM training (Phase 4)  ← complete
-  → Ray parallel training (Phase 5)
+  → Ray parallel training (Phase 5)    ← complete
   → Ray Tune HPO (Phase 6)
   → MLflow tracking (Phase 7)
   → Evidently monitoring (Phase 8)
@@ -115,6 +133,38 @@ ESA Parquet (Zenodo/GCS)
   → GCP deployment (Phase 11)
   → Documentation + polish (Phase 12)
 
+```
+
+## Phase 5 Components
+
+| Module | Description |
+|--------|-------------|
+| `ray_training/tasks.py` | `make_train_task(num_gpus)` / `make_score_task(num_gpus)` — factory pattern wraps Phase 4 functions as `@ray.remote` tasks. GPU fraction set at call time (0.0 locally, 0.25 on cloud T4). Catches all exceptions; returns `status="error"` with traceback so partial failures don't abort the sweep. |
+| `ray_training/runner.py` | `discover_channels` scans Hive partition dirs for available channels. `train_all_channels` / `score_all_channels` fan out tasks via Ray Core; one `ray.put(settings)` per unique config variant. `score_all_channels` reads `channels.csv` to apply per-subsystem tuned configs from Phase 6. |
+
+### Ray Workflow
+
+```
+Phase 5a  →  ray train-all   fan out train_channel; write model.pt + errors.npy per channel
+Phase 6   →  Ray Tune HPO    one Tune experiment per subsystem; output: tuned_configs.json
+Phase 5b  →  ray score-all   fan out score_channel; optionally apply tuned_configs.json
+```
+
+### Ray CLI
+
+```bash
+# Train all channels in parallel (discovers channels automatically from processed data)
+make ray-train-all MISSION=ESA-Mission1
+
+# Score all trained channels (Hundman defaults)
+make ray-score-all MISSION=ESA-Mission1
+
+# Score with Phase 6 HPO output
+uv run spacecraft-telemetry ray score-all --mission ESA-Mission1 --tuned-configs tuned_configs.json
+
+# Limit to N channels for local testing
+uv run spacecraft-telemetry ray train-all --mission ESA-Mission1 --max-channels 4
+uv run spacecraft-telemetry ray train-all --mission ESA-Mission1 --channels channel_1,channel_2
 ```
 
 ## Phase 4 Components
@@ -242,7 +292,7 @@ For each channel, `make spark-preprocess` writes to `data/processed/{mission}/`:
 | 2 | PySpark preprocessing pipeline | ✅ Complete |
 | 3 | Feast feature store integration | ✅ Complete |
 | 4 | Telemanom model drop-in | ✅ Complete |
-| 5 | Ray parallel training | In progress |
+| 5 | Ray parallel training | ✅ Complete |
 | 6 | Ray Tune HPO | Planned |
 | 7 | MLflow integration | Planned |
 | 8 | Evidently monitoring | Planned |

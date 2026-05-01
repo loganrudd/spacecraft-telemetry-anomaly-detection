@@ -52,7 +52,7 @@ def _load_series_parquet(
             Parquet files.
     """
     partition_dir = (
-        processed_dir / mission / split
+        Path(processed_dir) / mission / split
         / f"mission_id={mission}" / f"channel_id={channel}"
     )
     if not partition_dir.exists():

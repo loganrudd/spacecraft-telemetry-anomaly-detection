@@ -8,8 +8,8 @@ data:
     - ESA-Mission1
     - ESA-Mission2
     - ESA-Mission3
-  sample_fraction: 1
-  sample_channels: 1 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
+  sample_fraction: .01
+  sample_channels: 5 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
   level: DEBUG
@@ -37,8 +37,8 @@ model:
   num_layers: 2
   dropout: 0.3
   learning_rate: 0.001
-  batch_size: 64
-  epochs: 35
+  batch_size: 256
+  epochs: 2
   window_size: 250
   prediction_horizon: 1
   early_stopping_patience: 5
@@ -50,3 +50,8 @@ model:
   threshold_window: 250
   threshold_z: 3.0
   threshold_min_anomaly_len: 3
+
+ray:
+  num_cpus: 8
+  num_gpus_per_task: 0.0
+  max_retries: 3
