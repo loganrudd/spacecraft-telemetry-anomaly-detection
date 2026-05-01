@@ -8,6 +8,7 @@ from spacecraft_telemetry.core.config import (
     DataConfig,
     FeastConfig,
     LoggingConfig,
+    ModelConfig,
     Settings,
     SparkConfig,
     load_settings,
@@ -29,7 +30,6 @@ logging:
   level: DEBUG
   format: console
 spark:
-  window_size: 250
   train_fraction: 0.8
 """
 
@@ -104,8 +104,7 @@ class TestLoggingConfig:
 class TestSparkConfig:
     def test_defaults(self) -> None:
         cfg = SparkConfig()
-        assert cfg.window_size == 250
-        assert cfg.prediction_horizon == 1
+        # window_size and prediction_horizon live on ModelConfig since Plan 002.5
         assert cfg.train_fraction == 0.8
         assert cfg.normalization == "z-score"
         assert cfg.gap_multiplier == 3.0
@@ -127,15 +126,16 @@ class TestSparkConfig:
 
     def test_invalid_normalization_raises(self) -> None:
         with pytest.raises(ValueError, match="normalization"):
-            SparkConfig(normalization="l2")
+            SparkConfig(normalization="l2")  # type: ignore[arg-type]
 
     def test_min_max_normalization_rejected(self) -> None:
         with pytest.raises((ValueError, Exception)):
             SparkConfig(normalization="min-max")  # type: ignore[arg-type]
 
     def test_window_size_zero_invalid(self) -> None:
+        # window_size moved to ModelConfig in Plan 002.5
         with pytest.raises(ValueError, match="must be >= 1"):
-            SparkConfig(window_size=0)
+            ModelConfig(window_size=0)
 
     def test_gap_multiplier_zero_invalid(self) -> None:
         with pytest.raises(ValueError, match="gap_multiplier"):
@@ -215,7 +215,8 @@ class TestLoadSettings:
 
     def test_spark_config_present_with_defaults(self) -> None:
         settings = Settings()
-        assert settings.spark.window_size == 250
+        # window_size moved to ModelConfig in Plan 002.5
+        assert settings.model.window_size == 250
         assert settings.spark.train_fraction == 0.8
         assert settings.spark.normalization == "z-score"
         assert settings.spark.feature_windows == [10, 50, 100]

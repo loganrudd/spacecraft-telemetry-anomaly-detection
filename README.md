@@ -57,8 +57,9 @@ make clean-data
 # Remove everything
 make clean-all
 
-# Download ESA Anomaly Dataset sample from Zenodo (~1% of one mission)
-# Requires internet access — downloads ~300MB, saves ~3MB Parquet sample
+# Download ESA Mission 1/2/3 Anomaly Dataset
+# ~4GB .zip file if not already downloaded, 
+# then samples the mission's data according to configs/
 make download-sample MISSION=ESA-Mission1
 
 # Explore the sample: schema, row counts, time range, anomaly label summary

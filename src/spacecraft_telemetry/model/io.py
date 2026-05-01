@@ -112,6 +112,7 @@ def save_model(
 
     config_bytes = json.dumps(
         {
+            "model_type": "telemanom",
             "hidden_dim": model_config.hidden_dim,
             "num_layers": model_config.num_layers,
             "dropout": model_config.dropout,
@@ -142,6 +143,14 @@ def load_model(
     from spacecraft_telemetry.model.architecture import build_model
 
     saved = json.loads(_read_bytes(paths.config).decode())
+    # model_type defaults to "telemanom" for artifacts saved before this field
+    # was introduced. Future model types (e.g. "dc_vae") will branch here.
+    model_type: str = saved.get("model_type", "telemanom")
+    if model_type != "telemanom":
+        raise ValueError(
+            f"Unsupported model_type {model_type!r} in {paths.config}. "
+            "Use the appropriate loader for this model type."
+        )
     model_config = ModelConfig(
         hidden_dim=saved["hidden_dim"],
         num_layers=saved["num_layers"],

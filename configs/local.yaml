@@ -8,8 +8,8 @@ data:
     - ESA-Mission1
     - ESA-Mission2
     - ESA-Mission3
-  sample_fraction: 0.01
-  sample_channels: 5
+  sample_fraction: 1
+  sample_channels: 1 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
   level: DEBUG
@@ -17,7 +17,7 @@ logging:
 
 spark:
   processed_data_dir: data/processed
-  driver_memory: "1536m"
+  driver_memory: "3072m"
   num_cores: 8
   train_fraction: 0.8
   normalization: z-score
@@ -37,8 +37,8 @@ model:
   num_layers: 2
   dropout: 0.3
   learning_rate: 0.001
-  batch_size: 512
-  epochs: 5
+  batch_size: 64
+  epochs: 35
   window_size: 250
   prediction_horizon: 1
   early_stopping_patience: 5

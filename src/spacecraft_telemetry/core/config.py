@@ -129,6 +129,10 @@ class FeastConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
+    # Identifies which model family this config applies to.
+    # Used by io.load_model() and MLflow experiment schema.
+    # Future values: "dc_vae"
+    scorer_type: Literal["telemanom"] = "telemanom"
     hidden_dim: int = 80
     num_layers: int = 2
     dropout: float = 0.3
