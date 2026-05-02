@@ -25,7 +25,12 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.model.architecture import build_model
 from spacecraft_telemetry.model.dataset import make_dataloaders
 from spacecraft_telemetry.model.device import resolve_device
-from spacecraft_telemetry.model.io import artifact_paths, save_model, save_norm_params, save_train_log
+from spacecraft_telemetry.model.io import (
+    artifact_paths,
+    save_model,
+    save_norm_params,
+    save_train_log,
+)
 
 log = get_logger(__name__)
 
@@ -164,7 +169,7 @@ def train_channel(
         paths,
         [
             {"epoch": i, "train_loss": tl, "val_loss": vl}
-            for i, (tl, vl) in enumerate(zip(train_losses, val_losses))
+            for i, (tl, vl) in enumerate(zip(train_losses, val_losses, strict=False))
         ],
     )
 

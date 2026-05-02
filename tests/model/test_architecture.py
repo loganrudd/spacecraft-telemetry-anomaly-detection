@@ -4,8 +4,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.core.config import ModelConfig
-from spacecraft_telemetry.model.architecture import TelemanomLSTM, build_model
+from spacecraft_telemetry.core.config import ModelConfig  # noqa: E402
+from spacecraft_telemetry.model.architecture import TelemanomLSTM, build_model  # noqa: E402
 
 
 @pytest.fixture

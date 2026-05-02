@@ -55,3 +55,9 @@ ray:
   num_cpus: 4
   num_gpus_per_task: 0.0
   max_retries: 3
+
+tune:
+  num_samples: 20
+  max_concurrent_trials: 2
+  parallel_subsystems: false
+  max_parallel_subsystems: 2

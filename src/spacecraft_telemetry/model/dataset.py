@@ -2,7 +2,7 @@
 
 Reads per-timestep series Parquet (written by the Spark preprocessing pipeline)
 via PyArrow — no Spark dependency at training time.  Constructs LSTM windows
-on-the-fly in the DataLoader, avoiding the 250× disk inflation of pre-materialized
+on-the-fly in the DataLoader, avoiding the 250x disk inflation of pre-materialized
 window arrays.
 
 Public API:
@@ -20,7 +20,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from torch.utils.data import DataLoader, Dataset as _TorchDataset
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset as _TorchDataset
 
 from spacecraft_telemetry.core.config import Settings
 
@@ -91,7 +92,7 @@ def _build_window_index(
     window_size: int,
     prediction_horizon: int,
     skip_anomalous_windows: bool,
-) -> "np.ndarray[Any, Any]":
+) -> np.ndarray[Any, Any]:
     """Return int32 array of valid window start indices.
 
     A start index ``s`` is valid iff:
@@ -141,7 +142,7 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
     """Index-based sliding-window Dataset over a per-timestep series.
 
     Stores the full values tensor once and slices windows lazily in
-    ``__getitem__``, so memory use is O(N) not O(N × W).
+    ``__getitem__``, so memory use is O(N) not O(N x W).
 
     Each item: (x, y) where:
         x: (W, 1) float32 tensor — window values, unsqueezed for LSTM input
@@ -165,7 +166,7 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
     def __len__(self) -> int:
         return len(self._starts)
 
-    def __getitem__(self, idx: int) -> "tuple[torch.Tensor, torch.Tensor]":
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         s = int(self._starts[idx])
         x = self._values[s : s + self._W].unsqueeze(-1)   # (W, 1)
         y = self._values[s + self._W + self._H - 1]       # scalar
@@ -176,7 +177,10 @@ def make_dataloaders(
     settings: Settings,
     mission: str,
     channel: str,
-) -> "tuple[DataLoader[tuple[torch.Tensor, torch.Tensor]], DataLoader[tuple[torch.Tensor, torch.Tensor]]]":
+) -> tuple[
+    DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    DataLoader[tuple[torch.Tensor, torch.Tensor]],
+]:
     """Build train/val DataLoaders from per-timestep series Parquet.
 
     Reads the train-split Parquet, builds a window index (skipping windows
@@ -241,7 +245,11 @@ def make_test_dataloader(
     settings: Settings,
     mission: str,
     channel: str,
-) -> "tuple[DataLoader[tuple[torch.Tensor, torch.Tensor]], np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]":
+) -> tuple[
+    DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    np.ndarray[Any, Any],
+    np.ndarray[Any, np.dtype[np.bool_]],
+]:
     """Build a DataLoader for the test split, with aligned per-window metadata.
 
     Unlike the train DataLoader, anomalous windows are **not** skipped —
@@ -288,3 +296,41 @@ def make_test_dataloader(
         pin_memory=_pin,
     )
     return loader, target_timestamps, window_is_anomaly
+
+
+def load_window_labels(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    """Return per-window anomaly labels for the test split without building a DataLoader.
+
+    Uses the same windowing logic as make_test_dataloader() but has no torch
+    dependency — suitable for import in numpy-only Ray Tune trial functions
+    (Phase 6).
+
+    Returns:
+        (M,) bool array — True iff any timestep in the window+horizon span
+        is anomalous (any() semantics; matches make_test_dataloader).
+
+    Args:
+        settings: Fully resolved Settings.
+        mission:  Mission name, e.g. ``"ESA-Mission1"``.
+        channel:  Channel ID, e.g. ``"channel_1"``.
+    """
+    cfg = settings.model
+    _, segment_ids, is_anomaly, _ = _load_series_parquet(
+        settings.spark.processed_data_dir, mission, channel, "test"
+    )
+    indices = _build_window_index(
+        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        skip_anomalous_windows=False,
+    )
+    span = cfg.window_size + cfg.prediction_horizon
+    cumsum = np.empty(len(is_anomaly) + 1, dtype=np.int64)
+    cumsum[0] = 0
+    np.cumsum(is_anomaly, out=cumsum[1:])
+    result: np.ndarray[Any, np.dtype[np.bool_]] = (
+        (cumsum[indices + span] - cumsum[indices]) > 0
+    )
+    return result

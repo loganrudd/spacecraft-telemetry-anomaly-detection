@@ -30,6 +30,7 @@ is None) use the unmodified base settings (Hundman defaults).
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -80,18 +81,53 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
     )
 
 
-def _load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, str]:
-    """Read channels.csv and return a mapping of channel_id -> subsystem name.
+def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, str]:
+    """Return a mapping of channel_id -> subsystem name.
 
-    Returns an empty dict if channels.csv is missing — callers fall back to
-    Hundman defaults gracefully.
+    Lookup order:
+    1) Processed metadata file:
+       {spark.processed_data_dir}/{mission}/metadata/channel_subsystems.json
+    2) Raw metadata CSV fallback:
+       {data.raw_data_dir}/{mission}/channels.csv
 
-    The CSV is expected at: {data.raw_data_dir}/{mission}/channels.csv
-    with columns: Channel, Subsystem, Physical Unit, Group, Target
+    The processed metadata path keeps training/scoring metadata colocated with
+    processed artifacts. CSV fallback is retained for backward compatibility.
     """
+    processed_map_path = (
+        Path(str(settings.spark.processed_data_dir))
+        / mission
+        / "metadata"
+        / "channel_subsystems.json"
+    )
+    if processed_map_path.exists():
+        try:
+            loaded = json.loads(processed_map_path.read_text())
+        except json.JSONDecodeError:
+            log.warning(
+                "processed subsystem map is invalid JSON; falling back to channels.csv",
+                path=str(processed_map_path),
+            )
+        else:
+            if isinstance(loaded, dict):
+                processed_mapping = {
+                    str(channel): str(subsystem)
+                    for channel, subsystem in loaded.items()
+                    if str(channel).strip() and str(subsystem).strip()
+                }
+                if processed_mapping:
+                    return processed_mapping
+                log.warning(
+                    "processed subsystem map is empty; falling back to channels.csv",
+                    path=str(processed_map_path),
+                )
+
+    # CSV fallback for compatibility with current preprocessing output.
     csv_path = Path(str(settings.data.raw_data_dir)) / mission / "channels.csv"
     if not csv_path.exists():
-        log.warning("channels.csv not found; tuned_configs will not be applied", path=str(csv_path))
+        log.warning(
+            "channels.csv not found; tuned_configs will not be applied",
+            path=str(csv_path),
+        )
         return {}
     mapping: dict[str, str] = {}
     with csv_path.open(newline="") as f:
@@ -114,7 +150,11 @@ def _with_abs_paths(settings: Settings) -> Settings:
     return settings.model_copy(
         update={
             "spark": settings.spark.model_copy(
-                update={"processed_data_dir": Path(str(settings.spark.processed_data_dir)).resolve()}
+                update={
+                    "processed_data_dir": Path(
+                        str(settings.spark.processed_data_dir)
+                    ).resolve()
+                }
             ),
             "model": settings.model.model_copy(
                 update={"artifacts_dir": Path(str(settings.model.artifacts_dir)).resolve()}
@@ -226,7 +266,22 @@ def score_all_channels(
     # Build channel → subsystem map once (reads channels.csv).
     ch_to_sub: dict[str, str] = {}
     if tuned_configs:
-        ch_to_sub = _load_channel_subsystem_map(abs_settings, mission)
+        ch_to_sub = load_channel_subsystem_map(abs_settings, mission)
+        if not ch_to_sub:
+            processed_map_path = (
+                Path(str(abs_settings.spark.processed_data_dir))
+                / mission
+                / "metadata"
+                / "channel_subsystems.json"
+            )
+            raw_map_path = Path(str(abs_settings.data.raw_data_dir)) / mission / "channels.csv"
+            raise ValueError(
+                "tuned_configs were provided, but no channel->subsystem map was found. "
+                "Expected either processed metadata at "
+                f"{processed_map_path} "
+                "or raw metadata at "
+                f"{raw_map_path}."
+            )
 
     # Build one settings variant per unique subsystem tuned config.
     # Cache as ray object refs to avoid re-putting identical objects.

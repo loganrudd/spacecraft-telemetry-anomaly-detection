@@ -10,7 +10,7 @@ from typing import Literal
 
 def resolve_device(
     setting: Literal["auto", "cpu", "mps", "cuda"] | str,
-) -> "torch.device":  # type: ignore[name-defined]  # noqa: F821
+) -> torch.device:  # type: ignore[name-defined]  # noqa: F821
     """Resolve a device setting string to a torch.device.
 
     Args:

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # discover_channels
 # ---------------------------------------------------------------------------
@@ -27,7 +26,11 @@ def test_discover_channels_finds_channel(tmp_path) -> None:
         part.mkdir(parents=True)
 
     settings = settings.model_copy(
-        update={"spark": settings.spark.model_copy(update={"processed_data_dir": str(processed_dir)})}
+        update={
+            "spark": settings.spark.model_copy(
+                update={"processed_data_dir": str(processed_dir)}
+            )
+        }
     )
     channels = discover_channels(settings, mission)
     assert channels == ["channel_1", "channel_3"]
@@ -57,7 +60,11 @@ def test_discover_channels_ignores_non_channel_dirs(tmp_path) -> None:
     (base / "some_other_dir").mkdir(parents=True)     # should be ignored
 
     settings = settings.model_copy(
-        update={"spark": settings.spark.model_copy(update={"processed_data_dir": str(processed_dir)})}
+        update={
+            "spark": settings.spark.model_copy(
+                update={"processed_data_dir": str(processed_dir)}
+            )
+        }
     )
     channels = discover_channels(settings, mission)
     assert channels == ["channel_1"]
@@ -162,7 +169,9 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     )
     with threshold_cfg_path.open() as f:
         saved = json.load(f)
-    assert saved["z"] == pytest.approx(2.5), f"Expected z=2.5 in threshold_config.json, got: {saved}"
+    assert saved["z"] == pytest.approx(2.5), (
+        f"Expected z=2.5 in threshold_config.json, got: {saved}"
+    )
 
 
 @pytest.mark.slow
@@ -180,6 +189,27 @@ def test_score_all_channels_ignores_unknown_tuned_keys(ray_local, pretrained_cha
     )
     assert len(results) == 1
     assert results[0]["status"] == "ok"
+
+
+@pytest.mark.slow
+def test_score_all_channels_tuned_configs_requires_subsystem_map(
+    ray_local, pretrained_channel, tmp_path
+) -> None:
+    """Passing tuned_configs without a subsystem map should fail fast."""
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_training import score_all_channels
+
+    settings = pretrained_channel.model_copy(
+        update={
+            "data": pretrained_channel.data.model_copy(
+                update={"raw_data_dir": tmp_path / "raw"}
+            )
+        }
+    )
+    tuned = {"subsystem_1": {"threshold_z": 2.5}}
+
+    with pytest.raises(ValueError, match="no channel->subsystem map"):
+        score_all_channels(settings, "ESA-Mission1", ["channel_1"], tuned_configs=tuned)
 
 
 # ---------------------------------------------------------------------------

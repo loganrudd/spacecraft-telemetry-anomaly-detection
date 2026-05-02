@@ -9,9 +9,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.core.config import ModelConfig, Settings
-from spacecraft_telemetry.model.architecture import TelemanomLSTM, build_model
-from spacecraft_telemetry.model.io import (
+from spacecraft_telemetry.core.config import ModelConfig, Settings  # noqa: E402
+from spacecraft_telemetry.model.architecture import build_model  # noqa: E402
+from spacecraft_telemetry.model.io import (  # noqa: E402
     ModelArtifactPaths,
     _read_bytes,
     _write_bytes,
@@ -20,7 +20,6 @@ from spacecraft_telemetry.model.io import (
     save_model,
     save_train_log,
 )
-
 
 # ---------------------------------------------------------------------------
 # _write_bytes / _read_bytes
@@ -179,11 +178,14 @@ def _check_no_raw_io(source_path: Path) -> list[str]:
     except SyntaxError:
         return []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, str):
-                end: int = getattr(node.value, "end_lineno", None) or node.lineno
-                for lineno in range(node.lineno, end + 1):
-                    docstring_lines.add(lineno)
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            end: int = getattr(node.value, "end_lineno", None) or node.lineno
+            for lineno in range(node.lineno, end + 1):
+                docstring_lines.add(lineno)
 
     hits = []
     for lineno, line in enumerate(text.splitlines(), start=1):

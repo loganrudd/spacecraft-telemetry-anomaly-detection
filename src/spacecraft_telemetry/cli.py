@@ -8,6 +8,7 @@ Each subcommand follows the same pattern:
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -623,11 +624,8 @@ def model_score(
 # ---------------------------------------------------------------------------
 
 
-import contextlib as _contextlib
-
-
 @_contextlib.contextmanager
-def _ray_session(settings: "Settings") -> "Any":
+def _ray_session(settings: Settings) -> Any:
     """Context manager that initialises a Ray cluster and shuts it down on exit.
 
     Propagates the current virtualenv's sys.path to Ray worker processes so
@@ -660,7 +658,7 @@ def _ray_session(settings: "Settings") -> "Any":
 
 @click.group()
 def ray_group() -> None:
-    """Ray Core parallel training and scoring commands."""
+    """Ray Core parallel training, scoring, and tuning commands."""
 
 
 @ray_group.command("train")
@@ -734,7 +732,8 @@ def ray_train(
     for r in results:
         if r["status"] == "ok":
             click.echo(
-                f"  {r['channel']:20s}  epoch={r['best_epoch']:3d}  val_loss={r['best_val_loss']:.6f}"
+                f"  {r['channel']:20s}  epoch={r['best_epoch']:3d}"
+                f"  val_loss={r['best_val_loss']:.6f}"
             )
         else:
             click.echo(f"  {r['channel']:20s}  ERROR — see logs")
@@ -838,6 +837,152 @@ def ray_score(
 
     if n_err:
         raise SystemExit(1)
+
+
+@ray_group.command("tune")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to tune. Defaults to all discovered channels.",
+)
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to tune a single group (e.g. subsystem_1).",
+)
+@click.option(
+    "--num-samples",
+    type=click.IntRange(1),
+    default=None,
+    help="Override settings.tune.num_samples for this run.",
+)
+@click.option(
+    "--overwrite-existing",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing tuned_configs.json when it contains invalid JSON.",
+)
+@click.pass_context
+def ray_tune(
+    ctx: click.Context,
+    mission: str,
+    channels: str | None,
+    subsystem: str | None,
+    num_samples: int | None,
+    overwrite_existing: bool,
+) -> None:
+    """Run Ray Tune HPO for scoring parameters (Phase 6).
+
+    Runs one Tune sweep per subsystem by default, or a single named subsystem
+    when --subsystem is provided. Uses channel discovery unless --channels is
+    passed explicitly.
+
+    Examples:
+
+        # Tune all discovered subsystems
+        spacecraft-telemetry ray tune --mission ESA-Mission1
+
+        # Tune one subsystem only
+        spacecraft-telemetry ray tune --mission ESA-Mission1 --subsystem subsystem_1
+
+        # Override sample count for a quick local check
+        spacecraft-telemetry ray tune --mission ESA-Mission1 --num-samples 5
+    """
+    import json
+
+    from spacecraft_telemetry.ray_training import (
+        discover_channels,
+        load_channel_subsystem_map,
+        run_all_sweeps,
+        run_hpo_sweep,
+        write_tuned_configs,
+    )
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    tune_settings = settings
+    if num_samples is not None:
+        tune_settings = settings.model_copy(
+            update={
+                "tune": settings.tune.model_copy(update={"num_samples": num_samples}),
+            }
+        )
+
+    with _ray_session(tune_settings):
+        channel_list: list[str]
+        if channels is not None:
+            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+        else:
+            channel_list = discover_channels(tune_settings, mission)
+            if not channel_list:
+                raise click.ClickException(
+                    f"No preprocessed channels found for {mission}. "
+                    "Run `spacecraft-telemetry spark preprocess` first, "
+                    "or pass --channels explicitly."
+                )
+
+        log.info(
+            "ray.tune.start",
+            mission=mission,
+            n_channels=len(channel_list),
+            subsystem=subsystem,
+            num_samples=tune_settings.tune.num_samples,
+        )
+
+        if subsystem is None:
+            output_path = run_all_sweeps(tune_settings, mission, channel_list)
+            click.echo(f"Mission       : {mission}")
+            click.echo(f"Channels      : {len(channel_list)}")
+            click.echo("Subsystems    : all")
+            click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
+            click.echo(f"Output        : {output_path}")
+            return
+
+        subsystem_map = load_channel_subsystem_map(tune_settings, mission)
+        if not subsystem_map:
+            raise click.ClickException(
+                "channels.csv not found or empty; cannot resolve --subsystem. "
+                "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
+            )
+
+        subsystem_channels = [
+            ch for ch in channel_list if subsystem_map.get(ch) == subsystem
+        ]
+        if not subsystem_channels:
+            raise click.ClickException(
+                f"No channels found for subsystem {subsystem!r} in mission {mission}."
+            )
+
+        best = run_hpo_sweep(subsystem, subsystem_channels, tune_settings, mission)
+        output_path = Path(tune_settings.model.artifacts_dir) / mission / "tuned_configs.json"
+
+        existing: dict[str, dict[str, Any]] = {}
+        if output_path.exists():
+            try:
+                loaded = json.loads(output_path.read_text())
+                if isinstance(loaded, dict):
+                    existing = {
+                        str(k): v for k, v in loaded.items() if isinstance(v, dict)
+                    }
+            except json.JSONDecodeError as err:
+                if not overwrite_existing:
+                    raise click.ClickException(
+                        "Existing tuned config file contains invalid JSON. "
+                        "Fix/remove the file, or re-run with --overwrite-existing."
+                    ) from err
+                log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
+
+        existing[subsystem] = best
+        write_tuned_configs(existing, output_path)
+
+    click.echo(f"Mission       : {mission}")
+    click.echo(f"Channels      : {len(subsystem_channels)}")
+    click.echo(f"Subsystem     : {subsystem}")
+    click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
+    click.echo(f"Best config   : {best}")
+    click.echo(f"Output        : {output_path}")
 
 
 main.add_command(ray_group, name="ray")

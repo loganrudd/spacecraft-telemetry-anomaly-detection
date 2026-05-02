@@ -186,13 +186,13 @@ def test_evaluate_no_actual_positives() -> None:
 
 
 def test_dynamic_threshold_detects_injected_spike() -> None:
-    """A 3-point spike of 20× background std must be flagged after warm-up."""
+    """A 3-point spike of 20x background std must be flagged after warm-up."""
     rng = np.random.default_rng(42)
     n = 200
     background_std = 0.1
     errors = rng.normal(0, background_std, n)
 
-    # Inject spike at indices 100–102 (well past warm-up window of 30).
+    # Inject spike at indices 100-102 (well past warm-up window of 30).
     errors[100:103] = 20 * background_std
 
     smoothed = smooth_errors(errors, span=10)
@@ -200,7 +200,7 @@ def test_dynamic_threshold_detects_injected_spike() -> None:
     flags = flag_anomalies(smoothed, threshold, min_run_length=1)
 
     assert np.any(flags[99:104]), (
-        "Injected spike at indices 100–102 was not detected by flag_anomalies"
+        "Injected spike at indices 100-102 was not detected by flag_anomalies"
     )
 
 
@@ -216,7 +216,7 @@ def _make_predict_loader(
     window_size: int,
     batch_size: int = 8,
     seed: int = 0,
-) -> "torch.utils.data.DataLoader[tuple[torch.Tensor, torch.Tensor]]":
+) -> torch.utils.data.DataLoader[tuple[torch.Tensor, torch.Tensor]]:
     """Build a synthetic DataLoader of (x, y) pairs for predict() tests."""
     rng = np.random.default_rng(seed)
     x_np = rng.standard_normal((n, window_size)).astype(np.float32)
@@ -230,9 +230,9 @@ def _make_predict_loader(
 
 def test_predict_output_shape() -> None:
     """predict() must return two 1-D arrays (preds, targets) each of length N."""
+    from spacecraft_telemetry.core.config import ModelConfig
     from spacecraft_telemetry.model.architecture import build_model
     from spacecraft_telemetry.model.scoring import predict
-    from spacecraft_telemetry.core.config import ModelConfig
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
@@ -249,9 +249,9 @@ def test_predict_output_shape() -> None:
 
 def test_predict_dtype_is_float32() -> None:
     """Output dtype must be float32 regardless of batch size."""
+    from spacecraft_telemetry.core.config import ModelConfig
     from spacecraft_telemetry.model.architecture import build_model
     from spacecraft_telemetry.model.scoring import predict
-    from spacecraft_telemetry.core.config import ModelConfig
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
@@ -264,9 +264,9 @@ def test_predict_dtype_is_float32() -> None:
 
 def test_predict_batched_matches_single_pass() -> None:
     """Batched predict must produce the same values as a single forward pass."""
+    from spacecraft_telemetry.core.config import ModelConfig
     from spacecraft_telemetry.model.architecture import build_model
     from spacecraft_telemetry.model.scoring import predict
-    from spacecraft_telemetry.core.config import ModelConfig
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
@@ -295,9 +295,9 @@ def test_predict_batched_matches_single_pass() -> None:
 
 def test_predict_sets_eval_mode() -> None:
     """predict() must call model.eval() — verified by checking training=False."""
+    from spacecraft_telemetry.core.config import ModelConfig
     from spacecraft_telemetry.model.architecture import build_model
     from spacecraft_telemetry.model.scoring import predict
-    from spacecraft_telemetry.core.config import ModelConfig
 
     cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0)
     model = build_model(cfg)
@@ -315,10 +315,10 @@ def test_predict_sets_eval_mode() -> None:
 
 
 def _override_settings_for_scoring(
-    base: "object",
+    base: object,
     processed_dir: Path,
     artifacts_dir: Path,
-) -> "object":
+) -> object:
     """Return a Settings copy pointing at tmp_path directories."""
     return base.model_copy(  # type: ignore[attr-defined]
         update={
@@ -334,7 +334,7 @@ def _override_settings_for_scoring(
 
 @pytest.mark.slow
 def test_score_channel_artifacts_and_metrics(
-    tiny_series_parquet: "object",
+    tiny_series_parquet: object,
     tmp_path: Path,
 ) -> None:
     """score_channel must write artifacts and return a well-formed metrics dict.

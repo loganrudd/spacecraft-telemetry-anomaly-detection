@@ -11,15 +11,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.model.dataset import (
+from spacecraft_telemetry.model.dataset import (  # noqa: E402
     WindowedSequenceDataset,
     _build_window_index,
     _load_series_parquet,
     make_dataloaders,
     make_test_dataloader,
 )
-from tests.model.conftest import SeriesParquetFixture, _SERIES_FILE_SCHEMA
-
+from tests.model.conftest import SeriesParquetFixture  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # _load_series_parquet
@@ -76,7 +75,7 @@ def test_load_series_empty_dir_raises(tmp_path: Path) -> None:
         / "mission_id=ESA-Mission1" / "channel_id=channel_1"
     )
     empty_dir.mkdir(parents=True)
-    with pytest.raises(FileNotFoundError, match="no .parquet files"):
+    with pytest.raises(FileNotFoundError, match=r"no \.parquet files"):
         _load_series_parquet(
             tmp_path / "processed", "ESA-Mission1", "channel_1", "train"
         )
@@ -213,7 +212,11 @@ def test_dataloader_yields_correct_batch_shape(
 
     fx = tiny_series_parquet
     settings = Settings(
-        model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon, "batch_size": 8},
+        model={
+            "window_size": fx.window_size,
+            "prediction_horizon": fx.prediction_horizon,
+            "batch_size": 8,
+        },
         spark={"processed_data_dir": str(fx.processed_dir)},
     )
     train_loader, _ = make_dataloaders(settings, fx.mission, fx.channel)
@@ -249,7 +252,11 @@ def test_val_loader_is_deterministic(
 
     fx = tiny_series_parquet
     settings = Settings(
-        model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon, "batch_size": 4},
+        model={
+            "window_size": fx.window_size,
+            "prediction_horizon": fx.prediction_horizon,
+            "batch_size": 4,
+        },
         spark={"processed_data_dir": str(fx.processed_dir)},
     )
     _, val_loader = make_dataloaders(settings, fx.mission, fx.channel)
@@ -319,7 +326,6 @@ def test_make_test_dataloader_anomaly_flags_match_tail(
 ) -> None:
     """Windows overlapping the last 5 anomalous rows must be flagged."""
     from spacecraft_telemetry.core.config import Settings
-    from tests.model.conftest import _ANOMALY_ROWS
 
     fx = tiny_series_parquet
     settings = Settings(
@@ -331,8 +337,6 @@ def test_make_test_dataloader_anomaly_flags_match_tail(
     # At least some windows must be flagged (those whose span touches the anomalous tail).
     assert window_is_anomaly.any(), "Expected some anomalous windows in test split"
     # Nominal windows at the start must NOT be flagged.
-    W, H = fx.window_size, fx.prediction_horizon
-    span = W + H
     # First window (start=0) covers rows 0..span-1 — all nominal since anomaly
     # starts at row (N_TEST_ROWS - ANOMALY_ROWS) = 25, and span=11.
     assert not window_is_anomaly[0], "First window should not be anomalous"

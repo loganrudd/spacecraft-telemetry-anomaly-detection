@@ -155,9 +155,11 @@ class ModelConfig(BaseModel):
     threshold_z: float = 3.0
     threshold_min_anomaly_len: int = 3
 
-    @field_validator("hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
-                     "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
-                     "inference_batch_size", "window_size", "prediction_horizon")
+    @field_validator(
+        "hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
+        "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
+        "inference_batch_size", "window_size", "prediction_horizon",
+    )
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:
@@ -223,6 +225,24 @@ class RayConfig(BaseModel):
         return v
 
 
+class TuneConfig(BaseModel):
+    """Ray Tune HPO configuration (Phase 6)."""
+
+    num_samples: int = 50               # trials per subsystem sweep
+    max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
+    parallel_subsystems: bool = False   # run subsystem sweeps concurrently (cloud default)
+    max_parallel_subsystems: int = 2    # cap concurrent subsystem sweeps when enabled
+    mlflow_experiment_prefix: str = "hpo"   # experiments named hpo-{subsystem}
+    mlflow_tracking_uri: str = "mlruns"     # file-based local default
+
+    @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -262,6 +282,7 @@ class Settings(BaseSettings):
     feast: FeastConfig = FeastConfig()
     model: ModelConfig = ModelConfig()
     ray: RayConfig = RayConfig()
+    tune: TuneConfig = TuneConfig()
 
     @classmethod
     def settings_customise_sources(

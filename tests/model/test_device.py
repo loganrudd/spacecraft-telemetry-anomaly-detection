@@ -4,7 +4,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.model.device import resolve_device
+from spacecraft_telemetry.model.device import resolve_device  # noqa: E402
 
 
 def test_cpu_returns_cpu_device() -> None:

@@ -11,7 +11,6 @@ from typing import Any, cast
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Factory smoke tests (no Ray init required)
 # ---------------------------------------------------------------------------
@@ -85,7 +84,10 @@ def test_train_task_error_on_missing_data(ray_local) -> None:
     settings = load_settings("test")
     task = make_train_task(num_gpus=0.0)
     settings_ref = ray.put(settings)
-    result = cast(dict[str, Any], ray.get(task.remote(settings_ref, "ESA-Mission1", "nonexistent_channel")))
+    result = cast(
+        dict[str, Any],
+        ray.get(task.remote(settings_ref, "ESA-Mission1", "nonexistent_channel")),
+    )
 
     assert result["status"] == "error"
     assert result["error_msg"] is not None
