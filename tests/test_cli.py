@@ -541,7 +541,7 @@ class TestRayTuneCommand:
                 return_value=["channel_1", "channel_2"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.runner._load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
                 return_value={"channel_1": "subsystem_1", "channel_2": "subsystem_6"},
             ),
             patch(
@@ -572,3 +572,191 @@ class TestRayTuneCommand:
         assert called_channels == ["channel_1"]
         mock_write.assert_called_once()
         assert "Subsystem" in result.output
+
+    def test_tune_errors_when_no_channels_discovered(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch("spacecraft_telemetry.ray_training.discover_channels", return_value=[]),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "tune", "--mission=ESA-Mission1"],
+            )
+
+        assert result.exit_code != 0
+        assert "No preprocessed channels found" in result.output
+
+    def test_tune_errors_when_subsystem_map_missing(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1", "channel_2"],
+            ),
+            patch("spacecraft_telemetry.ray_training.load_channel_subsystem_map", return_value={}),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "tune",
+                    "--mission=ESA-Mission1",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "cannot resolve --subsystem" in result.output
+
+    def test_tune_errors_when_subsystem_has_no_channels(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1", "channel_2"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"channel_1": "subsystem_6", "channel_2": "subsystem_6"},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "tune",
+                    "--mission=ESA-Mission1",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "No channels found for subsystem" in result.output
+
+    def test_tune_single_subsystem_invalid_existing_json_requires_overwrite(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        base = load_settings("test")
+        settings = load_settings("test").model_copy(
+            update={
+                "model": base.model.model_copy(
+                    update={"artifacts_dir": tmp_path / "models"}
+                )
+            }
+        )
+        output = Path(settings.model.artifacts_dir) / "ESA-Mission1" / "tuned_configs.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{not-json")
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"channel_1": "subsystem_1"},
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                return_value={
+                    "error_smoothing_window": 10,
+                    "threshold_window": 100,
+                    "threshold_z": 2.5,
+                    "threshold_min_anomaly_len": 2,
+                },
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "tune",
+                    "--mission=ESA-Mission1",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "invalid JSON" in result.output
+
+    def test_tune_single_subsystem_invalid_existing_json_overwrite(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        base = load_settings("test")
+        settings = load_settings("test").model_copy(
+            update={
+                "model": base.model.model_copy(
+                    update={"artifacts_dir": tmp_path / "models"}
+                )
+            }
+        )
+        output = Path(settings.model.artifacts_dir) / "ESA-Mission1" / "tuned_configs.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("{not-json")
+
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"channel_1": "subsystem_1"},
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                return_value={
+                    "error_smoothing_window": 10,
+                    "threshold_window": 100,
+                    "threshold_z": 2.5,
+                    "threshold_min_anomaly_len": 2,
+                },
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "tune",
+                    "--mission=ESA-Mission1",
+                    "--subsystem=subsystem_1",
+                    "--overwrite-existing",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output

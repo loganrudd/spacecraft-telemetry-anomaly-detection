@@ -32,9 +32,9 @@ def test_write_tuned_configs_writes_json(tmp_path: Path) -> None:
     assert json.loads(out.read_text()) == payload
 
 
-def test_validate_trial_inputs_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preflight validation should fail fast on labels/errors shape mismatch."""
-    from spacecraft_telemetry.ray_training.tune import _validate_trial_inputs
+def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preparation should fail fast on labels/errors shape mismatch."""
+    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
 
     settings = load_settings("test")
 
@@ -58,33 +58,21 @@ def test_validate_trial_inputs_shape_mismatch_raises(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
 
     with pytest.raises(ValueError, match="input mismatch"):
-        _validate_trial_inputs(settings, "ESA-Mission1", ["channel_1"])
+        _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
 
 
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     """_scoring_trial returns a final metrics dict containing f0_5."""
     from spacecraft_telemetry.ray_training.tune import _scoring_trial
 
-    settings = load_settings("test")
+    _ = monkeypatch
 
-    class _Paths:
-        errors = "fake-errors.npy"
-
-    def _fake_artifact_paths(*_args, **_kwargs):
-        return _Paths()
-
-    def _fake_read_bytes(*_args, **_kwargs):
-        arr = np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64)
-        buf = io.BytesIO()
-        np.save(buf, arr)
-        return buf.getvalue()
-
-    def _fake_labels(*_args, **_kwargs):
-        return np.array([False, False, True, True], dtype=np.bool_)
-
-    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
-    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
-    monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
+    channel_data = {
+        "channel_1": (
+            np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64),
+            np.array([False, False, True, True], dtype=np.bool_),
+        )
+    }
 
     result = _scoring_trial(
         {
@@ -93,13 +81,106 @@ def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
             "threshold_z": 2.0,
             "threshold_min_anomaly_len": 1,
         },
-        settings=settings,
-        mission="ESA-Mission1",
-        channels=["channel_1"],
+        channel_data=channel_data,
     )
 
     assert "f0_5" in result
     assert isinstance(result["f0_5"], float)
+
+
+def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_hpo_sweep should fail fast if caller does not own Ray session."""
+    import ray
+
+    from spacecraft_telemetry.ray_training.tune import run_hpo_sweep
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    settings = load_settings("test")
+
+    with pytest.raises(RuntimeError, match="Ray is not initialized"):
+        run_hpo_sweep("subsystem_1", ["channel_1"], settings, "ESA-Mission1")
+
+
+def test_run_all_sweeps_no_eligible_writes_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """run_all_sweeps should write empty JSON when no scored channels are eligible."""
+    import ray
+
+    from spacecraft_telemetry.ray_training.tune import run_all_sweeps
+
+    settings = load_settings("test").model_copy(
+        update={
+            "model": load_settings("test").model.model_copy(
+                update={"artifacts_dir": tmp_path / "models"}
+            )
+        }
+    )
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
+    assert out.exists()
+    assert json.loads(out.read_text()) == {}
+
+
+def test_run_all_sweeps_filters_and_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """run_all_sweeps should run only eligible scored channels per subsystem."""
+    import ray
+
+    from spacecraft_telemetry.model.io import artifact_paths
+    from spacecraft_telemetry.ray_training.tune import run_all_sweeps
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+        }
+    )
+
+    # Only channel_1 is scored.
+    ch1 = artifact_paths(settings, "ESA-Mission1", "channel_1").errors
+    Path(str(ch1)).parent.mkdir(parents=True, exist_ok=True)
+    Path(str(ch1)).write_bytes(b"not_used_by_this_test")
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {
+            "channel_1": "subsystem_1",
+            "channel_2": "subsystem_1",
+            "channel_3": "subsystem_6",
+        },
+    )
+
+    calls: list[tuple[str, list[str]]] = []
+
+    def _fake_run_hpo_sweep(subsystem: str, channels: list[str], *_args, **_kwargs):
+        calls.append((subsystem, channels))
+        return {
+            "error_smoothing_window": 10,
+            "threshold_window": 100,
+            "threshold_z": 2.5,
+            "threshold_min_anomaly_len": 2,
+        }
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.run_hpo_sweep",
+        _fake_run_hpo_sweep,
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1", "channel_2", "channel_3"])
+    assert out.exists()
+    loaded = json.loads(out.read_text())
+    assert list(loaded) == ["subsystem_1"]
+    assert calls == [("subsystem_1", ["channel_1"])]
 
 
 @pytest.mark.slow
@@ -137,3 +218,11 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
         "threshold_z",
         "threshold_min_anomaly_len",
     }
+    assert isinstance(best["error_smoothing_window"], int)
+    assert isinstance(best["threshold_window"], int)
+    assert isinstance(best["threshold_min_anomaly_len"], int)
+    assert isinstance(best["threshold_z"], float)
+    assert 5 <= best["error_smoothing_window"] <= 100
+    assert 50 <= best["threshold_window"] <= 500
+    assert 1 <= best["threshold_min_anomaly_len"] <= 10
+    assert 1.5 <= best["threshold_z"] <= 5.0

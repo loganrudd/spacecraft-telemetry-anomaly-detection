@@ -857,6 +857,12 @@ def ray_score(
     default=None,
     help="Override settings.tune.num_samples for this run.",
 )
+@click.option(
+    "--overwrite-existing",
+    is_flag=True,
+    default=False,
+    help="Overwrite existing tuned_configs.json when it contains invalid JSON.",
+)
 @click.pass_context
 def ray_tune(
     ctx: click.Context,
@@ -864,6 +870,7 @@ def ray_tune(
     channels: str | None,
     subsystem: str | None,
     num_samples: int | None,
+    overwrite_existing: bool,
 ) -> None:
     """Run Ray Tune HPO for scoring parameters (Phase 6).
 
@@ -886,11 +893,11 @@ def ray_tune(
 
     from spacecraft_telemetry.ray_training import (
         discover_channels,
+        load_channel_subsystem_map,
         run_all_sweeps,
         run_hpo_sweep,
         write_tuned_configs,
     )
-    from spacecraft_telemetry.ray_training.runner import _load_channel_subsystem_map
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -933,7 +940,7 @@ def ray_tune(
             click.echo(f"Output        : {output_path}")
             return
 
-        subsystem_map = _load_channel_subsystem_map(tune_settings, mission)
+        subsystem_map = load_channel_subsystem_map(tune_settings, mission)
         if not subsystem_map:
             raise click.ClickException(
                 "channels.csv not found or empty; cannot resolve --subsystem. "
@@ -959,8 +966,13 @@ def ray_tune(
                     existing = {
                         str(k): v for k, v in loaded.items() if isinstance(v, dict)
                     }
-            except json.JSONDecodeError:
-                log.warning("ray.tune.output.invalid_json", path=str(output_path))
+            except json.JSONDecodeError as err:
+                if not overwrite_existing:
+                    raise click.ClickException(
+                        "Existing tuned config file contains invalid JSON. "
+                        "Fix/remove the file, or re-run with --overwrite-existing."
+                    ) from err
+                log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
 
         existing[subsystem] = best
         write_tuned_configs(existing, output_path)

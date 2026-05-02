@@ -191,6 +191,27 @@ def test_score_all_channels_ignores_unknown_tuned_keys(ray_local, pretrained_cha
     assert results[0]["status"] == "ok"
 
 
+@pytest.mark.slow
+def test_score_all_channels_tuned_configs_requires_subsystem_map(
+    ray_local, pretrained_channel, tmp_path
+) -> None:
+    """Passing tuned_configs without a subsystem map should fail fast."""
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_training import score_all_channels
+
+    settings = pretrained_channel.model_copy(
+        update={
+            "data": pretrained_channel.data.model_copy(
+                update={"raw_data_dir": tmp_path / "raw"}
+            )
+        }
+    )
+    tuned = {"subsystem_1": {"threshold_z": 2.5}}
+
+    with pytest.raises(ValueError, match="no channel->subsystem map"):
+        score_all_channels(settings, "ESA-Mission1", ["channel_1"], tuned_configs=tuned)
+
+
 # ---------------------------------------------------------------------------
 # _with_abs_paths — unit tests
 # ---------------------------------------------------------------------------
