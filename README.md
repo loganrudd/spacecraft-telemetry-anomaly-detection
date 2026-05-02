@@ -110,7 +110,7 @@ ESA Parquet (Zenodo/GCS)
 | 4 | Telemanom model drop-in | Complete |
 | 5 | Ray parallel training | Complete |
 | 6 | Ray Tune HPO | Complete |
-| 7 | MLflow integration | Planned |
+| 7 | MLflow integration | In progress |
 | 8 | Evidently monitoring | Planned |
 | 9 | FastAPI serving layer | Planned |
 | 10 | React dashboard | Planned |
