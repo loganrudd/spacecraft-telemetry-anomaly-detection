@@ -20,21 +20,21 @@ write_tuned_configs  Persist subsystem → best_config mapping as JSON.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
-import os
-import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import ray
 from ray import tune
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.ray_training.runner import (
-    _load_channel_subsystem_map,
     _with_abs_paths,
+    load_channel_subsystem_map,
 )
 
 log = get_logger(__name__)
@@ -52,12 +52,16 @@ SEARCH_SPACE: dict[str, Any] = {
 }
 
 
-def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]) -> None:
-    """Fail fast when tune labels and saved errors.npy are incompatible.
+def _prepare_channel_data(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+) -> dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]]:
+    """Load and validate immutable per-channel trial inputs once.
 
-    This catches the common case where errors.npy was generated with one model
-    window_size (e.g. local config) and run_hpo_sweep is invoked with another
-    settings profile (e.g. test config).
+    Returns a mapping of channel -> (errors, labels). Channels missing errors
+    or failing expected label-load validation are skipped. Raises when no
+    usable channel remains, or when labels/errors shapes are incompatible.
     """
     from spacecraft_telemetry.model.dataset import load_window_labels
     from spacecraft_telemetry.model.io import _read_bytes, artifact_paths
@@ -65,7 +69,7 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
     missing_errors: list[str] = []
     shape_mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
     load_failures: list[tuple[str, str]] = []
-    n_usable = 0
+    prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]] = {}
 
     for channel in channels:
         paths = artifact_paths(settings, mission, channel)
@@ -78,7 +82,7 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
         errors: np.ndarray[Any, Any] = np.load(io.BytesIO(raw))
         try:
             labels = load_window_labels(settings, mission, channel)
-        except Exception as exc:
+        except (FileNotFoundError, OSError, ValueError, RuntimeError) as exc:
             load_failures.append((channel, str(exc)))
             continue
 
@@ -86,7 +90,7 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
             shape_mismatches.append((channel, tuple(labels.shape), tuple(errors.shape)))
             continue
 
-        n_usable += 1
+        prepared[channel] = (errors, labels)
 
     if shape_mismatches:
         details = "; ".join(
@@ -101,7 +105,7 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
             f"Examples: {details}."
         )
 
-    if n_usable == 0:
+    if not prepared:
         msg = (
             "run_hpo_sweep has no usable channels: all channels are missing "
             "errors.npy or label loading failed."
@@ -113,6 +117,8 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
             msg += f" First label-load failure: {first[0]} -> {first[1]}"
         raise ValueError(msg)
 
+    return prepared
+
 
 # ---------------------------------------------------------------------------
 # Trial function — pure numpy, no torch dependency
@@ -121,34 +127,22 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
 def _scoring_trial(
     config: dict[str, Any],
     *,
-    settings: Settings,
-    mission: str,
-    channels: list[str],
+    channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
 ) -> dict[str, float]:
     """Ray Tune trial: score all channels in a subsystem group with config params.
 
-    Each trial loads pre-computed errors.npy artifacts (written by Phase 5),
-    applies the scoring pipeline with the trial's hyperparameters, and returns
-    mean F0.5 across all channels in the group as a metrics dict.
+    Each trial applies the scoring pipeline with the sampled hyperparameters
+    over pre-loaded immutable channel data and returns mean F0.5.
 
     No model re-training occurs — only the numpy scoring pass is repeated.
-    Channels whose errors.npy has not yet been written are skipped with a
-    warning so a partial Phase 5 state does not crash the sweep.
-
     Returns a dict rather than calling ray.train.report() so that the function
     body has no ray imports. Ray Tune 2.x records a function trainable's return
     value as the trial's final metrics, so get_best_result() works correctly.
-    This avoids the ModuleNotFoundError that arises when trial workers are
-    spawned outside the driver's virtualenv PYTHONPATH.
 
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
-        settings: Resolved Settings (absolute paths, injected by tune.with_parameters).
-        mission:  Mission name, e.g. "ESA-Mission1".
-        channels: Channel IDs belonging to this subsystem group.
+        channel_data: Mapping channel -> (errors, labels), pre-validated once.
     """
-    from spacecraft_telemetry.model.dataset import load_window_labels
-    from spacecraft_telemetry.model.io import _read_bytes, artifact_paths
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,
         evaluate,
@@ -156,38 +150,8 @@ def _scoring_trial(
         smooth_errors,
     )
 
-    _log = get_logger(__name__)
-
     f0_5_scores: list[float] = []
-    for channel in channels:
-        paths = artifact_paths(settings, mission, channel)
-
-        # Load pre-computed errors.npy — skip if Phase 5 hasn't run yet.
-        try:
-            raw = _read_bytes(paths.errors)
-        except (FileNotFoundError, OSError):
-            _log.warning("tune.trial.skip", channel=channel, reason="errors.npy missing")
-            continue
-
-        errors: np.ndarray[Any, Any] = np.load(io.BytesIO(raw))
-
-        # Load per-window anomaly labels (no torch required).
-        try:
-            labels = load_window_labels(settings, mission, channel)
-        except Exception as exc:
-            _log.warning("tune.trial.skip", channel=channel, reason=str(exc))
-            continue
-
-        if labels.shape != errors.shape:
-            _log.warning(
-                "tune.trial.skip",
-                channel=channel,
-                reason=(
-                    "labels/errors shape mismatch "
-                    f"labels={labels.shape} errors={errors.shape}"
-                ),
-            )
-            continue
+    for errors, labels in channel_data.values():
 
         # Scoring pipeline — identical to score_channel() in scoring.py.
         smoothed = smooth_errors(errors, int(config["error_smoothing_window"]))
@@ -229,44 +193,14 @@ def run_hpo_sweep(
     Returns:
         Dict of the 4 scoring params from the best trial configuration.
     """
-    import ray
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
 
-    # Ensure Ray is initialized with the venv on PYTHONPATH so that Tune
-    # trial subprocess workers can import installed packages (including ray
-    # itself). _ray_session (CLI) and the ray_local pytest fixture already
-    # call ray.init() with the correct runtime_env; detect that case by
-    # checking PYTHONPATH in the cluster env vars via a private API.
-    #
-    # If Ray is not yet initialized, initialize it here.
-    # If Ray IS initialized but PYTHONPATH is missing (e.g. bare ray.init()
-    # in a script), restart it — safe because run_hpo_sweep owns the session
-    # for standalone use. _ray_session and ray_local always set PYTHONPATH,
-    # so they will not trigger the restart.
-    _pythonpath = os.pathsep.join(p for p in sys.path if p)
-    _need_init = True
-    if ray.is_initialized():
-        try:
-            import ray._private.worker as _w
-
-            _serialized = (
-                _w.global_worker.core_worker  # type: ignore[attr-defined]
-                .get_job_config()
-                .runtime_env_info.serialized_runtime_env
-            )
-            _env_vars: dict[str, str] = json.loads(_serialized).get("env_vars", {})
-            if "PYTHONPATH" in _env_vars:
-                _need_init = False
-        except Exception:  # pragma: no cover — private API may change
-            pass  # conservative: restart with PYTHONPATH
-    if _need_init:
-        if ray.is_initialized():
-            ray.shutdown()
-        ray.init(
-            ignore_reinit_error=True,
-            runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
+    if not ray.is_initialized():
+        raise RuntimeError(
+            "Ray is not initialized. Initialize Ray in the caller (CLI _ray_session "
+            "or test fixture) before calling run_hpo_sweep()."
         )
 
     log.info(
@@ -281,15 +215,13 @@ def run_hpo_sweep(
     # from a temp directory where relative paths would not resolve.
     settings_abs = _with_abs_paths(settings)
 
-    # Fail fast before launching Tune trials to avoid opaque RayTaskError
-    # traces when per-window labels and saved errors.npy are incompatible.
-    _validate_trial_inputs(settings_abs, mission, channels)
+    # Load immutable per-channel data once and validate compatibility before
+    # launching Tune trials.
+    channel_data = _prepare_channel_data(settings_abs, mission, channels)
 
     trial_fn = tune.with_parameters(
         _scoring_trial,
-        settings=settings_abs,
-        mission=mission,
-        channels=channels,
+        channel_data=channel_data,
     )
 
     tuner = tune.Tuner(
@@ -358,7 +290,13 @@ def run_all_sweeps(
     """
     from spacecraft_telemetry.model.io import artifact_paths
 
-    subsystem_map = _load_channel_subsystem_map(settings, mission)
+    if not ray.is_initialized():
+        raise RuntimeError(
+            "Ray is not initialized. Call run_all_sweeps from a caller that owns "
+            "the Ray session (CLI _ray_session or test fixture)."
+        )
+
+    subsystem_map = load_channel_subsystem_map(settings, mission)
 
     # Group provided channels by subsystem.
     by_subsystem: dict[str, list[str]] = {}
@@ -394,9 +332,19 @@ def run_all_sweeps(
         return output
 
     sweep_results: dict[str, dict[str, Any]] = {}
-    for sub, sub_channels in eligible.items():
-        best_config = run_hpo_sweep(sub, sub_channels, settings, mission)
-        sweep_results[sub] = best_config
+    if settings.tune.parallel_subsystems and len(eligible) > 1:
+        max_workers = min(settings.tune.max_parallel_subsystems, len(eligible))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(run_hpo_sweep, sub, sub_channels, settings, mission): sub
+                for sub, sub_channels in eligible.items()
+            }
+            for future in concurrent.futures.as_completed(futures):
+                subsystem = futures[future]
+                sweep_results[subsystem] = future.result()
+    else:
+        for sub, sub_channels in eligible.items():
+            sweep_results[sub] = run_hpo_sweep(sub, sub_channels, settings, mission)
 
     write_tuned_configs(sweep_results, output)
     return output

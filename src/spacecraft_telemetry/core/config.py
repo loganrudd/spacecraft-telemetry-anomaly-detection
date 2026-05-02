@@ -230,10 +230,12 @@ class TuneConfig(BaseModel):
 
     num_samples: int = 50               # trials per subsystem sweep
     max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
+    parallel_subsystems: bool = False   # run subsystem sweeps concurrently (cloud default)
+    max_parallel_subsystems: int = 2    # cap concurrent subsystem sweeps when enabled
     mlflow_experiment_prefix: str = "hpo"   # experiments named hpo-{subsystem}
     mlflow_tracking_uri: str = "mlruns"     # file-based local default
 
-    @field_validator("num_samples", "max_concurrent_trials")
+    @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:

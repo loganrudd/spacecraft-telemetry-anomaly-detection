@@ -67,3 +67,5 @@ ray:
 tune:
   num_samples: 100
   max_concurrent_trials: 8
+  parallel_subsystems: true
+  max_parallel_subsystems: 4

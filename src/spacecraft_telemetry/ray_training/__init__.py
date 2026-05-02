@@ -15,6 +15,7 @@ write_tuned_configs  Persist subsystem → best_config mapping as JSON.
 
 from spacecraft_telemetry.ray_training.runner import (
     discover_channels,
+    load_channel_subsystem_map,
     score_all_channels,
     train_all_channels,
 )
@@ -29,6 +30,7 @@ from spacecraft_telemetry.ray_training.tune import (
 __all__ = [
     "SEARCH_SPACE",
     "discover_channels",
+    "load_channel_subsystem_map",
     "make_score_task",
     "make_train_task",
     "run_all_sweeps",
