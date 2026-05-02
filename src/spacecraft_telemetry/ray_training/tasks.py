@@ -43,12 +43,15 @@ import traceback
 from typing import Any
 
 
-def make_train_task(num_gpus: float) -> Any:
+def make_train_task(num_gpus: float, max_retries: int = 3) -> Any:
     """Return a @ray.remote train_channel task with the given GPU allocation.
 
     Args:
-        num_gpus: GPU fraction per task. 0.0 = CPU-only (local dev).
-                  0.25 on T4 clouds packs 4 models per physical GPU.
+        num_gpus:    GPU fraction per task. 0.0 = CPU-only (local dev).
+                     0.25 on T4 clouds packs 4 models per physical GPU.
+        max_retries: Number of times Ray retries a failed task before marking
+                     it as error. Set from RayConfig.max_retries — critical for
+                     preemptible-VM resilience on cloud.
 
     Returns:
         A ray.remote-decorated callable. Invoke with .remote(settings_ref, mission, channel).
@@ -58,7 +61,7 @@ def make_train_task(num_gpus: float) -> Any:
     from spacecraft_telemetry.core.config import Settings
     from spacecraft_telemetry.core.logging import get_logger
 
-    @ray.remote(num_cpus=1, num_gpus=num_gpus)
+    @ray.remote(num_cpus=1, num_gpus=num_gpus, max_retries=max_retries)
     def _train(settings: Any, mission: str, channel: str) -> dict[str, Any]:
         log = get_logger(__name__)
         # Ray auto-dereferences ObjectRefs passed to .remote() — settings is
@@ -91,11 +94,12 @@ def make_train_task(num_gpus: float) -> Any:
     return _train
 
 
-def make_score_task(num_gpus: float) -> Any:
+def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
     """Return a @ray.remote score_channel task with the given GPU allocation.
 
     Args:
-        num_gpus: GPU fraction per task. Same as make_train_task.
+        num_gpus:    GPU fraction per task. Same as make_train_task.
+        max_retries: Number of times Ray retries a failed task. See make_train_task.
 
     Returns:
         A ray.remote-decorated callable. Invoke with .remote(settings_ref, mission, channel).
@@ -105,7 +109,7 @@ def make_score_task(num_gpus: float) -> Any:
     from spacecraft_telemetry.core.config import Settings
     from spacecraft_telemetry.core.logging import get_logger
 
-    @ray.remote(num_cpus=1, num_gpus=num_gpus)
+    @ray.remote(num_cpus=1, num_gpus=num_gpus, max_retries=max_retries)
     def _score(settings: Any, mission: str, channel: str) -> dict[str, Any]:
         log = get_logger(__name__)
         # Ray auto-dereferences ObjectRefs passed to .remote() — settings is
@@ -128,6 +132,12 @@ def make_score_task(num_gpus: float) -> Any:
                 "channel": channel,
                 "status": "error",
                 "error_msg": tb,
+                "precision": None,
+                "recall": None,
+                "f1": None,
+                "f0_5": None,
+                "n_true_positive_labels": None,
+                "n_predicted_positive_labels": None,
             }
 
     return _score

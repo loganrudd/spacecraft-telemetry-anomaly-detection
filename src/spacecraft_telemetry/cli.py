@@ -623,12 +623,47 @@ def model_score(
 # ---------------------------------------------------------------------------
 
 
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _ray_session(settings: "Settings") -> "Any":
+    """Context manager that initialises a Ray cluster and shuts it down on exit.
+
+    Propagates the current virtualenv's sys.path to Ray worker processes so
+    they can find installed packages when launched via `uv run`.
+
+    NOTE: The PYTHONPATH injection works correctly for local dev where driver
+    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 11),
+    workers run in the container image, so PYTHONPATH from the driver node is
+    irrelevant. Phase 11 must replace this with runtime_env derived from the
+    container image (e.g. runtime_env={"pip": requirements_path}) or rely on
+    the image having the package pre-installed.
+    """
+    import os
+    import sys
+
+    import ray
+
+    _pythonpath = os.pathsep.join(p for p in sys.path if p)
+    ray.init(
+        address=settings.ray.address,
+        num_cpus=settings.ray.num_cpus,
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
+    )
+    try:
+        yield
+    finally:
+        ray.shutdown()
+
+
 @click.group()
 def ray_group() -> None:
     """Ray Core parallel training and scoring commands."""
 
 
-@ray_group.command("train-all")
+@ray_group.command("train")
 @click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
 @click.option(
     "--channels",
@@ -642,50 +677,37 @@ def ray_group() -> None:
     help="Cap sweep at this many channels (useful for smoke tests).",
 )
 @click.pass_context
-def ray_train_all(
+def ray_train(
     ctx: click.Context,
     mission: str,
     channels: str | None,
     max_channels: int | None,
 ) -> None:
-    """Train all channels in parallel using Ray Core.
+    """Train channels in parallel using Ray Core.
 
-    Discovers channels by scanning the Spark processed-data directory unless
-    --channels is supplied explicitly (required for gs:// artifact stores).
+    Trains all discovered channels by default. Discovers channels by scanning
+    the Spark processed-data directory unless --channels is supplied explicitly
+    (required for gs:// artifact stores).
 
     Examples:
 
         # Train all discovered channels
-        spacecraft-telemetry --env local ray train-all --mission ESA-Mission1
+        spacecraft-telemetry --env local ray train --mission ESA-Mission1
 
         # Smoke test: only first 3 channels
-        spacecraft-telemetry ray train-all --mission ESA-Mission1 --max-channels 3
+        spacecraft-telemetry ray train --mission ESA-Mission1 --max-channels 3
 
         # Cloud: explicit channel list (gs:// scan not supported)
-        spacecraft-telemetry --env cloud ray train-all \\
+        spacecraft-telemetry --env cloud ray train \\
             --mission ESA-Mission1 \\
             --channels channel_1,channel_2,channel_3
     """
-    import os
-    import sys
-
-    import ray
-
     from spacecraft_telemetry.ray_training import discover_channels, train_all_channels
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
 
-    # Propagate the current virtualenv's sys.path to Ray worker processes so
-    # they can find installed packages when launched via `uv run`.
-    _pythonpath = os.pathsep.join(p for p in sys.path if p)
-    ray.init(
-        address=settings.ray.address,
-        num_cpus=settings.ray.num_cpus,
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
-    )
-    try:
+    with _ray_session(settings):
         channel_list: list[str]
         if channels is not None:
             channel_list = [c.strip() for c in channels.split(",") if c.strip()]
@@ -698,12 +720,10 @@ def ray_train_all(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.train-all.start", mission=mission, n_channels=len(channel_list))
+        log.info("ray.train.start", mission=mission, n_channels=len(channel_list))
         results = train_all_channels(
             settings, mission, channel_list, max_channels=max_channels
         )
-    finally:
-        ray.shutdown()
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
     n_err = len(results) - n_ok
@@ -723,7 +743,7 @@ def ray_train_all(
         raise SystemExit(1)
 
 
-@ray_group.command("score-all")
+@ray_group.command("score")
 @click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
 @click.option(
     "--channels",
@@ -743,33 +763,29 @@ def ray_train_all(
     help="Path to JSON file with per-subsystem scoring param overrides (Phase 6 output).",
 )
 @click.pass_context
-def ray_score_all(
+def ray_score(
     ctx: click.Context,
     mission: str,
     channels: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
 ) -> None:
-    """Score all channels in parallel using Ray Core.
+    """Score channels in parallel using Ray Core.
 
     Loads trained model artifacts and runs anomaly scoring on test data.
-    Optionally applies per-subsystem scoring param overrides from Phase 6 HPO
-    output (--tuned-configs path/to/tuned_configs.json).
+    Scores all channels by default. Optionally applies per-subsystem scoring
+    param overrides from Phase 6 HPO output (--tuned-configs path/to/tuned_configs.json).
 
     Examples:
 
         # Score all channels with Hundman defaults
-        spacecraft-telemetry ray score-all --mission ESA-Mission1
+        spacecraft-telemetry ray score --mission ESA-Mission1
 
         # With Phase 6 HPO-tuned params
-        spacecraft-telemetry ray score-all --mission ESA-Mission1 \\
+        spacecraft-telemetry ray score --mission ESA-Mission1 \\
             --tuned-configs outputs/tuned_configs.json
     """
     import json
-    import os
-    import sys
-
-    import ray
 
     from spacecraft_telemetry.ray_training import discover_channels, score_all_channels
 
@@ -780,17 +796,9 @@ def ray_score_all(
     if tuned_configs is not None:
         with tuned_configs.open() as f:
             tuned = json.load(f)
-        log.info("ray.score-all.tuned_configs_loaded", path=str(tuned_configs))
+        log.info("ray.score.tuned_configs_loaded", path=str(tuned_configs))
 
-    # Propagate the current virtualenv's sys.path to Ray worker processes.
-    _pythonpath = os.pathsep.join(p for p in sys.path if p)
-    ray.init(
-        address=settings.ray.address,
-        num_cpus=settings.ray.num_cpus,
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
-    )
-    try:
+    with _ray_session(settings):
         channel_list: list[str]
         if channels is not None:
             channel_list = [c.strip() for c in channels.split(",") if c.strip()]
@@ -803,7 +811,7 @@ def ray_score_all(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.score-all.start", mission=mission, n_channels=len(channel_list))
+        log.info("ray.score.start", mission=mission, n_channels=len(channel_list))
         results = score_all_channels(
             settings,
             mission,
@@ -811,8 +819,6 @@ def ray_score_all(
             max_channels=max_channels,
             tuned_configs=tuned,
         )
-    finally:
-        ray.shutdown()
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
     n_err = len(results) - n_ok

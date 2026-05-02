@@ -95,18 +95,14 @@ def test_train_task_error_on_missing_data(ray_local) -> None:
 
 
 @pytest.mark.slow
-def test_score_task_ok(ray_local, ray_series_parquet) -> None:
+def test_score_task_ok(ray_local, pretrained_channel) -> None:
     """score task should return status='ok' after a channel has been trained."""
     pytest.importorskip("ray")
     import ray
 
-    from spacecraft_telemetry.model.training import train_channel
     from spacecraft_telemetry.ray_training.tasks import make_score_task
 
-    settings = ray_series_parquet
-    # Train first so model artifacts exist.
-    train_channel(settings, "ESA-Mission1", "channel_1")
-
+    settings = pretrained_channel
     task = make_score_task(num_gpus=0.0)
     settings_ref = ray.put(settings)
     result = cast(dict[str, Any], ray.get(task.remote(settings_ref, "ESA-Mission1", "channel_1")))

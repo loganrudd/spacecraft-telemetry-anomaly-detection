@@ -98,10 +98,10 @@ def ray_series_parquet(tmp_path_factory: pytest.TempPathFactory) -> Settings:
     settings = test_cfg.model_copy(
         update={
             "spark": test_cfg.spark.model_copy(
-                update={"processed_data_dir": str(base)}
+                update={"processed_data_dir": base}
             ),
             "model": test_cfg.model.model_copy(
-                update={"artifacts_dir": str(artifacts_dir)}
+                update={"artifacts_dir": artifacts_dir}
             ),
         }
     )

@@ -159,7 +159,10 @@ def train_all_channels(
 
     log.info("ray.train.sweep.start", mission=mission, n_channels=len(work))
 
-    train_task = make_train_task(num_gpus=settings.ray.num_gpus_per_task)
+    train_task = make_train_task(
+        num_gpus=settings.ray.num_gpus_per_task,
+        max_retries=settings.ray.max_retries,
+    )
     settings_ref = ray.put(_with_abs_paths(settings))
     futures = [train_task.remote(settings_ref, mission, ch) for ch in work]
     results: list[dict[str, Any]] = ray.get(futures)
@@ -216,16 +219,19 @@ def score_all_channels(
     log.info("ray.score.sweep.start", mission=mission, n_channels=len(work),
              tuned=tuned_configs is not None)
 
+    # Resolve relative paths to absolute before ray.put() — Ray workers run
+    # from Ray's session dir, not the project root.
+    abs_settings = _with_abs_paths(settings)
+
     # Build channel → subsystem map once (reads channels.csv).
     ch_to_sub: dict[str, str] = {}
     if tuned_configs:
-        ch_to_sub = _load_channel_subsystem_map(settings, mission)
+        ch_to_sub = _load_channel_subsystem_map(abs_settings, mission)
 
     # Build one settings variant per unique subsystem tuned config.
     # Cache as ray object refs to avoid re-putting identical objects.
-    settings_refs: dict[str | None, Any] = {}
-    base_ref = ray.put(_with_abs_paths(settings))
-    settings_refs[None] = base_ref
+    settings_refs: dict[str, Any] = {}
+    base_ref = ray.put(abs_settings)
 
     def _get_settings_ref(channel: str) -> Any:
         if not tuned_configs:
@@ -238,15 +244,20 @@ def score_all_channels(
         safe_overrides = {k: v for k, v in overrides.items() if k in _TUNABLE_SCORING_FIELDS}
         if not safe_overrides:
             return base_ref
-        cache_key = subsystem
-        if cache_key not in settings_refs:
-            tuned_settings = settings.model_copy(
-                update={"model": settings.model.model_copy(update=safe_overrides)}
+        # subsystem is not None here: if it were, overrides would be {} and we'd
+        # have returned base_ref above.
+        assert subsystem is not None
+        if subsystem not in settings_refs:
+            tuned_settings = abs_settings.model_copy(
+                update={"model": abs_settings.model.model_copy(update=safe_overrides)}
             )
-            settings_refs[cache_key] = ray.put(tuned_settings)
-        return settings_refs[cache_key]
+            settings_refs[subsystem] = ray.put(tuned_settings)
+        return settings_refs[subsystem]
 
-    score_task = make_score_task(num_gpus=settings.ray.num_gpus_per_task)
+    score_task = make_score_task(
+        num_gpus=settings.ray.num_gpus_per_task,
+        max_retries=settings.ray.max_retries,
+    )
     futures = [score_task.remote(_get_settings_ref(ch), mission, ch) for ch in work]
     results: list[dict[str, Any]] = ray.get(futures)
 

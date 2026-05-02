@@ -97,11 +97,19 @@ def test_train_all_channels_partial_failure(ray_local, ray_series_parquet) -> No
 
 
 @pytest.mark.slow
-def test_train_all_channels_max_channels_cap(ray_train_result) -> None:
-    """max_channels limits the sweep — cached single-channel result validates cap=1."""
+def test_train_all_channels_max_channels_cap(ray_local, ray_series_parquet) -> None:
+    """max_channels=1 with two candidates caps the sweep to the first channel."""
     pytest.importorskip("ray")
-    # ray_train_result was built with exactly 1 channel, matching max_channels=1 behaviour.
-    assert len(ray_train_result) == 1
+    from spacecraft_telemetry.ray_training import train_all_channels
+
+    results = train_all_channels(
+        ray_series_parquet,
+        "ESA-Mission1",
+        ["channel_1", "nonexistent_channel"],
+        max_channels=1,
+    )
+    assert len(results) == 1
+    assert results[0]["channel"] == "channel_1"
 
 
 @pytest.mark.slow
@@ -123,6 +131,7 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     """score_all_channels applies per-subsystem scoring overrides from tuned_configs."""
     pytest.importorskip("ray")
     import csv
+    import json
 
     from spacecraft_telemetry.ray_training import score_all_channels
 
@@ -147,6 +156,14 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     assert len(results) == 1
     assert results[0]["status"] == "ok", f"Expected ok, got: {results[0].get('error_msg')}"
 
+    # Verify the override was actually written to the artifact.
+    threshold_cfg_path = (
+        Path(settings.model.artifacts_dir) / "ESA-Mission1" / "channel_1" / "threshold_config.json"
+    )
+    with threshold_cfg_path.open() as f:
+        saved = json.load(f)
+    assert saved["z"] == pytest.approx(2.5), f"Expected z=2.5 in threshold_config.json, got: {saved}"
+
 
 @pytest.mark.slow
 def test_score_all_channels_ignores_unknown_tuned_keys(ray_local, pretrained_channel) -> None:
@@ -163,3 +180,31 @@ def test_score_all_channels_ignores_unknown_tuned_keys(ray_local, pretrained_cha
     )
     assert len(results) == 1
     assert results[0]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _with_abs_paths — unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
+    """_with_abs_paths converts all three path fields to absolute paths."""
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.ray_training.runner import _with_abs_paths
+
+    settings = load_settings("test")
+    # Override with known relative paths so the assertion is meaningful.
+    rel = Path("some/relative/path")
+    settings = settings.model_copy(
+        update={
+            "spark": settings.spark.model_copy(update={"processed_data_dir": rel}),
+            "model": settings.model.model_copy(update={"artifacts_dir": rel}),
+            "data": settings.data.model_copy(update={"raw_data_dir": rel}),
+        }
+    )
+
+    result = _with_abs_paths(settings)
+
+    assert result.spark.processed_data_dir.is_absolute(), "processed_data_dir should be absolute"
+    assert result.model.artifacts_dir.is_absolute(), "artifacts_dir should be absolute"
+    assert result.data.raw_data_dir.is_absolute(), "raw_data_dir should be absolute"

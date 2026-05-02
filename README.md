@@ -85,24 +85,23 @@ make spark-test
 make model-evaluate MISSION=ESA-Mission1 CHANNEL=channel_1
 
 # Train all preprocessed channels in parallel with Ray
-make ray-train-all MISSION=ESA-Mission1
+make ray-train MISSION=ESA-Mission1
 
 # Score all trained channels in parallel with Ray
-make ray-score-all MISSION=ESA-Mission1
+make ray-score MISSION=ESA-Mission1
 
 # Smoke test: train exactly 1 channel via Ray (fast sanity check)
 make ray-train-smoke MISSION=ESA-Mission1
 
 # Run Ray training unit tests (excludes slow integration tests)
 make ray-test
-
 # Ray three-step workflow (Phase 5 → Phase 6 → Phase 5b)
 # 1. Train all channels
-uv run spacecraft-telemetry ray train-all --mission ESA-Mission1
+uv run spacecraft-telemetry ray train --mission ESA-Mission1
 # 2. (Phase 6) Run HPO → produces tuned_configs.json
 # 3. Score all channels, optionally applying HPO output
-uv run spacecraft-telemetry ray score-all --mission ESA-Mission1
-uv run spacecraft-telemetry ray score-all --mission ESA-Mission1 --tuned-configs tuned_configs.json
+uv run spacecraft-telemetry ray score --mission ESA-Mission1
+uv run spacecraft-telemetry ray score --mission ESA-Mission1 --tuned-configs tuned_configs.json
 
 # Or call other CLI commands directly
 uv run spacecraft-telemetry --help
@@ -114,6 +113,8 @@ uv run spacecraft-telemetry feast materialize --mission ESA-Mission1
 uv run spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1
 uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
 uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry ray train --mission ESA-Mission1
+uv run spacecraft-telemetry ray score --mission ESA-Mission1
 ```
 
 ## Architecture
@@ -145,26 +146,26 @@ ESA Parquet (Zenodo/GCS)
 ### Ray Workflow
 
 ```
-Phase 5a  →  ray train-all   fan out train_channel; write model.pt + errors.npy per channel
+Phase 5a  →  ray train   fan out train_channel; write model.pt + errors.npy per channel
 Phase 6   →  Ray Tune HPO    one Tune experiment per subsystem; output: tuned_configs.json
-Phase 5b  →  ray score-all   fan out score_channel; optionally apply tuned_configs.json
+Phase 5b  →  ray score   fan out score_channel; optionally apply tuned_configs.json
 ```
 
 ### Ray CLI
 
 ```bash
 # Train all channels in parallel (discovers channels automatically from processed data)
-make ray-train-all MISSION=ESA-Mission1
+make ray-train MISSION=ESA-Mission1
 
 # Score all trained channels (Hundman defaults)
-make ray-score-all MISSION=ESA-Mission1
+make ray-score MISSION=ESA-Mission1
 
 # Score with Phase 6 HPO output
-uv run spacecraft-telemetry ray score-all --mission ESA-Mission1 --tuned-configs tuned_configs.json
+uv run spacecraft-telemetry ray score --mission ESA-Mission1 --tuned-configs tuned_configs.json
 
 # Limit to N channels for local testing
-uv run spacecraft-telemetry ray train-all --mission ESA-Mission1 --max-channels 4
-uv run spacecraft-telemetry ray train-all --mission ESA-Mission1 --channels channel_1,channel_2
+uv run spacecraft-telemetry ray train --mission ESA-Mission1 --max-channels 4
+uv run spacecraft-telemetry ray train --mission ESA-Mission1 --channels channel_1,channel_2
 ```
 
 ## Phase 4 Components
