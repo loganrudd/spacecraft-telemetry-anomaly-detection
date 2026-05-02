@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -96,7 +96,7 @@ def _make_series_table(
     ``anomaly_tail``: number of rows at the end of the *last* segment to mark
         as anomalous.
     """
-    _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    _BASE_DT = datetime(2000, 1, 1, tzinfo=UTC)
     rng = np.random.default_rng(seed=42)
 
     timestamps: list[pa.Scalar] = []

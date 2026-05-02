@@ -34,10 +34,10 @@ log = get_logger(__name__)
 
 
 def predict(
-    model: "TelemanomLSTM",
-    loader: "DataLoader[tuple[torch.Tensor, torch.Tensor]]",
-    device: "torch.device",
-) -> "tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.float32]]]":
+    model: TelemanomLSTM,
+    loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    device: torch.device,
+) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.float32]]]:
     """Run the LSTM forward over all batches; return (predictions, targets).
 
     Both arrays are shape (N,) float32 and in DataLoader iteration order
@@ -126,7 +126,7 @@ def flag_anomalies(
     starts = np.where(edges == 1)[0]
     ends = np.where(edges == -1)[0]
 
-    for s, e in zip(starts, ends):
+    for s, e in zip(starts, ends, strict=False):
         if e - s >= min_run_length:
             result[s:e] = True
 
@@ -157,7 +157,7 @@ def evaluate(
         if (precision + recall) > 0
         else 0.0
     )
-    beta_sq = 0.25  # beta=0.5 → beta²=0.25 (precision weighted 2× recall)
+    beta_sq = 0.25  # beta=0.5 -> beta^2=0.25 (precision weighted 2x recall)
     f0_5 = (
         (1 + beta_sq) * precision * recall / (beta_sq * precision + recall)
         if (beta_sq * precision + recall) > 0

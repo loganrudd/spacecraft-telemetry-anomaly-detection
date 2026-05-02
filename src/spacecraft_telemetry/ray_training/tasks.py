@@ -79,7 +79,7 @@ def make_train_task(num_gpus: float, max_retries: int = 3) -> Any:
                 "best_val_loss": result.best_val_loss,
                 "epochs_run": result.epochs_run,
             }
-        except Exception:  # noqa: BLE001
+        except Exception:
             tb = traceback.format_exc()
             log.error("ray.train.task.failed", channel=channel, traceback=tb)
             return {
@@ -125,7 +125,7 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
                 "error_msg": None,
                 **metrics,
             }
-        except Exception:  # noqa: BLE001
+        except Exception:
             tb = traceback.format_exc()
             log.error("ray.score.task.failed", channel=channel, traceback=tb)
             return {

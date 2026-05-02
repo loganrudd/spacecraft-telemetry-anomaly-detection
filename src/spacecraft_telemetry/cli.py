@@ -8,6 +8,7 @@ Each subcommand follows the same pattern:
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -623,11 +624,8 @@ def model_score(
 # ---------------------------------------------------------------------------
 
 
-import contextlib as _contextlib
-
-
 @_contextlib.contextmanager
-def _ray_session(settings: "Settings") -> "Any":
+def _ray_session(settings: Settings) -> Any:
     """Context manager that initialises a Ray cluster and shuts it down on exit.
 
     Propagates the current virtualenv's sys.path to Ray worker processes so
@@ -734,7 +732,8 @@ def ray_train(
     for r in results:
         if r["status"] == "ok":
             click.echo(
-                f"  {r['channel']:20s}  epoch={r['best_epoch']:3d}  val_loss={r['best_val_loss']:.6f}"
+                f"  {r['channel']:20s}  epoch={r['best_epoch']:3d}"
+                f"  val_loss={r['best_val_loss']:.6f}"
             )
         else:
             click.echo(f"  {r['channel']:20s}  ERROR — see logs")

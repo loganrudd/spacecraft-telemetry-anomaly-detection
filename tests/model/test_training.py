@@ -15,11 +15,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.model.io import artifact_paths
-from spacecraft_telemetry.model.training import TrainingResult, train_channel
-from tests.model.conftest import SeriesParquetFixture, _SERIES_FILE_SCHEMA
+from datetime import UTC  # noqa: E402
 
+from spacecraft_telemetry.core.config import Settings  # noqa: E402
+from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
+from spacecraft_telemetry.model.training import (  # noqa: E402
+    TrainingResult,
+    train_channel,
+)
+from tests.model.conftest import _SERIES_FILE_SCHEMA, SeriesParquetFixture  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,9 +59,9 @@ def _write_const_parquet(
     value: float = 0.0,
 ) -> None:
     """Write per-timestep series Parquet where every row has the same constant value."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    _BASE_DT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    _BASE_DT = datetime(2000, 1, 1, tzinfo=UTC)
     timestamps = [
         pa.scalar(
             _BASE_DT.timestamp() + i * 90,

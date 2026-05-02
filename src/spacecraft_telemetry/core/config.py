@@ -155,9 +155,11 @@ class ModelConfig(BaseModel):
     threshold_z: float = 3.0
     threshold_min_anomaly_len: int = 3
 
-    @field_validator("hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
-                     "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
-                     "inference_batch_size", "window_size", "prediction_horizon")
+    @field_validator(
+        "hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
+        "seed", "error_smoothing_window", "threshold_window", "threshold_min_anomaly_len",
+        "inference_batch_size", "window_size", "prediction_horizon",
+    )
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:

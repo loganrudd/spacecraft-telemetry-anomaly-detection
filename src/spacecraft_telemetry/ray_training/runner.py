@@ -91,7 +91,10 @@ def _load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, s
     """
     csv_path = Path(str(settings.data.raw_data_dir)) / mission / "channels.csv"
     if not csv_path.exists():
-        log.warning("channels.csv not found; tuned_configs will not be applied", path=str(csv_path))
+        log.warning(
+            "channels.csv not found; tuned_configs will not be applied",
+            path=str(csv_path),
+        )
         return {}
     mapping: dict[str, str] = {}
     with csv_path.open(newline="") as f:
@@ -114,7 +117,11 @@ def _with_abs_paths(settings: Settings) -> Settings:
     return settings.model_copy(
         update={
             "spark": settings.spark.model_copy(
-                update={"processed_data_dir": Path(str(settings.spark.processed_data_dir)).resolve()}
+                update={
+                    "processed_data_dir": Path(
+                        str(settings.spark.processed_data_dir)
+                    ).resolve()
+                }
             ),
             "model": settings.model.model_copy(
                 update={"artifacts_dir": Path(str(settings.model.artifacts_dir)).resolve()}

@@ -7,8 +7,8 @@ used rather than ASHA — ASHA's pruning requires intermediate checkpoints that
 don't exist for single-pass trials.
 
 Channels are grouped by spacecraft subsystem before sweeping. Individual
-channels have only 2–5 anomaly events (too few for stable F0.5 optimisation);
-pooling channels within a subsystem (6–30 channels each) gives a robust signal.
+channels have only 2-5 anomaly events (too few for stable F0.5 optimisation);
+pooling channels within a subsystem (6-30 channels each) gives a robust signal.
 
 Public API
 ----------
@@ -78,7 +78,7 @@ def _validate_trial_inputs(settings: Settings, mission: str, channels: list[str]
         errors: np.ndarray[Any, Any] = np.load(io.BytesIO(raw))
         try:
             labels = load_window_labels(settings, mission, channel)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             load_failures.append((channel, str(exc)))
             continue
 
@@ -229,11 +229,10 @@ def run_hpo_sweep(
     Returns:
         Dict of the 4 scoring params from the best trial configuration.
     """
+    import ray
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
-
-    import ray
 
     # Ensure Ray is initialized with the venv on PYTHONPATH so that Tune
     # trial subprocess workers can import installed packages (including ray
@@ -250,7 +249,7 @@ def run_hpo_sweep(
     _need_init = True
     if ray.is_initialized():
         try:
-            import ray._private.worker as _w  # noqa: PLC0415
+            import ray._private.worker as _w
 
             _serialized = (
                 _w.global_worker.core_worker  # type: ignore[attr-defined]
@@ -347,7 +346,7 @@ def run_all_sweeps(
 
     Subsystems where no channel has an errors.npy artifact are skipped. This
     allows the sweep to run cleanly when only a subset of channels have been
-    scored by Phase 5 (e.g. local dev with 1–5 channels).
+    scored by Phase 5 (e.g. local dev with 1-5 channels).
 
     Args:
         settings: Fully resolved Settings.

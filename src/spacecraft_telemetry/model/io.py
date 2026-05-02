@@ -37,7 +37,7 @@ def _write_bytes(path: Path | str, data: bytes) -> None:
     """
     path_str = str(path)
     if path_str.startswith("gs://"):
-        import gcsfs  # noqa: PLC0415
+        import gcsfs
 
         fs = gcsfs.GCSFileSystem()
         with fs.open(path_str, "wb") as f:
@@ -56,7 +56,7 @@ def _read_bytes(path: Path | str) -> bytes:
     """
     path_str = str(path)
     if path_str.startswith("gs://"):
-        import gcsfs  # noqa: PLC0415
+        import gcsfs
 
         fs = gcsfs.GCSFileSystem()
         with fs.open(path_str, "rb") as f:
@@ -107,7 +107,7 @@ def artifact_paths(settings: Settings, mission: str, channel: str) -> ModelArtif
 
 
 def save_model(
-    model: "TelemanomLSTM",
+    model: TelemanomLSTM,
     paths: ModelArtifactPaths,
     model_config: ModelConfig,
     window_size: int,
@@ -142,8 +142,8 @@ def save_model(
 
 def load_model(
     paths: ModelArtifactPaths,
-    device: "torch.device",
-) -> "tuple[TelemanomLSTM, ModelConfig, int]":
+    device: torch.device,
+) -> tuple[TelemanomLSTM, ModelConfig, int]:
     """Reconstruct TelemanomLSTM from saved config and weights.
 
     Uses the saved model_config.json (not current Settings.model) so a model
@@ -241,7 +241,7 @@ def save_metrics(paths: ModelArtifactPaths, metrics: dict[str, Any]) -> None:
 
 def save_threshold(
     paths: ModelArtifactPaths,
-    threshold: "Any",
+    threshold: Any,
     config: dict[str, Any],
 ) -> None:
     """Serialize threshold series as threshold.npy and params as threshold_config.json.
@@ -257,7 +257,7 @@ def save_threshold(
     _write_bytes(paths.threshold_config, json.dumps(config, indent=2).encode())
 
 
-def save_errors(paths: ModelArtifactPaths, errors: "Any") -> None:
+def save_errors(paths: ModelArtifactPaths, errors: Any) -> None:
     """Serialize errors numpy array via BytesIO and write to errors.npy."""
     import numpy as np
 

@@ -114,7 +114,9 @@ def ray_local():
 
     Yields control, then shuts Ray down after the session.
     """
-    import sys, os
+    import os
+    import sys
+
     import ray
 
     pythonpath = os.pathsep.join(p for p in sys.path if p)
