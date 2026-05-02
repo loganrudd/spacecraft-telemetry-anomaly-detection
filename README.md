@@ -2,7 +2,7 @@
 
 End-to-end ML infrastructure for real-time spacecraft telemetry anomaly detection using the [ESA Anomaly Dataset](https://zenodo.org/records/12528696).
 
-**Status: Phase 5 of 12 complete — Ray Parallel Training**
+**Status: Phase 6 of 12 complete — Ray Tune HPO**
 
 ## Tech Stack
 
@@ -90,18 +90,26 @@ make ray-train MISSION=ESA-Mission1
 # Score all trained channels in parallel with Ray
 make ray-score MISSION=ESA-Mission1
 
+# Run Ray Tune HPO (all discovered subsystems)
+make ray-tune MISSION=ESA-Mission1
+
 # Smoke test: train exactly 1 channel via Ray (fast sanity check)
 make ray-train-smoke MISSION=ESA-Mission1
 
-# Run Ray training unit tests (excludes slow integration tests)
+# Smoke test: tune one subsystem quickly (3 trials)
+make ray-tune-smoke MISSION=ESA-Mission1
+
+# Run Ray training/tuning unit tests (excludes slow integration tests)
 make ray-test
 # Ray three-step workflow (Phase 5 → Phase 6 → Phase 5b)
 # 1. Train all channels
 uv run spacecraft-telemetry ray train --mission ESA-Mission1
-# 2. (Phase 6) Run HPO → produces tuned_configs.json
+# 2. Run HPO (all subsystems or one subsystem)
+uv run spacecraft-telemetry ray tune --mission ESA-Mission1
+uv run spacecraft-telemetry ray tune --mission ESA-Mission1 --subsystem subsystem_1 --num-samples 5
 # 3. Score all channels, optionally applying HPO output
 uv run spacecraft-telemetry ray score --mission ESA-Mission1
-uv run spacecraft-telemetry ray score --mission ESA-Mission1 --tuned-configs tuned_configs.json
+uv run spacecraft-telemetry ray score --mission ESA-Mission1 --tuned-configs models/ESA-Mission1/tuned_configs.json
 
 # Or call other CLI commands directly
 uv run spacecraft-telemetry --help
@@ -114,6 +122,7 @@ uv run spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mis
 uv run spacecraft-telemetry model train --mission ESA-Mission1 --channel channel_1
 uv run spacecraft-telemetry model score --mission ESA-Mission1 --channel channel_1
 uv run spacecraft-telemetry ray train --mission ESA-Mission1
+uv run spacecraft-telemetry ray tune --mission ESA-Mission1
 uv run spacecraft-telemetry ray score --mission ESA-Mission1
 ```
 

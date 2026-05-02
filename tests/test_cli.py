@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from spacecraft_telemetry import __version__
 from spacecraft_telemetry.cli import main
+from spacecraft_telemetry.core.config import load_settings
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -477,3 +478,97 @@ class TestFeastCommands:
         assert "event_timestamp" in entity_df.columns
         # 1-day window at 90s intervals ≈ 960 rows; just assert it's non-trivially large.
         assert len(entity_df) > 10
+
+
+# ---------------------------------------------------------------------------
+# ray group
+# ---------------------------------------------------------------------------
+
+
+class TestRayTuneCommand:
+    def test_help_shows_options(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "tune", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--subsystem" in result.output
+        assert "--num-samples" in result.output
+
+    def test_tune_all_calls_run_all_sweeps(
+        self, runner: CliRunner
+    ) -> None:
+        settings = load_settings("test")
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1", "channel_2"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.run_all_sweeps",
+                return_value=Path("models/ESA-Mission1/tuned_configs.json"),
+            ) as mock_run_all,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "tune", "--mission=ESA-Mission1", "--num-samples=5"],
+            )
+
+        assert result.exit_code == 0, result.output
+        call_args = mock_run_all.call_args
+        assert call_args is not None
+        passed_settings = call_args.args[0]
+        assert passed_settings.tune.num_samples == 5
+        assert "Output" in result.output
+
+    def test_tune_single_subsystem_calls_run_hpo_sweep(
+        self, runner: CliRunner
+    ) -> None:
+        settings = load_settings("test")
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["channel_1", "channel_2"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.runner._load_channel_subsystem_map",
+                return_value={"channel_1": "subsystem_1", "channel_2": "subsystem_6"},
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                return_value={
+                    "error_smoothing_window": 10,
+                    "threshold_window": 100,
+                    "threshold_z": 2.5,
+                    "threshold_min_anomaly_len": 2,
+                },
+            ) as mock_run_one,
+            patch("spacecraft_telemetry.ray_training.write_tuned_configs") as mock_write,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "tune",
+                    "--mission=ESA-Mission1",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_run_one.assert_called_once()
+        called_channels = mock_run_one.call_args.args[1]
+        assert called_channels == ["channel_1"]
+        mock_write.assert_called_once()
+        assert "Subsystem" in result.output
