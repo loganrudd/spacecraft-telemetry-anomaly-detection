@@ -57,3 +57,9 @@ model:
   threshold_min_anomaly_len: 3
   num_workers: 4
   inference_batch_size: 256
+
+ray:
+  num_cpus: 8
+  num_gpus_per_task: 0.25
+  max_retries: 3
+  address: auto

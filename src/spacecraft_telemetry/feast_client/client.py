@@ -50,6 +50,14 @@ def get_historical_features(
     """
     if features is None:
         features = _all_feature_refs()
+    # Feast's FileOfflineStore merges entity_df against Parquet written by Spark.
+    # Dask reads string columns from Parquet as Categorical; entity_df typically
+    # has plain object/str dtype. Cast to category to match and suppress the
+    # dask merge dtype-mismatch warning.
+    entity_df = entity_df.copy()
+    for col in ("channel_id", "mission_id"):
+        if col in entity_df.columns:
+            entity_df[col] = entity_df[col].astype("category")
     retrieval_job = store.get_historical_features(entity_df=entity_df, features=features)
     return retrieval_job.to_df()
 

@@ -4,9 +4,8 @@ ALL reads and writes of model files go through _write_bytes / _read_bytes.
 NEVER call path.write_bytes(...), torch.save(path), or np.save(path, ...) directly
 in training.py or scoring.py.
 
-Phase 4: local filesystem only.
-Phase 5 swap: widen _write_bytes / _read_bytes to branch on "gs://" URI prefixes
-and delegate to gcsfs/fsspec. That is a one-file change — callers stay untouched.
+Supports both local filesystem paths and gs:// URIs (Phase 5).
+GCS access uses gcsfs (lazy import) — the [gcp] extra is not required for local dev.
 """
 
 from __future__ import annotations
@@ -33,18 +32,36 @@ if TYPE_CHECKING:
 def _write_bytes(path: Path | str, data: bytes) -> None:
     """Write bytes to path, creating parent directories as needed.
 
-    Phase 5 swap point: add a branch here to handle gs:// URIs via gcsfs.
+    Handles both local filesystem paths and gs:// URIs (via gcsfs).
+    The gcsfs import is lazy — the [gcp] extra is not required for local usage.
     """
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(data)
+    path_str = str(path)
+    if path_str.startswith("gs://"):
+        import gcsfs  # noqa: PLC0415
+
+        fs = gcsfs.GCSFileSystem()
+        with fs.open(path_str, "wb") as f:
+            f.write(data)
+    else:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
 
 
 def _read_bytes(path: Path | str) -> bytes:
     """Read bytes from path.
 
-    Phase 5 swap point: add a branch here to handle gs:// URIs via gcsfs.
+    Handles both local filesystem paths and gs:// URIs (via gcsfs).
+    The gcsfs import is lazy — the [gcp] extra is not required for local usage.
     """
+    path_str = str(path)
+    if path_str.startswith("gs://"):
+        import gcsfs  # noqa: PLC0415
+
+        fs = gcsfs.GCSFileSystem()
+        with fs.open(path_str, "rb") as f:
+            data: bytes = f.read()
+        return data
     return Path(path).read_bytes()
 
 
@@ -70,7 +87,7 @@ class ModelArtifactPaths:
 
 def artifact_paths(settings: Settings, mission: str, channel: str) -> ModelArtifactPaths:
     """Return the canonical artifact paths for a mission/channel pair."""
-    root = settings.model.artifacts_dir / mission / channel
+    root = Path(settings.model.artifacts_dir) / mission / channel
     return ModelArtifactPaths(
         root=root,
         model=root / "model.pt",

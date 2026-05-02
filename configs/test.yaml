@@ -49,3 +49,8 @@ model:
   threshold_window: 20
   threshold_z: 3.0
   threshold_min_anomaly_len: 2
+
+ray:
+  num_cpus: 5
+  num_gpus_per_task: 0.0
+  max_retries: 1

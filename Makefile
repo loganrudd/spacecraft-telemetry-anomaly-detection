@@ -18,6 +18,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         spark-test spark-preprocess \
         feast-apply feast-materialize feast-test \
         model-train model-score model-evaluate model-test \
+        ray-train ray-score ray-train-smoke ray-test \
         clean clean-processed clean-models clean-feast clean-data clean-all
 
 help:          ## Show this help message
@@ -114,6 +115,22 @@ model-evaluate:   ## Train + score end-to-end (Phase 4 single-channel demo)
 
 model-test:       ## Run only model tests (fast; excludes @pytest.mark.slow)
 	$(RUN) pytest tests/model/ -m "not slow" -v
+
+# ---------------------------------------------------------------------------
+# Ray parallel training (Phase 5)
+# ---------------------------------------------------------------------------
+
+ray-train:        ## Train channels in parallel with Ray (MISSION=…)
+	$(RUN) spacecraft-telemetry ray train --mission $(MISSION)
+
+ray-score:        ## Score channels in parallel with Ray (MISSION=…)
+	$(RUN) spacecraft-telemetry ray score --mission $(MISSION)
+
+ray-train-smoke:  ## Smoke test: train 1 channel via Ray (fast local check)
+	$(RUN) spacecraft-telemetry ray train --mission $(MISSION) --max-channels 1
+
+ray-test:         ## Run Ray training unit tests (fast only)
+	$(RUN) pytest tests/ray_training/ -m "not slow" -v
 
 # ---------------------------------------------------------------------------
 # Housekeeping

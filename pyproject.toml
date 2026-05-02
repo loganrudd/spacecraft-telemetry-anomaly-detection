@@ -41,6 +41,7 @@ tracking = [
 ]
 gcp = [
     "google-cloud-storage>=2.10",
+    "gcsfs>=2024.2",
 ]
 dev = [
     "pytest>=8.0",
@@ -80,5 +81,5 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*"]
+module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*"]
 ignore_missing_imports = true

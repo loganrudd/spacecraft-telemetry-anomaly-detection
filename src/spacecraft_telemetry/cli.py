@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -615,3 +616,228 @@ def model_score(
     click.echo(f"Recall   : {metrics['recall']:.4f}")
     click.echo(f"F1       : {metrics['f1']:.4f}")
     click.echo(f"F0.5     : {metrics['f0_5']:.4f}")
+
+
+# ---------------------------------------------------------------------------
+# ray group
+# ---------------------------------------------------------------------------
+
+
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _ray_session(settings: "Settings") -> "Any":
+    """Context manager that initialises a Ray cluster and shuts it down on exit.
+
+    Propagates the current virtualenv's sys.path to Ray worker processes so
+    they can find installed packages when launched via `uv run`.
+
+    NOTE: The PYTHONPATH injection works correctly for local dev where driver
+    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 11),
+    workers run in the container image, so PYTHONPATH from the driver node is
+    irrelevant. Phase 11 must replace this with runtime_env derived from the
+    container image (e.g. runtime_env={"pip": requirements_path}) or rely on
+    the image having the package pre-installed.
+    """
+    import os
+    import sys
+
+    import ray
+
+    _pythonpath = os.pathsep.join(p for p in sys.path if p)
+    ray.init(
+        address=settings.ray.address,
+        num_cpus=settings.ray.num_cpus,
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
+    )
+    try:
+        yield
+    finally:
+        ray.shutdown()
+
+
+@click.group()
+def ray_group() -> None:
+    """Ray Core parallel training and scoring commands."""
+
+
+@ray_group.command("train")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to train. Defaults to all discovered channels.",
+)
+@click.option(
+    "--max-channels",
+    type=int,
+    default=None,
+    help="Cap sweep at this many channels (useful for smoke tests).",
+)
+@click.pass_context
+def ray_train(
+    ctx: click.Context,
+    mission: str,
+    channels: str | None,
+    max_channels: int | None,
+) -> None:
+    """Train channels in parallel using Ray Core.
+
+    Trains all discovered channels by default. Discovers channels by scanning
+    the Spark processed-data directory unless --channels is supplied explicitly
+    (required for gs:// artifact stores).
+
+    Examples:
+
+        # Train all discovered channels
+        spacecraft-telemetry --env local ray train --mission ESA-Mission1
+
+        # Smoke test: only first 3 channels
+        spacecraft-telemetry ray train --mission ESA-Mission1 --max-channels 3
+
+        # Cloud: explicit channel list (gs:// scan not supported)
+        spacecraft-telemetry --env cloud ray train \\
+            --mission ESA-Mission1 \\
+            --channels channel_1,channel_2,channel_3
+    """
+    from spacecraft_telemetry.ray_training import discover_channels, train_all_channels
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    with _ray_session(settings):
+        channel_list: list[str]
+        if channels is not None:
+            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+        else:
+            channel_list = discover_channels(settings, mission)
+            if not channel_list:
+                raise click.ClickException(
+                    f"No preprocessed channels found for {mission}. "
+                    "Run `spacecraft-telemetry spark preprocess` first, "
+                    "or pass --channels explicitly."
+                )
+
+        log.info("ray.train.start", mission=mission, n_channels=len(channel_list))
+        results = train_all_channels(
+            settings, mission, channel_list, max_channels=max_channels
+        )
+
+    n_ok = sum(1 for r in results if r["status"] == "ok")
+    n_err = len(results) - n_ok
+    click.echo(f"Mission  : {mission}")
+    click.echo(f"Channels : {len(results)}")
+    click.echo(f"OK       : {n_ok}")
+    click.echo(f"Errors   : {n_err}")
+    for r in results:
+        if r["status"] == "ok":
+            click.echo(
+                f"  {r['channel']:20s}  epoch={r['best_epoch']:3d}  val_loss={r['best_val_loss']:.6f}"
+            )
+        else:
+            click.echo(f"  {r['channel']:20s}  ERROR — see logs")
+
+    if n_err:
+        raise SystemExit(1)
+
+
+@ray_group.command("score")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to score. Defaults to all discovered channels.",
+)
+@click.option(
+    "--max-channels",
+    type=int,
+    default=None,
+    help="Cap sweep at this many channels.",
+)
+@click.option(
+    "--tuned-configs",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to JSON file with per-subsystem scoring param overrides (Phase 6 output).",
+)
+@click.pass_context
+def ray_score(
+    ctx: click.Context,
+    mission: str,
+    channels: str | None,
+    max_channels: int | None,
+    tuned_configs: Path | None,
+) -> None:
+    """Score channels in parallel using Ray Core.
+
+    Loads trained model artifacts and runs anomaly scoring on test data.
+    Scores all channels by default. Optionally applies per-subsystem scoring
+    param overrides from Phase 6 HPO output (--tuned-configs path/to/tuned_configs.json).
+
+    Examples:
+
+        # Score all channels with Hundman defaults
+        spacecraft-telemetry ray score --mission ESA-Mission1
+
+        # With Phase 6 HPO-tuned params
+        spacecraft-telemetry ray score --mission ESA-Mission1 \\
+            --tuned-configs outputs/tuned_configs.json
+    """
+    import json
+
+    from spacecraft_telemetry.ray_training import discover_channels, score_all_channels
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    tuned: dict[str, Any] | None = None
+    if tuned_configs is not None:
+        with tuned_configs.open() as f:
+            tuned = json.load(f)
+        log.info("ray.score.tuned_configs_loaded", path=str(tuned_configs))
+
+    with _ray_session(settings):
+        channel_list: list[str]
+        if channels is not None:
+            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+        else:
+            channel_list = discover_channels(settings, mission)
+            if not channel_list:
+                raise click.ClickException(
+                    f"No preprocessed channels found for {mission}. "
+                    "Run `spacecraft-telemetry spark preprocess` first, "
+                    "or pass --channels explicitly."
+                )
+
+        log.info("ray.score.start", mission=mission, n_channels=len(channel_list))
+        results = score_all_channels(
+            settings,
+            mission,
+            channel_list,
+            max_channels=max_channels,
+            tuned_configs=tuned,
+        )
+
+    n_ok = sum(1 for r in results if r["status"] == "ok")
+    n_err = len(results) - n_ok
+    click.echo(f"Mission  : {mission}")
+    click.echo(f"Channels : {len(results)}")
+    click.echo(f"OK       : {n_ok}")
+    click.echo(f"Errors   : {n_err}")
+    for r in results:
+        if r["status"] == "ok":
+            click.echo(
+                f"  {r['channel']:20s}  "
+                f"P={r['precision']:.3f}  R={r['recall']:.3f}  "
+                f"F1={r['f1']:.3f}  F0.5={r['f0_5']:.3f}"
+            )
+        else:
+            click.echo(f"  {r['channel']:20s}  ERROR — see logs")
+
+    if n_err:
+        raise SystemExit(1)
+
+
+main.add_command(ray_group, name="ray")
