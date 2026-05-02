@@ -223,6 +223,22 @@ class RayConfig(BaseModel):
         return v
 
 
+class TuneConfig(BaseModel):
+    """Ray Tune HPO configuration (Phase 6)."""
+
+    num_samples: int = 50               # trials per subsystem sweep
+    max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
+    mlflow_experiment_prefix: str = "hpo"   # experiments named hpo-{subsystem}
+    mlflow_tracking_uri: str = "mlruns"     # file-based local default
+
+    @field_validator("num_samples", "max_concurrent_trials")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -262,6 +278,7 @@ class Settings(BaseSettings):
     feast: FeastConfig = FeastConfig()
     model: ModelConfig = ModelConfig()
     ray: RayConfig = RayConfig()
+    tune: TuneConfig = TuneConfig()
 
     @classmethod
     def settings_customise_sources(

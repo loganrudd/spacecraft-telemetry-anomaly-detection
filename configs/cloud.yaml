@@ -63,3 +63,7 @@ ray:
   num_gpus_per_task: 0.25
   max_retries: 3
   address: auto
+
+tune:
+  num_samples: 100
+  max_concurrent_trials: 8

@@ -288,3 +288,41 @@ def make_test_dataloader(
         pin_memory=_pin,
     )
     return loader, target_timestamps, window_is_anomaly
+
+
+def load_window_labels(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> "np.ndarray[Any, np.dtype[np.bool_]]":
+    """Return per-window anomaly labels for the test split without building a DataLoader.
+
+    Uses the same windowing logic as make_test_dataloader() but has no torch
+    dependency — suitable for import in numpy-only Ray Tune trial functions
+    (Phase 6).
+
+    Returns:
+        (M,) bool array — True iff any timestep in the window+horizon span
+        is anomalous (any() semantics; matches make_test_dataloader).
+
+    Args:
+        settings: Fully resolved Settings.
+        mission:  Mission name, e.g. ``"ESA-Mission1"``.
+        channel:  Channel ID, e.g. ``"channel_1"``.
+    """
+    cfg = settings.model
+    _, segment_ids, is_anomaly, _ = _load_series_parquet(
+        settings.spark.processed_data_dir, mission, channel, "test"
+    )
+    indices = _build_window_index(
+        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        skip_anomalous_windows=False,
+    )
+    span = cfg.window_size + cfg.prediction_horizon
+    cumsum = np.empty(len(is_anomaly) + 1, dtype=np.int64)
+    cumsum[0] = 0
+    np.cumsum(is_anomaly, out=cumsum[1:])
+    result: np.ndarray[Any, np.dtype[np.bool_]] = (
+        (cumsum[indices + span] - cumsum[indices]) > 0
+    )
+    return result
