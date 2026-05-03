@@ -23,6 +23,7 @@ from __future__ import annotations
 import concurrent.futures
 import io
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -57,11 +58,20 @@ def _prepare_channel_data(
     mission: str,
     channels: list[str],
 ) -> dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]]:
-    """Load and validate immutable per-channel trial inputs once.
+    """Load, validate, and temporally slice per-channel trial inputs.
 
-    Returns a mapping of channel -> (errors, labels). Channels missing errors
-    or failing expected label-load validation are skipped. Raises when no
-    usable channel remains, or when labels/errors shapes are incompatible.
+    Returns a mapping of channel -> (errors, labels) where each pair is sliced
+    to the first ``hpo_eval_fraction`` fraction of its full length.  The
+    remaining tail is the held-out eval portion reserved for ``score_channel``'s
+    ``eval_split`` path (Phase 5 / Step 5).
+
+    Channels missing errors or failing label-load validation are skipped.
+    Raises when no usable channel remains, or when labels/errors shapes are
+    incompatible.
+
+    Emits ``UserWarning`` when either the HPO or held-out portion contains no
+    labeled anomaly windows across all channels — both cases produce misleading
+    F0.5 scores (always 0) that would silently corrupt HPO or final eval.
     """
     from spacecraft_telemetry.model.dataset import load_window_labels
     from spacecraft_telemetry.model.io import _read_bytes, artifact_paths
@@ -117,6 +127,35 @@ def _prepare_channel_data(
             msg += f" First label-load failure: {first[0]} -> {first[1]}"
         raise ValueError(msg)
 
+    # Slice each channel to the HPO portion; held-out tail is reserved for
+    # final eval in score_channel (Step 5).
+    fraction = settings.tune.hpo_eval_fraction
+    hpo_anomaly_count = 0
+    held_out_anomaly_count = 0
+    for ch in list(prepared.keys()):
+        errors, labels = prepared[ch]
+        n_hpo = int(len(errors) * fraction)
+        hpo_anomaly_count += int(labels[:n_hpo].sum())
+        held_out_anomaly_count += int(labels[n_hpo:].sum())
+        prepared[ch] = (errors[:n_hpo], labels[:n_hpo])
+
+    if hpo_anomaly_count == 0:
+        warnings.warn(
+            f"HPO portion (first {fraction:.0%} of test data) has no labeled anomaly "
+            "windows across all channels in this subsystem. F0.5 will always be 0 "
+            "during HPO — consider increasing hpo_eval_fraction or checking labels.",
+            UserWarning,
+            stacklevel=3,
+        )
+    if held_out_anomaly_count == 0:
+        warnings.warn(
+            f"Held-out portion (last {1 - fraction:.0%} of test data) has no labeled "
+            "anomaly windows across all channels in this subsystem. Final evaluation "
+            "will always score 0 — consider decreasing hpo_eval_fraction or checking labels.",
+            UserWarning,
+            stacklevel=3,
+        )
+
     return prepared
 
 
@@ -141,7 +180,9 @@ def _scoring_trial(
 
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
-        channel_data: Mapping channel -> (errors, labels), pre-validated once.
+        channel_data: Mapping channel -> (errors, labels), pre-validated and
+            pre-sliced to the HPO portion by ``_prepare_channel_data``.  Never
+            contains the held-out eval tail.
     """
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,

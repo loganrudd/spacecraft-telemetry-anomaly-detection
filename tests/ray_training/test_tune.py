@@ -183,6 +183,71 @@ def test_run_all_sweeps_filters_and_runs(
     assert calls == [("subsystem_1", ["channel_1"])]
 
 
+def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_prepare_channel_data returns slices of length floor(N * hpo_eval_fraction)."""
+    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
+
+    settings = load_settings("test")  # hpo_eval_fraction = 0.6
+    n_total = 10
+    expected_n = int(n_total * settings.tune.hpo_eval_fraction)  # floor(10 * 0.6) = 6
+
+    class _Paths:
+        errors = "fake-errors.npy"
+
+    def _fake_artifact_paths(*_args, **_kwargs):
+        return _Paths()
+
+    def _fake_read_bytes(*_args, **_kwargs):
+        buf = io.BytesIO()
+        np.save(buf, np.ones(n_total, dtype=np.float64))
+        return buf.getvalue()
+
+    def _fake_labels(*_args, **_kwargs):
+        return np.ones(n_total, dtype=np.bool_)  # anomalies in both halves
+
+    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
+    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
+    monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
+
+    result = _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
+
+    assert "channel_1" in result
+    errors, labels = result["channel_1"]
+    assert len(errors) == expected_n
+    assert len(labels) == expected_n
+
+
+def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_prepare_channel_data warns when held-out portion contains no anomalies."""
+    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
+
+    settings = load_settings("test")  # hpo_eval_fraction = 0.6
+    n_total = 10  # HPO: first 6, held-out: last 4
+
+    class _Paths:
+        errors = "fake-errors.npy"
+
+    def _fake_artifact_paths(*_args, **_kwargs):
+        return _Paths()
+
+    def _fake_read_bytes(*_args, **_kwargs):
+        buf = io.BytesIO()
+        np.save(buf, np.ones(n_total, dtype=np.float64))
+        return buf.getvalue()
+
+    def _fake_labels(*_args, **_kwargs):
+        labels = np.zeros(n_total, dtype=np.bool_)
+        labels[:6] = True  # all anomalies in HPO portion, none in held-out tail
+        return labels
+
+    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
+    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
+    monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
+
+    with pytest.warns(UserWarning, match="Held-out portion"):
+        _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
+
+
 @pytest.mark.slow
 def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> None:
     """run_hpo_sweep runs end-to-end on one channel with tiny sample count."""
