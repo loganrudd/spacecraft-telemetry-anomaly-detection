@@ -3875,6 +3875,7 @@ gcp = [
 ]
 ml = [
     { name = "hyperopt" },
+    { name = "mlflow" },
     { name = "ray", extra = ["tune"] },
     { name = "torch" },
 ]
@@ -3901,6 +3902,7 @@ requires-dist = [
     { name = "google-cloud-storage", marker = "extra == 'gcp'", specifier = ">=2.10" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hyperopt", marker = "extra == 'ml'", specifier = ">=0.2.7" },
+    { name = "mlflow", marker = "extra == 'ml'", specifier = ">=3.0,<4" },
     { name = "mlflow", marker = "extra == 'tracking'", specifier = ">=3.0,<4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pandas", specifier = ">=2.0" },

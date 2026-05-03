@@ -201,10 +201,11 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
                 update={
                     "num_samples": 2,
                     "max_concurrent_trials": 1,
-                    "mlflow_tracking_uri": str(tmp_path / "mlruns"),
-                    "mlflow_experiment_prefix": "test-hpo",
                 }
-            )
+            ),
+            "mlflow": ray_series_parquet.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
         }
     )
 

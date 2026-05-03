@@ -29,6 +29,7 @@ ml = [
     "torch>=2.0",
     "ray[tune]>=2.31,<3",
     "hyperopt>=0.2.7",
+    "mlflow>=3.0,<4",
 ]
 serving = [
     "fastapi>=0.110",

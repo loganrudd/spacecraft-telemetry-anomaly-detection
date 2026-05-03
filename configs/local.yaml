@@ -61,3 +61,8 @@ tune:
   max_concurrent_trials: 2
   parallel_subsystems: false
   max_parallel_subsystems: 2
+  hpo_eval_fraction: 0.6
+
+mlflow:
+  tracking_uri: "sqlite:///mlflow.db"
+  experiment_prefix: ""

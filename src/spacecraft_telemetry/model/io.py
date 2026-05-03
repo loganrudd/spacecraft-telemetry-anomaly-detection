@@ -129,7 +129,7 @@ def save_model(
 
     config_bytes = json.dumps(
         {
-            "model_type": "telemanom",
+            "model_type": model_config.model_type,
             "hidden_dim": model_config.hidden_dim,
             "num_layers": model_config.num_layers,
             "dropout": model_config.dropout,

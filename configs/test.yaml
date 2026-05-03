@@ -60,3 +60,9 @@ tune:
   max_concurrent_trials: 1
   parallel_subsystems: false
   max_parallel_subsystems: 1
+  hpo_eval_fraction: 0.6
+
+mlflow:
+  # Tests override tracking_uri per-fixture via tmp_path to keep runs isolated.
+  tracking_uri: "sqlite:///mlflow.test.db"
+  experiment_prefix: ""

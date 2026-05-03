@@ -69,3 +69,11 @@ tune:
   max_concurrent_trials: 8
   parallel_subsystems: true
   max_parallel_subsystems: 4
+  hpo_eval_fraction: 0.6
+
+mlflow:
+  # tracking_uri and registry_uri are set via env vars in deployment (Phase 11):
+  #   SPACECRAFT_MLFLOW__TRACKING_URI=postgresql+psycopg2://...
+  #   SPACECRAFT_MLFLOW__REGISTRY_URI=postgresql+psycopg2://...
+  tracking_uri: "sqlite:///mlflow.db"
+  experiment_prefix: ""

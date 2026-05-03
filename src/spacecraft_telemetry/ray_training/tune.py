@@ -240,10 +240,8 @@ def run_hpo_sweep(
             verbose=0,
             callbacks=[
                 MLflowLoggerCallback(
-                    experiment_name=(
-                        f"{settings.tune.mlflow_experiment_prefix}-{subsystem}"
-                    ),
-                    tracking_uri=settings.tune.mlflow_tracking_uri,
+                    experiment_name=f"hpo-{subsystem}",
+                    tracking_uri=settings.mlflow.tracking_uri,
                     save_artifact=False,
                 ),
             ],
