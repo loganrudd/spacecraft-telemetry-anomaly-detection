@@ -18,11 +18,14 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Generator
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+import mlflow
 
 from spacecraft_telemetry.core.config import load_settings as _load_settings
 
@@ -141,6 +144,17 @@ def _write_partition(table: pa.Table, partition_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
+    """Per-test isolated SQLite MLflow store for model tests."""
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    mlflow.set_tracking_uri(uri)
+    yield uri
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
 
 
 @pytest.fixture()

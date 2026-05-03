@@ -19,6 +19,8 @@ from datetime import UTC  # noqa: E402
 
 from spacecraft_telemetry.core.config import Settings  # noqa: E402
 from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
+import mlflow  # noqa: E402
+
 from spacecraft_telemetry.model.training import (  # noqa: E402
     TrainingResult,
     train_channel,
@@ -180,3 +182,70 @@ def test_early_stopping_triggers(tmp_path: Path) -> None:
     assert result.epochs_run < 50, (
         f"Expected early stopping to trigger before 50 epochs, got {result.epochs_run}"
     )
+
+
+@pytest.mark.slow
+def test_train_channel_creates_mlflow_run(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """train_channel creates a run in the correct MLflow experiment with required tags."""
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+
+    fx = tiny_series_parquet
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags["model_type"] == settings.model.model_type
+    assert tags["mission_id"] == fx.mission
+    assert tags["channel_id"] == fx.channel
+    assert runs[0].data.metrics["best_val_loss"] is not None
+    assert runs[0].data.params["hidden_dim"] == str(settings.model.hidden_dim)
+
+
+@pytest.mark.slow
+def test_train_channel_registers_model_version(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """train_channel auto-registers a model version in the MLflow registry."""
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
+
+    fx = tiny_series_parquet
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    model_name = registered_model_name(settings.model.model_type, fx.mission, fx.channel)
+    versions = list(client.search_model_versions(f"name='{model_name}'"))
+    assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
