@@ -382,3 +382,131 @@ def test_score_channel_artifacts_and_metrics(
     assert Path(paths.threshold).exists(), "threshold.npy not written"
     assert Path(paths.threshold_config).exists(), "threshold_config.json not written"
     assert Path(paths.metrics).exists(), "metrics.json not written"
+
+
+@pytest.mark.slow
+def test_score_channel_mlflow_run_has_eval_split_tag(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """score_channel creates an MLflow run tagged with eval_split and channel metadata."""
+    import mlflow
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    score_channel(settings, fx.mission, fx.channel, eval_split="final_portion")
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "scoring", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"scoring experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags["eval_split"] == "final_portion"
+    assert tags["model_type"] == settings.model.model_type
+    assert tags["mission_id"] == fx.mission
+    assert tags["channel_id"] == fx.channel
+    assert runs[0].data.params["eval_split"] == "final_portion"
+
+
+@pytest.mark.slow
+def test_score_channel_eval_split_changes_anomaly_count(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """eval_split slices the label arrays: hpo_portion sees no anomalies in this fixture.
+
+    tiny_series_parquet places all anomaly rows at the END of the test segment.
+    With hpo_eval_fraction=0.6 those rows fall entirely in the final_portion,
+    so hpo_portion must report n_true_positive_labels == 0 while full_test > 0.
+    """
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    metrics_full = score_channel(settings, fx.mission, fx.channel, eval_split="full_test")
+    metrics_hpo = score_channel(settings, fx.mission, fx.channel, eval_split="hpo_portion")
+
+    # tiny_series_parquet puts anomaly windows at the end of the test segment.
+    # With hpo_eval_fraction=0.6, they fall past the HPO cutoff.
+    assert metrics_full["n_true_positive_labels"] > 0, (
+        "full_test should see labeled anomalies from the test fixture"
+    )
+    assert metrics_hpo["n_true_positive_labels"] == 0, (
+        "hpo_portion (first 60%) should see no anomaly labels — "
+        "all anomalies are at the end of the test segment"
+    )
+
+
+@pytest.mark.slow
+def test_score_channel_errors_npy_unaffected_by_eval_split(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """errors.npy is saved from the full smoothed array regardless of eval_split."""
+    import numpy as np
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.model.io import artifact_paths
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    score_channel(settings, fx.mission, fx.channel, eval_split="full_test")
+    paths = artifact_paths(settings, fx.mission, fx.channel)
+    errors_full = np.load(str(paths.errors))
+
+    score_channel(settings, fx.mission, fx.channel, eval_split="final_portion")
+    errors_final = np.load(str(paths.errors))
+
+    np.testing.assert_array_equal(
+        errors_full, errors_final,
+        err_msg="errors.npy must be identical regardless of eval_split",
+    )

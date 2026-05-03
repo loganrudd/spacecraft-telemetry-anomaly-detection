@@ -309,11 +309,19 @@ def score_all_channels(
             settings_refs[subsystem] = ray.put(tuned_settings)
         return settings_refs[subsystem]
 
+    # Tuned-config scoring is evaluated on the held-out final portion to avoid
+    # the HPO/eval leakage fixed in Phase 7 Step 3. Untuned scoring uses the
+    # full test set for backward-compatible baseline metrics.
+    eval_split = "final_portion" if tuned_configs else "full_test"
+
     score_task = make_score_task(
         num_gpus=settings.ray.num_gpus_per_task,
         max_retries=settings.ray.max_retries,
     )
-    futures = [score_task.remote(_get_settings_ref(ch), mission, ch) for ch in work]
+    futures = [
+        score_task.remote(_get_settings_ref(ch), mission, ch, eval_split)
+        for ch in work
+    ]
     results: list[dict[str, Any]] = ray.get(futures)
 
     n_ok = sum(1 for r in results if r["status"] == "ok")

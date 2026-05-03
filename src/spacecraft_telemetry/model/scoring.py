@@ -16,13 +16,23 @@ Pipeline:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.mlflow_tracking import (
+    common_tags,
+    configure_mlflow,
+    experiment_name,
+    log_artifact_bytes,
+    log_metrics_final,
+    log_params,
+    open_run,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -174,11 +184,40 @@ def evaluate(
     }
 
 
-def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, Any]:
+def score_channel(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    *,
+    eval_split: Literal["full_test", "hpo_portion", "final_portion"] = "full_test",
+    parent_hpo_run_id: str | None = None,
+) -> dict[str, Any]:
     """Load model + test Parquet → predict → score → persist artifacts.
 
-    Writes errors.npy, threshold.json, metrics.json to the artifacts dir.
-    Returns the metrics dict {precision, recall, f1, f0_5}.
+    Writes errors.npy, threshold.npy, threshold_config.json, and metrics.json
+    to the artifacts dir using the FULL test-split pipeline (all windows).
+    The reported metrics dict is computed over the portion selected by
+    ``eval_split``:
+
+    - ``"full_test"``      — all test windows (default, backward-compatible).
+    - ``"hpo_portion"``    — first ``hpo_eval_fraction`` of windows (diagnostic).
+    - ``"final_portion"``  — remaining windows; the held-out eval set that was
+      NOT used for HPO in ``_prepare_channel_data``.
+
+    ``errors.npy`` is always saved from the full smoothed array so that Phase 6
+    HPO can keep consuming it regardless of which split was evaluated last.
+
+    Args:
+        settings:          Fully resolved Settings.
+        mission:           Mission name, e.g. "ESA-Mission1".
+        channel:           Channel ID, e.g. "channel_1".
+        eval_split:        Which temporal slice of the test set to evaluate.
+        parent_hpo_run_id: MLflow run ID of the HPO trial that produced the
+                           scoring params (used to set ``tuned_from_run`` tag).
+
+    Returns:
+        Metrics dict {precision, recall, f1, f0_5, n_true_positive_labels,
+        n_predicted_positive_labels} computed over the selected eval portion.
     """
     from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
@@ -193,6 +232,8 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     cfg = settings.model
     device = resolve_device(cfg.device)
     paths = artifact_paths(settings, mission, channel)
+
+    configure_mlflow(settings)
 
     model, _, saved_window_size = load_model(paths, device)
     if cfg.window_size != saved_window_size:
@@ -210,8 +251,24 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     smoothed = smooth_errors(errors, cfg.error_smoothing_window)
     threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)
     is_anomaly_pred = flag_anomalies(smoothed, threshold, cfg.threshold_min_anomaly_len)
-    metrics = evaluate(is_anomaly_true, is_anomaly_pred)
 
+    # Slice true/pred labels for the reported metrics.
+    # errors.npy is saved from the full smoothed array below, unaffected.
+    n = len(is_anomaly_true)
+    n_hpo = int(n * settings.tune.hpo_eval_fraction)
+    if eval_split == "hpo_portion":
+        eval_true = is_anomaly_true[:n_hpo]
+        eval_pred = is_anomaly_pred[:n_hpo]
+    elif eval_split == "final_portion":
+        eval_true = is_anomaly_true[n_hpo:]
+        eval_pred = is_anomaly_pred[n_hpo:]
+    else:  # "full_test"
+        eval_true = is_anomaly_true
+        eval_pred = is_anomaly_pred
+
+    metrics = evaluate(eval_true, eval_pred)
+
+    # Filesystem saves — smoothed (errors) uses the full array always.
     save_errors(paths, smoothed)
     save_threshold(
         paths,
@@ -220,10 +277,47 @@ def score_channel(settings: Settings, mission: str, channel: str) -> dict[str, A
     )
     save_metrics(paths, metrics)
 
+    # MLflow logging — subsystem lookup is best-effort.
+    _subsystem: str | None = None
+    try:
+        from spacecraft_telemetry.ray_training.runner import load_channel_subsystem_map
+        _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    except Exception:
+        pass
+
+    _extra: dict[str, str] = {"eval_split": eval_split}
+    if parent_hpo_run_id is not None:
+        _extra["tuned_from_run"] = parent_hpo_run_id
+
+    _exp = experiment_name(cfg.model_type, "scoring", mission)
+    _tags = common_tags(
+        model_type=cfg.model_type,
+        mission=mission,
+        phase="scoring",
+        channel=channel,
+        subsystem=_subsystem,
+        extra=_extra,
+    )
+
+    with open_run(experiment=_exp, run_name=channel, tags=_tags):
+        log_params({
+            "error_smoothing_window": cfg.error_smoothing_window,
+            "threshold_window": cfg.threshold_window,
+            "threshold_z": cfg.threshold_z,
+            "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
+            "eval_split": eval_split,
+        })
+        log_metrics_final({k: float(v) for k, v in metrics.items()})
+        log_artifact_bytes(
+            json.dumps(metrics, indent=2).encode(),
+            "metrics/metrics.json",
+        )
+
     log.info(
         "model.score.end",
         mission=mission,
         channel=channel,
+        eval_split=eval_split,
         precision=round(metrics["precision"], 4),
         recall=round(metrics["recall"], 4),
         f0_5=round(metrics["f0_5"], 4),
