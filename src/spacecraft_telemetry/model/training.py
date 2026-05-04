@@ -15,6 +15,7 @@ torch.save(path) directly here. See model/io.py for the Phase 5 swap rationale.
 from __future__ import annotations
 
 import copy
+from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
@@ -125,10 +126,8 @@ def train_channel(
         pass
 
     _data_hash: str | None = None
-    try:
+    with suppress(Exception):
         _data_hash = training_data_hash(settings.spark.processed_data_dir, mission, channel)
-    except Exception:
-        pass
 
     _exp = experiment_name(cfg.model_type, "training", mission)
     _tags = common_tags(

@@ -15,17 +15,16 @@ are encoded in directory names, exactly as Spark writes them.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Generator
 
+import mlflow
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
-import mlflow
 
 from spacecraft_telemetry.core.config import load_settings as _load_settings
 

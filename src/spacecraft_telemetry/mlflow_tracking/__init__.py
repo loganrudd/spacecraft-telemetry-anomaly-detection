@@ -30,21 +30,17 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
 )
 
 __all__ = [
-    # conventions
-    "experiment_name",
-    "registered_model_name",
     "common_tags",
-    # hashing
-    "training_data_hash",
-    # runs
     "configure_mlflow",
-    "open_run",
-    "log_params",
-    "log_metrics_step",
-    "log_metrics_final",
-    "log_artifact_bytes",
-    # registry
-    "register_pytorch_model",
-    "promote",
+    "experiment_name",
     "latest_uri",
+    "log_artifact_bytes",
+    "log_metrics_final",
+    "log_metrics_step",
+    "log_params",
+    "open_run",
+    "promote",
+    "register_pytorch_model",
+    "registered_model_name",
+    "training_data_hash",
 ]

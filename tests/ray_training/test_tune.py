@@ -308,17 +308,21 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     score_channel(settings, mission, channel)
 
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
-    assert set(best.keys()) == {
+    assert set(best.keys()) == {"config", "f0_5", "run_id"}
+    config = best["config"]
+    assert set(config.keys()) == {
         "error_smoothing_window",
         "threshold_window",
         "threshold_z",
         "threshold_min_anomaly_len",
     }
-    assert isinstance(best["error_smoothing_window"], int)
-    assert isinstance(best["threshold_window"], int)
-    assert isinstance(best["threshold_min_anomaly_len"], int)
-    assert isinstance(best["threshold_z"], float)
-    assert 5 <= best["error_smoothing_window"] <= 100
-    assert 50 <= best["threshold_window"] <= 500
-    assert 1 <= best["threshold_min_anomaly_len"] <= 10
-    assert 1.5 <= best["threshold_z"] <= 5.0
+    assert isinstance(config["error_smoothing_window"], int)
+    assert isinstance(config["threshold_window"], int)
+    assert isinstance(config["threshold_min_anomaly_len"], int)
+    assert isinstance(config["threshold_z"], float)
+    assert 5 <= config["error_smoothing_window"] <= 100
+    assert 50 <= config["threshold_window"] <= 500
+    assert 1 <= config["threshold_min_anomaly_len"] <= 10
+    assert 1.5 <= config["threshold_z"] <= 5.0
+    assert isinstance(best["f0_5"], float)
+    assert best["run_id"] is None or isinstance(best["run_id"], str)

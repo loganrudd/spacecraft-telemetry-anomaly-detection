@@ -17,10 +17,10 @@ torch = pytest.importorskip("torch")
 
 from datetime import UTC  # noqa: E402
 
-from spacecraft_telemetry.core.config import Settings  # noqa: E402
-from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
 import mlflow  # noqa: E402
 
+from spacecraft_telemetry.core.config import Settings  # noqa: E402
+from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
 from spacecraft_telemetry.model.training import (  # noqa: E402
     TrainingResult,
     train_channel,

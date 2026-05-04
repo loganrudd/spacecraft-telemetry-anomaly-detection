@@ -19,6 +19,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         feast-apply feast-materialize feast-test \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
+        mlflow-ui mlflow-promote \
         clean clean-processed clean-models clean-feast clean-data clean-all
 
 help:          ## Show this help message
@@ -137,6 +138,20 @@ ray-tune-smoke:   ## Smoke test: tune one subsystem with 3 trials (fast local ch
 
 ray-test:         ## Run Ray training/tuning unit tests (fast only)
 	$(RUN) pytest tests/ray_training/ -m "not slow" -v
+
+# ---------------------------------------------------------------------------
+# MLflow (Phase 7)
+# ---------------------------------------------------------------------------
+
+STAGE         ?= Production
+
+mlflow-ui:        ## Open MLflow UI against the local SQLite tracking store (port 5001)
+	$(RUN) spacecraft-telemetry mlflow ui
+
+mlflow-promote:   ## Promote a registered model to STAGE (MISSION=…, CHANNEL=…, STAGE=Production)
+	$(RUN) spacecraft-telemetry mlflow promote \
+		--name telemanom-$(MISSION)-$(CHANNEL) \
+		--stage $(STAGE)
 
 # ---------------------------------------------------------------------------
 # Housekeeping

@@ -122,9 +122,9 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
         # already the Settings object, not a ref.
         typed_settings: Settings = settings
         try:
-            from spacecraft_telemetry.model.scoring import score_channel
-
             from typing import Literal, cast
+
+            from spacecraft_telemetry.model.scoring import score_channel
             _split = cast(
                 Literal["full_test", "hpo_portion", "final_portion"], eval_split
             )

@@ -14,13 +14,23 @@ in MLflow 3.x requires an actual artifact file at the source path).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from contextlib import suppress
+from unittest.mock import MagicMock, patch
 
 import mlflow
 import pytest
 
-from spacecraft_telemetry.mlflow_tracking.registry import latest_uri, promote, register_pytorch_model
+from spacecraft_telemetry.mlflow_tracking.registry import (
+    latest_uri,
+    promote,
+    register_pytorch_model,
+)
 from spacecraft_telemetry.mlflow_tracking.runs import open_run
+
+_REGISTRY_CLIENT = (
+    "spacecraft_telemetry.mlflow_tracking.registry"
+    ".mlflow.tracking.MlflowClient"
+)
 
 
 class TestLatestUri:
@@ -46,8 +56,9 @@ class TestRegisterPytorchModel:
         model_name = "telemanom-ESA-Mission1-channel_1"
         fake_run_id = "abc123"
 
+
         with patch("mlflow.pytorch.log_model") as mock_log, \
-             patch("spacecraft_telemetry.mlflow_tracking.registry.mlflow.tracking.MlflowClient") as mock_client_cls:
+             patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [MagicMock()]
@@ -61,9 +72,10 @@ class TestRegisterPytorchModel:
         assert kwargs["pytorch_model"] is fake_model
 
     def test_returns_model_version_from_registry_query(self, mlflow_uri: str) -> None:
+
         fake_version = MagicMock()
         with patch("mlflow.pytorch.log_model"), \
-             patch("spacecraft_telemetry.mlflow_tracking.registry.mlflow.tracking.MlflowClient") as mock_client_cls:
+             patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [fake_version]
@@ -77,9 +89,10 @@ class TestRegisterPytorchModel:
     def test_falls_back_to_all_versions_when_run_id_filter_empty(
         self, mlflow_uri: str
     ) -> None:
+
         fallback_version = MagicMock()
         with patch("mlflow.pytorch.log_model"), \
-             patch("spacecraft_telemetry.mlflow_tracking.registry.mlflow.tracking.MlflowClient") as mock_client_cls:
+             patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             # First search (run_id filter) returns nothing; second (all) returns one.
@@ -100,10 +113,8 @@ def _create_version(name: str, run_id: str) -> None:
     an actual model artifact).
     """
     client = mlflow.tracking.MlflowClient()
-    try:
+    with suppress(Exception):
         client.create_registered_model(name)
-    except Exception:
-        pass
     client.create_model_version(
         name=name,
         source=f"runs:/{run_id}/placeholder",

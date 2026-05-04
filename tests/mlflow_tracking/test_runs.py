@@ -72,7 +72,10 @@ class TestOpenRun:
     def test_yields_none_on_start_failure(
         self, mlflow_uri: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(mlflow, "start_run", lambda **_: (_ for _ in ()).throw(RuntimeError("forced")))
+        def _raise(**_: object) -> None:
+            raise RuntimeError("forced")
+
+        monkeypatch.setattr(mlflow, "start_run", _raise)
 
         body_executed = False
         with open_run(experiment="exp", run_name="r", tags={}) as run:

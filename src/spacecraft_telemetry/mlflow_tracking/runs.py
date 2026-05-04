@@ -15,9 +15,10 @@ params / metrics dicts and receive run objects they can use for registry ops.
 from __future__ import annotations
 
 import tempfile
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generator
+from typing import TYPE_CHECKING, Any
 
 import mlflow
 
@@ -81,10 +82,8 @@ def open_run(
         yield _run
     finally:
         if _run is not None:
-            try:
+            with suppress(Exception):
                 mlflow.end_run()
-            except Exception:
-                pass
 
 
 def log_params(params: dict[str, Any]) -> None:

@@ -1006,8 +1006,18 @@ def mlflow_group() -> None:
 
 
 @mlflow_group.command("promote")
-@click.option("--name", required=True, help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1).")
-@click.option("--version", "model_version", type=int, default=None, help="Model version number. Defaults to latest non-archived version.")
+@click.option(
+    "--name",
+    required=True,
+    help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1).",
+)
+@click.option(
+    "--version",
+    "model_version",
+    type=int,
+    default=None,
+    help="Model version number. Defaults to latest non-archived version.",
+)
 @click.option(
     "--stage",
     required=True,
@@ -1041,7 +1051,13 @@ def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, sta
 
 
 @mlflow_group.command("ui")
-@click.option("--port", type=int, default=5001, show_default=True, help="Port to serve MLflow UI on.")
+@click.option(
+    "--port",
+    type=int,
+    default=5001,
+    show_default=True,
+    help="Port to serve MLflow UI on.",
+)
 @click.pass_context
 def mlflow_ui(ctx: click.Context, port: int) -> None:
     """Launch the MLflow UI against the configured tracking store.

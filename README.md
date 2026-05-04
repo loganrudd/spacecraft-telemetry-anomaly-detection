@@ -8,7 +8,7 @@ pipelines, feature store integration, parallel training, tuning, monitoring, and
 
 ## Status
 
-**Current phase: 6 of 12 complete (Ray Tune HPO).**
+**Current phase: 7 of 12 complete (MLflow integration).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -17,15 +17,19 @@ Completed:
 - Phase 4: Telemanom model drop-in
 - Phase 5: Ray parallel training + scoring
 - Phase 6: Ray Tune scoring-parameter HPO
+- Phase 7: MLflow experiment tracking + model registry
 
 ## What Works Today
 
 - End-to-end local workflow on sampled ESA data
 - Spark preprocessing to partitioned Parquet outputs
 - Feast apply/materialize and historical/online retrieval helpers
-- Per-channel Telemanom training + scoring artifacts
+- Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
 - Ray Tune HPO over scoring parameters per subsystem
+- MLflow experiment tracking (training, scoring, HPO experiments per mission)
+- MLflow model registry with `telemanom-{mission}-{channel}` naming convention
+- `mlflow promote` CLI for Staging → Production stage transitions
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -54,23 +58,40 @@ make test
 
 ## Demo Workflow
 
-Minimal Ray workflow (train -> tune -> score):
+Full Phase 7 lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
 ```bash
-# Train all discovered channels
+# 1) Train all discovered channels (logged to MLflow training experiment)
 make ray-train MISSION=ESA-Mission1
 
-# Tune scoring params per subsystem
+# 2) Score with Hundman defaults on full test set (baseline)
+make ray-score MISSION=ESA-Mission1
+
+# 3) Tune scoring parameters per subsystem via Ray Tune
+#    HPO evaluates on the first 60% of each channel's test windows.
 make ray-tune MISSION=ESA-Mission1
 
-# Score channels using tuned params
+# 4) Re-score using tuned params, evaluated on the held-out final 40%
+#    (avoids leakage between HPO search and reported metrics)
 uv run spacecraft-telemetry ray score \
   --mission ESA-Mission1 \
   --tuned-configs models/ESA-Mission1/tuned_configs.json
+
+# 5) Inspect experiments and registered models
+make mlflow-ui                      # opens at http://localhost:5001
+
+# 6) Promote a model to Production
+make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
 ```
 
-Expected key artifact after tuning:
-- `models/ESA-Mission1/tuned_configs.json`
+**Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
+over the first 60% (`hpo_portion`) to find optimal threshold parameters. Final
+reported metrics use the last 40% (`final_portion`) — data the HPO search never saw.
+This prevents the tuning process from inflating held-out F0.5 scores.
+
+Expected key artifacts:
+- `models/ESA-Mission1/tuned_configs.json` — per-subsystem scoring params + HPO lineage
+- `mlflow.db` — local SQLite MLflow tracking store (experiments, runs, registered models)
 
 ## Repository Map
 
@@ -93,7 +114,7 @@ ESA Parquet (Zenodo/GCS)
   -> Telemanom LSTM (per-channel)
   -> Ray parallel train/score
   -> Ray Tune scoring HPO
-  -> MLflow tracking (next)
+  -> MLflow experiment tracking + model registry
   -> Evidently monitoring (next)
   -> FastAPI + SSE serving (next)
   -> React dashboard (next)
@@ -110,7 +131,7 @@ ESA Parquet (Zenodo/GCS)
 | 4 | Telemanom model drop-in | Complete |
 | 5 | Ray parallel training | Complete |
 | 6 | Ray Tune HPO | Complete |
-| 7 | MLflow integration | In progress |
+| 7 | MLflow integration | Complete |
 | 8 | Evidently monitoring | Planned |
 | 9 | FastAPI serving layer | Planned |
 | 10 | React dashboard | Planned |
