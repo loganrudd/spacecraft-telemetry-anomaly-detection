@@ -870,4 +870,4 @@ class TestMlflowCli:
             )
 
         assert result.exit_code != 0
-        assert "No non-archived versions" in result.output
+        assert "No promotable versions" in result.output

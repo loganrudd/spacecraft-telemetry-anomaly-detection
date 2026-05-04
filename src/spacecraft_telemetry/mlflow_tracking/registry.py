@@ -55,9 +55,9 @@ def register_pytorch_model(
     versions = client.search_model_versions(f"name='{name}' and run_id='{run_id}'")
     if versions:
         return versions[0]
-    # Fallback: return the latest version if the run_id filter found nothing.
-    all_versions = client.search_model_versions(f"name='{name}'")
-    return all_versions[0] if all_versions else None
+    # No ModelVersion found for this run — return None rather than silently
+    # returning a version from a different concurrent run.
+    return None
 
 
 def promote(
