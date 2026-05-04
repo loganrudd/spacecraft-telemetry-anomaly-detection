@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import json
+from functools import lru_cache
 from pathlib import Path
 
 from spacecraft_telemetry.core.config import Settings
@@ -38,9 +39,21 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
 
     Returns an empty dict (not an exception) when neither file exists — callers
     treat the subsystem tag as optional/best-effort metadata.
+
+    The mapping is cached per (processed_dir, raw_dir, mission) tuple inside each
+    process.  Under Ray fan-out each worker process caches its own copy, so disk
+    reads are bounded to at most one read per file per process regardless of how
+    many channels that worker handles sequentially.
     """
+    processed_dir = str(Path(str(settings.spark.processed_data_dir)).resolve())
+    raw_dir = str(Path(str(settings.data.raw_data_dir)).resolve())
+    return _load_cached(processed_dir, raw_dir, mission)
+
+
+@lru_cache(maxsize=32)
+def _load_cached(processed_dir: str, raw_dir: str, mission: str) -> dict[str, str]:
     processed_map_path = (
-        Path(str(settings.spark.processed_data_dir))
+        Path(processed_dir)
         / mission
         / "metadata"
         / "channel_subsystems.json"
@@ -68,7 +81,7 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
                 )
 
     # CSV fallback for compatibility with current preprocessing output.
-    csv_path = Path(str(settings.data.raw_data_dir)) / mission / "channels.csv"
+    csv_path = Path(raw_dir) / mission / "channels.csv"
     if not csv_path.exists():
         log.warning(
             "channels.csv not found; tuned_configs will not be applied",
