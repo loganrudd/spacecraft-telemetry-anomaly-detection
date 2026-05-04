@@ -334,7 +334,7 @@ def run_hpo_sweep(
     best_run_id: str | None = None
     with suppress(Exception):
         import mlflow as _mlflow
-        _client = _mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+        _client = _mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         _exp = _client.get_experiment_by_name(_exp_name)
         if _exp:
             _runs = _client.search_runs(
