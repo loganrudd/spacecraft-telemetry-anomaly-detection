@@ -121,7 +121,12 @@ def test_train_channel_runs_and_saves_artifacts(
     assert 0 <= result.best_epoch < result.epochs_run
 
     # Verify that the MLflow run contains all expected artifacts.
-    client = mlflow.tracking.MlflowClient()
+    from mlflow.tracking import MlflowClient
+    from spacecraft_telemetry.mlflow_tracking.conventions import (
+        registered_model_name as _reg_name,
+    )
+
+    client = MlflowClient(tracking_uri=mlflow_uri)
     exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
     exp = client.get_experiment_by_name(exp_name)
     assert exp is not None
@@ -129,9 +134,13 @@ def test_train_channel_runs_and_saves_artifacts(
     assert len(runs) == 1
     artifacts = client.list_artifacts(runs[0].info.run_id)
     artifact_names = {a.path for a in artifacts}
-    assert "model" in artifact_names, "mlflow.pytorch.log_model artifact dir missing"
     assert "normalization_params.json" in artifact_names, "norm params not logged to MLflow"
     assert "train_log.json" in artifact_names, "train_log.json not logged to MLflow"
+    # In MLflow 3.x, log_model artifacts live in the models store, not run artifacts.
+    # Verify the model was registered instead of checking list_artifacts.
+    model_name = _reg_name(settings.model.model_type, fx.mission, fx.channel)
+    versions = client.search_model_versions(f"name='{model_name}'")
+    assert len(versions) >= 1, "mlflow.pytorch.log_model did not register a model version"
 
 
 @pytest.mark.slow
