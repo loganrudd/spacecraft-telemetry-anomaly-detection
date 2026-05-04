@@ -242,6 +242,14 @@ def test_train_channel_creates_mlflow_run(
     assert tags["channel_id"] == fx.channel
     assert runs[0].data.metrics["best_val_loss"] is not None
     assert runs[0].data.params["hidden_dim"] == str(settings.model.hidden_dim)
+    # training_data_hash must be set — train Parquet exists in the fixture.
+    assert "training_data_hash" in tags, "training_data_hash tag not written"
+    assert len(tags["training_data_hash"]) == 64, "training_data_hash must be a SHA-256 hex digest"
+    # subsystem is resolved from the real channels.csv fallback (data/raw/ESA-Mission1).
+    assert "subsystem" in tags, "subsystem tag not written"
+    assert tags["subsystem"] == "subsystem_1", (
+        f"channel_1 maps to subsystem_1 per channels.csv, got {tags['subsystem']!r}"
+    )
 
 
 @pytest.mark.slow
@@ -271,3 +279,56 @@ def test_train_channel_registers_model_version(
     model_name = registered_model_name(settings.model.model_type, fx.mission, fx.channel)
     versions = list(client.search_model_versions(f"name='{model_name}'"))
     assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
+
+
+@pytest.mark.slow
+def test_train_channel_subsystem_tag_with_metadata(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """subsystem tag is set on the MLflow run when channel metadata is available.
+
+    Creates a channel_subsystems.json in the processed_dir so that
+    load_channel_subsystem_map finds a mapping and train_channel can tag the
+    run with subsystem='power'.  Complements test_train_channel_creates_mlflow_run
+    which covers the graceful-degradation case (no metadata → tag absent).
+    """
+    import json as _json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+
+    fx = tiny_series_parquet
+
+    # Write the subsystem metadata that load_channel_subsystem_map reads.
+    meta_dir = fx.processed_dir / fx.mission / "metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "channel_subsystems.json").write_text(
+        _json.dumps({fx.channel: "power"})
+    )
+
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags.get("subsystem") == "power", (
+        f"Expected subsystem='power', got {tags.get('subsystem')!r}. "
+        "subsystem tag was not written from channel_subsystems.json."
+    )
