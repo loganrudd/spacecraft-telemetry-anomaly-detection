@@ -63,8 +63,9 @@ feature_repo/.feast/
 htmlcov/
 .coverage
 
-# Internal development plans
+# Internal development docs
 docs/plans/
+docs/reviews/
 
 # Internal AI tooling
 CLAUDE.md

@@ -1,10 +1,18 @@
 # Spacecraft Telemetry Anomaly Detection System
 
-Production-style MLOps pipeline for spacecraft telemetry anomaly detection using the
-[ESA Anomaly Dataset](https://zenodo.org/records/12528696).
+End-to-end MLOps platform for detecting anomalies in real spacecraft telemetry, built on
+the [ESA Anomaly Dataset](https://zenodo.org/records/12528696) — 31 GB of sensor data
+from 3 ESA missions, ~225 telemetry channels.
 
-The project emphasizes platform engineering over novel model research: reliable data
-pipelines, feature store integration, parallel training, tuning, monitoring, and serving.
+The model ([Telemanom LSTM, Hundman et al. 2018](https://arxiv.org/abs/1802.04431)) is
+intentionally off-the-shelf: one small LSTM per channel trains on nominal data and flags
+when sensor readings diverge from its predictions. The engineering emphasis is the platform
+wrapping it — Spark preprocessing, a Feast feature store, Ray Core for parallelizing
+hundreds of training jobs, Ray Tune for per-subsystem HPO, MLflow for experiment tracking
+and model registry, Evidently for drift monitoring, FastAPI with SSE for real-time stream
+replay, and Cloud Run for serving.
+
+Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
 ## Status
 
@@ -132,7 +140,7 @@ ESA Parquet (Zenodo/GCS)
 | 5 | Ray parallel training | Complete |
 | 6 | Ray Tune HPO | Complete |
 | 7 | MLflow integration | Complete |
-| 8 | Evidently monitoring | Planned |
+| 8 | Evidently monitoring | In progress |
 | 9 | FastAPI serving layer | Planned |
 | 10 | React dashboard | Planned |
 | 11 | GCP deployment | Planned |
