@@ -86,23 +86,22 @@ class TestRegisterPytorchModel:
 
         assert result is fake_version
 
-    def test_falls_back_to_all_versions_when_run_id_filter_empty(
+    def test_returns_none_when_run_id_filter_empty(
         self, mlflow_uri: str
     ) -> None:
 
-        fallback_version = MagicMock()
         with patch("mlflow.pytorch.log_model"), \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
-            # First search (run_id filter) returns nothing; second (all) returns one.
-            mock_client.search_model_versions.side_effect = [[], [fallback_version]]
+            # run_id filter returns nothing — must not fall back to a different run.
+            mock_client.search_model_versions.return_value = []
 
             result = register_pytorch_model(
                 model=MagicMock(), name="my-model", run_id="run-xyz"
             )
 
-        assert result is fallback_version
+        assert result is None
 
 
 def _create_version(name: str, run_id: str) -> None:

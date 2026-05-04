@@ -218,8 +218,8 @@ def train_channel(
 
         log_metrics_final({
             "best_val_loss": best_val_loss,
-            "best_epoch": float(best_epoch),
-            "epochs_run": float(len(train_losses)),
+            "best_epoch": best_epoch,
+            "epochs_run": len(train_losses),
         })
 
         # Log normalization params for this channel (sourced from Spark output).

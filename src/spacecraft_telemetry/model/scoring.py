@@ -310,7 +310,7 @@ def score_channel(
             "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
             "eval_split": eval_split,
         })
-        log_metrics_final({k: float(v) for k, v in metrics.items()})
+        log_metrics_final(metrics)
         log_artifact_bytes(_errors_bytes, "errors.npy")
         log_artifact_bytes(_threshold_bytes, "threshold.npy")
         log_artifact_bytes(_threshold_config_bytes, "threshold_config.json")

@@ -1025,24 +1025,20 @@ def mlflow_group() -> None:
 def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
     """Promote a registered model version to Staging, Production, or Archived."""
     import mlflow
-    from mlflow.tracking import MlflowClient
+    from spacecraft_telemetry.mlflow_tracking.registry import promote
 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
-    client = MlflowClient(tracking_uri=tracking_uri)
 
-    if model_version is None:
-        versions = client.search_model_versions(f"name='{name}'")
-        active = [v for v in versions if v.current_stage != "Archived"]
-        if not active:
-            raise click.ClickException(f"No non-archived versions found for model '{name}'.")
-        model_version = max(int(v.version) for v in active)
-        click.echo(f"Resolved latest non-archived version: {model_version}")
+    try:
+        promote(name=name, version=model_version, stage=stage)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    client.transition_model_version_stage(name=name, version=str(model_version), stage=stage)
+    resolved_version = model_version if model_version is not None else "(latest non-archived)"
     click.echo(f"Model         : {name}")
-    click.echo(f"Version       : {model_version}")
+    click.echo(f"Version       : {resolved_version}")
     click.echo(f"Stage         : {stage}")
     click.echo(f"Tracking URI  : {tracking_uri}")
 

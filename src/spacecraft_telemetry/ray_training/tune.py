@@ -23,6 +23,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import warnings
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -323,7 +324,7 @@ def run_hpo_sweep(
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
     best_run_id: str | None = None
-    try:
+    with suppress(Exception):
         import mlflow as _mlflow
         _client = _mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         _exp = _client.get_experiment_by_name(_exp_name)
@@ -336,8 +337,9 @@ def run_hpo_sweep(
             )
             if _runs:
                 best_run_id = _runs[0].info.run_id
-    except Exception:
-        pass
+    if best_run_id is None:
+        log.warning("tune.sweep.best_run_id_missing", subsystem=subsystem,
+                    note="lineage tag tuned_from_run will be absent on scoring runs")
 
     log.info(
         "tune.sweep.end",

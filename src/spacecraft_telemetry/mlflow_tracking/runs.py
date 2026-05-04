@@ -126,10 +126,15 @@ def log_metrics_step(metrics: dict[str, float], step: int) -> None:
         mlflow.log_metrics(metrics, step=step)
 
 
-def log_metrics_final(metrics: dict[str, float]) -> None:
-    """Log summary metrics (no step) to the active run."""
+def log_metrics_final(metrics: dict[str, float | int]) -> None:
+    """Log summary metrics (no step) to the active run.
+
+    Accepts both float and int values; casts to float before logging so
+    callers (training, scoring, monitoring) don't need to know about MLflow's
+    type requirements.
+    """
     if mlflow.active_run() is not None:
-        mlflow.log_metrics(metrics)
+        mlflow.log_metrics({k: float(v) for k, v in metrics.items()})
 
 
 def log_dict(data: Any, artifact_file: str) -> None:
