@@ -244,7 +244,8 @@ class TestLoadSettings:
 
         settings = load_settings("local")
 
-        assert settings.mlflow.tracking_uri == "sqlite:///test.db"
+        assert settings.mlflow.tracking_uri.endswith("/test.db")
+        assert Path(settings.mlflow.tracking_uri.removeprefix("sqlite:///")).is_absolute()
         assert settings.mlflow.experiment_prefix == "ci-"
         assert settings.mlflow.registry_uri is None
 
@@ -304,7 +305,10 @@ class TestTuneConfig:
 class TestMlflowConfig:
     def test_defaults(self) -> None:
         cfg = MlflowConfig()
-        assert cfg.tracking_uri == "sqlite:///mlflow.db"
+        # sqlite:///mlflow.db is resolved to an absolute path at construction time (A4).
+        assert cfg.tracking_uri.startswith("sqlite:///")
+        assert Path(cfg.tracking_uri.removeprefix("sqlite:///")).is_absolute()
+        assert cfg.tracking_uri.endswith("mlflow.db")
         assert cfg.registry_uri is None
         assert cfg.experiment_prefix == ""
 

@@ -255,12 +255,36 @@ class TuneConfig(BaseModel):
 class MlflowConfig(BaseModel):
     """MLflow tracking and registry configuration (Phase 7)."""
 
-    tracking_uri: str = "sqlite:///mlflow.db"
+    # Default is resolved to an absolute path at import time so Ray workers
+    # (which run from a session temp dir) always point to the same database.
+    tracking_uri: str = f"sqlite:///{(_REPO_ROOT / 'mlflow.db').resolve()}"
     # When None, the registry falls back to tracking_uri (MLflow default behaviour).
     registry_uri: str | None = None
     # Optional prefix applied to every experiment name, e.g. "dev-" to isolate
     # development runs from production ones without a separate tracking server.
     experiment_prefix: str = ""
+
+    @field_validator("tracking_uri")
+    @classmethod
+    def _resolve_sqlite_relative_uri(cls, v: str) -> str:
+        """Resolve sqlite:///relpath to sqlite:////abs/path at construction time.
+
+        Ray workers run from a session temp directory.  Without this, a relative
+        SQLite URI such as ``sqlite:///mlflow.db`` resolves to a fresh database
+        in the worker's temp dir, silently discarding all logged runs.
+
+        Absolute SQLite URIs (``sqlite:////abs/path``), HTTP(S) URIs, and
+        non-SQLite schemes are passed through unchanged.
+        """
+        if not v.startswith("sqlite:///"):
+            return v
+        rest = v[len("sqlite:///"):]
+        if rest.startswith("/"):
+            return v  # already absolute (sqlite:////abs/path on Unix)
+        # Relative path — resolve against the repo root so the database always
+        # lands next to configs/ and pyproject.toml regardless of CWD.
+        resolved = (_REPO_ROOT / rest).resolve()
+        return f"sqlite:///{resolved}"
 
 
 class _YamlConfigSource(PydanticBaseSettingsSource):

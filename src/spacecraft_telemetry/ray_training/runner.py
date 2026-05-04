@@ -34,13 +34,13 @@ is None) use the unmodified base settings (Hundman defaults).
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Any
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 
 log = get_logger(__name__)
 
@@ -86,63 +86,10 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
     )
 
 
-def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, str]:
-    """Return a mapping of channel_id -> subsystem name.
-
-    Lookup order:
-    1) Processed metadata file:
-       {spark.processed_data_dir}/{mission}/metadata/channel_subsystems.json
-    2) Raw metadata CSV fallback:
-       {data.raw_data_dir}/{mission}/channels.csv
-
-    The processed metadata path keeps training/scoring metadata colocated with
-    processed artifacts. CSV fallback is retained for backward compatibility.
-    """
-    processed_map_path = (
-        Path(str(settings.spark.processed_data_dir))
-        / mission
-        / "metadata"
-        / "channel_subsystems.json"
-    )
-    if processed_map_path.exists():
-        try:
-            loaded = json.loads(processed_map_path.read_text())
-        except json.JSONDecodeError:
-            log.warning(
-                "processed subsystem map is invalid JSON; falling back to channels.csv",
-                path=str(processed_map_path),
-            )
-        else:
-            if isinstance(loaded, dict):
-                processed_mapping = {
-                    str(channel): str(subsystem)
-                    for channel, subsystem in loaded.items()
-                    if str(channel).strip() and str(subsystem).strip()
-                }
-                if processed_mapping:
-                    return processed_mapping
-                log.warning(
-                    "processed subsystem map is empty; falling back to channels.csv",
-                    path=str(processed_map_path),
-                )
-
-    # CSV fallback for compatibility with current preprocessing output.
-    csv_path = Path(str(settings.data.raw_data_dir)) / mission / "channels.csv"
-    if not csv_path.exists():
-        log.warning(
-            "channels.csv not found; tuned_configs will not be applied",
-            path=str(csv_path),
-        )
-        return {}
-    mapping: dict[str, str] = {}
-    with csv_path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            channel = row.get("Channel", "").strip()
-            subsystem = row.get("Subsystem", "").strip()
-            if channel and subsystem:
-                mapping[channel] = subsystem
-    return mapping
+# load_channel_subsystem_map is defined in core.metadata and re-exported here
+# for backward-compatibility with callers that import from ray_training.runner.
+# (ray_training/__init__.py and cli.py import it from here.)
+__all_runner_exports__ = ["load_channel_subsystem_map"]
 
 
 def _with_abs_paths(settings: Settings) -> Settings:

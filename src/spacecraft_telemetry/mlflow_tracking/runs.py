@@ -34,11 +34,39 @@ log = get_logger(__name__)
 def configure_mlflow(settings: Settings) -> None:
     """Apply tracking_uri and registry_uri from Settings to the global MLflow client.
 
-    Call this once at process startup (CLI entrypoint, test fixture) before any
-    open_run() calls.  Individual Ray worker processes call it via _with_abs_paths
-    settings passed through ray.put().
+    **Invariant:** one process, one tracking URI.  Under Ray's worker-reuse
+    model (a worker process handles multiple tasks sequentially), all tasks
+    on the same worker must use the same backend so that runs don't silently
+    land in different databases.  Concurrent tasks from different missions
+    with different URIs would violate this — the second task's
+    ``configure_mlflow`` overwrites the first's global state.
+
+    A warning is emitted if this function is called with a URI that differs
+    from whatever MLflow currently has configured.  This makes the bug
+    observable without raising (the training loop must never abort due to
+    a tracking misconfiguration).
+
+    For the correct invariant, pass a single resolved absolute URI (e.g.
+    ``sqlite:////abs/path/mlflow.db``) to all tasks in a sweep.  The
+    ``_with_abs_paths`` helper in ``runner.py`` ensures this for Ray tasks.
     """
-    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    uri = settings.mlflow.tracking_uri
+    _current = mlflow.get_tracking_uri()
+    # Warn when switching away from a previously configured non-default URI.
+    # Default mlruns/ paths start with "file://" — ignore those to suppress
+    # noise on the very first call in a fresh process.
+    if _current and not _current.startswith("file://") and _current != uri:
+        log.warning(
+            "mlflow.configure.uri_changed",
+            previous=_current,
+            new=uri,
+            note=(
+                "Two distinct tracking URIs in one process. "
+                "Under Ray worker-reuse, runs from different tasks may land "
+                "in different databases. Ensure all tasks share one URI."
+            ),
+        )
+    mlflow.set_tracking_uri(uri)
     if settings.mlflow.registry_uri is not None:
         mlflow.set_registry_uri(settings.mlflow.registry_uri)
 

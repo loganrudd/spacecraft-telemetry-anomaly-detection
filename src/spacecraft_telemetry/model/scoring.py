@@ -20,6 +20,7 @@ log_metrics_final). Never call path.write_bytes() or np.save(path, ...) here.
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -27,6 +28,7 @@ import pandas as pd
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -280,13 +282,11 @@ def score_channel(
         {"window": cfg.threshold_window, "z": cfg.threshold_z}, indent=2
     ).encode()
 
-    # MLflow logging — subsystem lookup is best-effort.
+    # Subsystem lookup — best-effort metadata; never breaks scoring on failure.
+    # load_channel_subsystem_map is in core.metadata (no ray_training dep).
     _subsystem: str | None = None
-    try:
-        from spacecraft_telemetry.ray_training.runner import load_channel_subsystem_map
+    with suppress(Exception):
         _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    except Exception:
-        pass
 
     _extra: dict[str, str] = {"eval_split": eval_split}
     if parent_hpo_run_id is not None:

@@ -35,15 +35,13 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
 )
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
     find_latest_run_for_channel,
 )
-from spacecraft_telemetry.ray_training.runner import (
-    _with_abs_paths,
-    load_channel_subsystem_map,
-)
+from spacecraft_telemetry.ray_training.runner import _with_abs_paths
 
 log = get_logger(__name__)
 

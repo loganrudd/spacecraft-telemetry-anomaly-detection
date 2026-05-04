@@ -27,6 +27,7 @@ import torch.nn as nn
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -114,14 +115,11 @@ def train_channel(
     best_state: dict[str, torch.Tensor] | None = None
     patience_counter = 0
 
-    # Subsystem lookup — lazy import avoids a circular dependency (runner imports
-    # training; training must not import runner at module level).
+    # Subsystem lookup — best-effort metadata; never breaks training on failure.
+    # load_channel_subsystem_map is in core.metadata (no ray_training dep).
     _subsystem: str | None = None
-    try:
-        from spacecraft_telemetry.ray_training.runner import load_channel_subsystem_map
+    with suppress(Exception):
         _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    except Exception:
-        pass
 
     _data_hash: str | None = None
     with suppress(Exception):
