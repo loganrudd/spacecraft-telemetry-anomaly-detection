@@ -58,7 +58,13 @@ ray:
 
 tune:
   num_samples: 20
-  max_concurrent_trials: 2
+  # SQLite supports only one writer at a time.  With max_concurrent_trials > 1,
+  # parallel Ray Tune workers contend for the same mlflow.db write lock and can
+  # produce "database is locked" errors or silent throughput collapse.
+  # Keep this at 1 for local dev.  Cloud deployments should switch
+  # tracking_uri to a PostgreSQL backend (configs/cloud.yaml) which handles
+  # concurrent writers natively.
+  max_concurrent_trials: 1
   parallel_subsystems: false
   max_parallel_subsystems: 2
   hpo_eval_fraction: 0.6
