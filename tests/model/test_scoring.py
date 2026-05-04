@@ -540,3 +540,56 @@ def test_score_channel_errors_npy_unaffected_by_eval_split(
         errors_full, errors_final,
         err_msg="errors.npy must be identical regardless of eval_split",
     )
+
+
+@pytest.mark.slow
+def test_score_channel_writes_tuned_from_run_tag(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """score_channel writes tuned_from_run tag when parent_hpo_run_id is supplied.
+
+    This is the HPO → scoring lineage feature: tune.py looks up the best HPO
+    run and passes its run_id to score_channel so the scoring run records
+    which HPO trial produced its parameters.
+    """
+    import mlflow
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    score_channel(
+        settings,
+        fx.mission,
+        fx.channel,
+        parent_hpo_run_id="test-hpo-run-abc123",
+    )
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "scoring", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"scoring experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags.get("tuned_from_run") == "test-hpo-run-abc123", (
+        f"Expected tuned_from_run='test-hpo-run-abc123', got {tags.get('tuned_from_run')!r}. "
+        "HPO → scoring lineage tag was not written."
+    )
