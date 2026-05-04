@@ -332,3 +332,44 @@ def test_train_channel_subsystem_tag_with_metadata(
         f"Expected subsystem='power', got {tags.get('subsystem')!r}. "
         "subsystem tag was not written from channel_subsystems.json."
     )
+
+
+@pytest.mark.slow
+def test_train_channel_survives_broken_mlflow_uri(
+    tiny_series_parquet: SeriesParquetFixture,
+    tmp_path: Path,
+) -> None:
+    """train_channel returns a TrainingResult even when the MLflow backend is unreachable.
+
+    Phase 7 promise: "Tracking failures are caught and demoted to warnings —
+    the training run completes with filesystem artifacts intact."
+
+    Uses a PostgreSQL URI that nobody is listening on so MLflow's set_experiment
+    call fails.  Both configure_mlflow and open_run are guarded, so training
+    must still produce a well-formed TrainingResult and write model.pt.
+    """
+    from spacecraft_telemetry.core.config import load_settings
+
+    fx = tiny_series_parquet
+    # Point tracking at a PostgreSQL backend that is guaranteed to be unreachable.
+    broken_uri = "postgresql://localhost:9999/nonexistent_mlflow_db"
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": broken_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    result = train_channel(settings, fx.mission, fx.channel)
+
+    # Training must complete — broken MLflow must not abort the loop.
+    assert isinstance(result, TrainingResult), (
+        "train_channel raised instead of returning TrainingResult with broken MLflow URI"
+    )
+    assert result.epochs_run > 0, "No epochs ran — training was aborted"
+    # Filesystem artifacts must still be written (MLflow is not the source of truth here).
+    paths = artifact_paths(settings, fx.mission, fx.channel)
+    assert Path(paths.model).exists(), "model.pt not written with broken MLflow URI"

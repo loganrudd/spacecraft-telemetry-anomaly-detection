@@ -236,7 +236,10 @@ def score_channel(
     cfg = settings.model
     device = resolve_device(cfg.device)
 
-    configure_mlflow(settings)
+    # Guard so a misconfigured tracking URI never aborts scoring (open_run is
+    # also guarded, but configure_mlflow must not raise before we even get there).
+    with suppress(Exception):
+        configure_mlflow(settings)
 
     # Load model from MLflow registry (single source of truth post-A1 pivot).
     name = registered_model_name(cfg.model_type, mission, channel)

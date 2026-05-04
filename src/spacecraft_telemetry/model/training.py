@@ -91,7 +91,10 @@ def train_channel(
     device = resolve_device(settings.model.device)
     cfg = settings.model
 
-    configure_mlflow(settings)
+    # configure_mlflow mutates process-global state; guard so a misconfigured
+    # tracking URI never aborts the training loop (open_run is also guarded).
+    with suppress(Exception):
+        configure_mlflow(settings)
 
     log.info(
         "model.train.start",
