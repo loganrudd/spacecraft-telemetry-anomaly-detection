@@ -547,10 +547,14 @@ class TestRayTuneCommand:
             patch(
                 "spacecraft_telemetry.ray_training.run_hpo_sweep",
                 return_value={
-                    "error_smoothing_window": 10,
-                    "threshold_window": 100,
-                    "threshold_z": 2.5,
-                    "threshold_min_anomaly_len": 2,
+                    "config": {
+                        "error_smoothing_window": 10,
+                        "threshold_window": 100,
+                        "threshold_z": 2.5,
+                        "threshold_min_anomaly_len": 2,
+                    },
+                    "f0_5": 0.75,
+                    "run_id": "fake-run-id",
                 },
             ) as mock_run_one,
             patch("spacecraft_telemetry.ray_training.write_tuned_configs") as mock_write,
@@ -686,10 +690,14 @@ class TestRayTuneCommand:
             patch(
                 "spacecraft_telemetry.ray_training.run_hpo_sweep",
                 return_value={
-                    "error_smoothing_window": 10,
-                    "threshold_window": 100,
-                    "threshold_z": 2.5,
-                    "threshold_min_anomaly_len": 2,
+                    "config": {
+                        "error_smoothing_window": 10,
+                        "threshold_window": 100,
+                        "threshold_z": 2.5,
+                        "threshold_min_anomaly_len": 2,
+                    },
+                    "f0_5": 0.75,
+                    "run_id": "fake-run-id",
                 },
             ),
         ):
@@ -740,10 +748,14 @@ class TestRayTuneCommand:
             patch(
                 "spacecraft_telemetry.ray_training.run_hpo_sweep",
                 return_value={
-                    "error_smoothing_window": 10,
-                    "threshold_window": 100,
-                    "threshold_z": 2.5,
-                    "threshold_min_anomaly_len": 2,
+                    "config": {
+                        "error_smoothing_window": 10,
+                        "threshold_window": 100,
+                        "threshold_z": 2.5,
+                        "threshold_min_anomaly_len": 2,
+                    },
+                    "f0_5": 0.75,
+                    "run_id": "fake-run-id",
                 },
             ),
         ):
@@ -760,3 +772,102 @@ class TestRayTuneCommand:
             )
 
         assert result.exit_code == 0, result.output
+
+
+# ---------------------------------------------------------------------------
+# mlflow group
+# ---------------------------------------------------------------------------
+
+
+class TestMlflowCli:
+    def test_mlflow_promote_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "mlflow", "promote", "--help"])
+        assert result.exit_code == 0
+        assert "--name" in result.output
+        assert "--stage" in result.output
+
+    def test_mlflow_ui_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "mlflow", "ui", "--help"])
+        assert result.exit_code == 0
+        assert "--port" in result.output
+
+    def test_mlflow_promote_resolves_latest_version(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """promote without --version resolves the latest non-archived version."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        mock_version = MagicMock()
+        mock_version.version = "3"
+        mock_version.current_stage = "None"
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.return_value = [mock_version]
+            mock_client.transition_model_version_stage.return_value = None
+
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "mlflow",
+                    "promote",
+                    "--name=telemanom-ESA-Mission1-channel_1",
+                    "--stage=Production",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_client.transition_model_version_stage.assert_called_once_with(
+            name="telemanom-ESA-Mission1-channel_1",
+            version="3",
+            stage="Production",
+        )
+
+    def test_mlflow_promote_no_versions_errors(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """promote should fail with a clear message when no non-archived versions exist."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.return_value = []
+
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "mlflow",
+                    "promote",
+                    "--name=telemanom-ESA-Mission1-channel_1",
+                    "--stage=Production",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "No non-archived versions" in result.output

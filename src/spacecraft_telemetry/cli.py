@@ -974,15 +974,92 @@ def ray_tune(
                     ) from err
                 log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
 
-        existing[subsystem] = best
+        entry: dict[str, Any] = {
+            **best.get("config", {}),
+            "_meta": {
+                "run_id": best.get("run_id"),
+                "f0_5": best.get("f0_5", 0.0),
+            },
+        }
+        existing[subsystem] = entry
         write_tuned_configs(existing, output_path)
 
     click.echo(f"Mission       : {mission}")
     click.echo(f"Channels      : {len(subsystem_channels)}")
     click.echo(f"Subsystem     : {subsystem}")
     click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
-    click.echo(f"Best config   : {best}")
+    click.echo(f"Best config   : {best.get('config', best)}")
     click.echo(f"Output        : {output_path}")
 
 
 main.add_command(ray_group, name="ray")
+
+
+# ---------------------------------------------------------------------------
+# mlflow group
+# ---------------------------------------------------------------------------
+
+
+@click.group()
+def mlflow_group() -> None:
+    """MLflow model registry commands."""
+
+
+@mlflow_group.command("promote")
+@click.option("--name", required=True, help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1).")
+@click.option("--version", "model_version", type=int, default=None, help="Model version number. Defaults to latest non-archived version.")
+@click.option(
+    "--stage",
+    required=True,
+    type=click.Choice(["Staging", "Production", "Archived"]),
+    help="Target stage for the model version.",
+)
+@click.pass_context
+def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
+    """Promote a registered model version to Staging, Production, or Archived."""
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    settings: Settings = ctx.obj["settings"]
+    tracking_uri = settings.mlflow.tracking_uri
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient(tracking_uri=tracking_uri)
+
+    if model_version is None:
+        versions = client.search_model_versions(f"name='{name}'")
+        active = [v for v in versions if v.current_stage != "Archived"]
+        if not active:
+            raise click.ClickException(f"No non-archived versions found for model '{name}'.")
+        model_version = max(int(v.version) for v in active)
+        click.echo(f"Resolved latest non-archived version: {model_version}")
+
+    client.transition_model_version_stage(name=name, version=str(model_version), stage=stage)
+    click.echo(f"Model         : {name}")
+    click.echo(f"Version       : {model_version}")
+    click.echo(f"Stage         : {stage}")
+    click.echo(f"Tracking URI  : {tracking_uri}")
+
+
+@mlflow_group.command("ui")
+@click.option("--port", type=int, default=5001, show_default=True, help="Port to serve MLflow UI on.")
+@click.pass_context
+def mlflow_ui(ctx: click.Context, port: int) -> None:
+    """Launch the MLflow UI against the configured tracking store.
+
+    Uses MLFLOW_TRACKING_URI from settings so you don't have to remember the
+    backend-store path. Defaults to port 5001 (port 5000 is reserved by
+    AirPlay Receiver on macOS Monterey+).
+    """
+    import os
+
+    settings: Settings = ctx.obj["settings"]
+    tracking_uri = settings.mlflow.tracking_uri
+    click.echo(f"Tracking URI  : {tracking_uri}")
+    click.echo(f"Port          : {port}")
+    os.execvp(
+        "mlflow",
+        ["mlflow", "ui", "--backend-store-uri", tracking_uri, "--port", str(port)],
+    )
+
+
+main.add_command(mlflow_group, name="mlflow")
