@@ -33,6 +33,9 @@ from ray import tune
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.mlflow_tracking.conventions import (
+    experiment_name as _mlflow_experiment_name,
+)
 from spacecraft_telemetry.ray_training.runner import (
     _with_abs_paths,
     load_channel_subsystem_map,
@@ -219,11 +222,13 @@ def run_hpo_sweep(
     settings: Settings,
     mission: str,
 ) -> dict[str, Any]:
-    """Run a Tune experiment for one subsystem; return the best config dict.
+    """Run a Tune experiment for one subsystem; return result dict.
 
     Uses HyperOptSearch (Bayesian optimisation) with FIFOScheduler. Each trial
     is a single scoring pass (~50ms) so ASHA's early-stopping is a no-op here.
-    Trial results are logged to MLflow via MLflowLoggerCallback.
+    All trials land in a single per-mission MLflow experiment
+    (``{model_type}-hpo-{mission}``) with subsystem stored as a tag so that
+    training, scoring, and HPO runs for a mission are browseable together.
 
     Args:
         subsystem: Subsystem name, e.g. "subsystem_1".
@@ -232,7 +237,10 @@ def run_hpo_sweep(
         mission:   Mission name, e.g. "ESA-Mission1".
 
     Returns:
-        Dict of the 4 scoring params from the best trial configuration.
+        Dict with keys:
+        - ``"config"``  — best scoring-param dict (4 keys from SEARCH_SPACE).
+        - ``"f0_5"``    — best F0.5 achieved over the HPO portion.
+        - ``"run_id"``  — MLflow run ID of the best trial (None if unavailable).
     """
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
@@ -243,6 +251,9 @@ def run_hpo_sweep(
             "Ray is not initialized. Initialize Ray in the caller (CLI _ray_session "
             "or test fixture) before calling run_hpo_sweep()."
         )
+
+    cfg = settings.model
+    _exp_name = _mlflow_experiment_name(cfg.model_type, "hpo", mission)
 
     log.info(
         "tune.sweep.start",
@@ -281,8 +292,15 @@ def run_hpo_sweep(
             verbose=0,
             callbacks=[
                 MLflowLoggerCallback(
-                    experiment_name=f"hpo-{subsystem}",
+                    experiment_name=_exp_name,
                     tracking_uri=settings.mlflow.tracking_uri,
+                    tags={
+                        "subsystem": subsystem,
+                        "eval_split": "hpo_portion",
+                        "model_type": cfg.model_type,
+                        "mission_id": mission,
+                        "phase": "hpo",
+                    },
                     save_artifact=False,
                 ),
             ],
@@ -295,13 +313,33 @@ def run_hpo_sweep(
     best_config: dict[str, Any] = best.config or {}
     best_f0_5: float = (best.metrics or {}).get("f0_5", 0.0)
 
+    # Look up the MLflow run ID for the best trial so score_channel can record
+    # lineage via the tuned_from_run tag (Step 5 / runner.py).
+    best_run_id: str | None = None
+    try:
+        import mlflow as _mlflow
+        _client = _mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+        _exp = _client.get_experiment_by_name(_exp_name)
+        if _exp:
+            _runs = _client.search_runs(
+                [_exp.experiment_id],
+                filter_string=f"tags.subsystem = '{subsystem}'",
+                order_by=["metrics.f0_5 DESC"],
+                max_results=1,
+            )
+            if _runs:
+                best_run_id = _runs[0].info.run_id
+    except Exception:
+        pass
+
     log.info(
         "tune.sweep.end",
         subsystem=subsystem,
         best_f0_5=round(best_f0_5, 4),
         best_config=best_config,
+        best_run_id=best_run_id,
     )
-    return best_config
+    return {"config": best_config, "f0_5": best_f0_5, "run_id": best_run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +408,16 @@ def run_all_sweeps(
         write_tuned_configs({}, output)
         return output
 
+    def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
+        """Convert run_hpo_sweep result to the on-disk tuned_configs entry."""
+        return {
+            **sweep_result.get("config", {}),
+            "_meta": {
+                "run_id": sweep_result.get("run_id"),
+                "f0_5": sweep_result.get("f0_5", 0.0),
+            },
+        }
+
     sweep_results: dict[str, dict[str, Any]] = {}
     if settings.tune.parallel_subsystems and len(eligible) > 1:
         max_workers = min(settings.tune.max_parallel_subsystems, len(eligible))
@@ -380,10 +428,10 @@ def run_all_sweeps(
             }
             for future in concurrent.futures.as_completed(futures):
                 subsystem = futures[future]
-                sweep_results[subsystem] = future.result()
+                sweep_results[subsystem] = _to_entry(future.result())
     else:
         for sub, sub_channels in eligible.items():
-            sweep_results[sub] = run_hpo_sweep(sub, sub_channels, settings, mission)
+            sweep_results[sub] = _to_entry(run_hpo_sweep(sub, sub_channels, settings, mission))
 
     write_tuned_configs(sweep_results, output)
     return output
@@ -393,17 +441,24 @@ def write_tuned_configs(
     results: dict[str, dict[str, Any]],
     output_path: Path,
 ) -> None:
-    """Write subsystem → best_config mapping as JSON.
+    """Write subsystem → config mapping as JSON.
 
-    The output schema matches what score_all_channels() reads in Phase 5b::
+    Schema (written by run_all_sweeps, read by score_all_channels)::
 
         {
-            "subsystem_1": {"threshold_z": 2.8, "threshold_window": 200, ...},
-            "subsystem_6": {"threshold_z": 3.2, "error_smoothing_window": 40, ...}
+            "subsystem_1": {
+                "threshold_z": 2.8, "threshold_window": 200,
+                "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
+                "_meta": {"run_id": "abc123...", "f0_5": 0.72}
+            }
         }
 
+    ``_meta`` is filtered out by score_all_channels before applying overrides
+    (not in _TUNABLE_SCORING_FIELDS). score_channel reads ``_meta.run_id`` to
+    set the ``tuned_from_run`` MLflow tag for HPO → scoring run lineage.
+
     Args:
-        results:     Dict keyed by subsystem name → best config dict.
+        results:     Dict keyed by subsystem name → entry dict (params + _meta).
         output_path: Destination path for tuned_configs.json.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -32,6 +32,26 @@ def test_write_tuned_configs_writes_json(tmp_path: Path) -> None:
     assert json.loads(out.read_text()) == payload
 
 
+def test_write_tuned_configs_roundtrips_meta(tmp_path: Path) -> None:
+    """write_tuned_configs preserves the _meta block for HPO lineage tracking."""
+    from spacecraft_telemetry.ray_training.tune import write_tuned_configs
+
+    out = tmp_path / "tuned_configs.json"
+    payload = {
+        "subsystem_1": {
+            "threshold_z": 2.8,
+            "threshold_window": 200,
+            "error_smoothing_window": 25,
+            "threshold_min_anomaly_len": 3,
+            "_meta": {"run_id": "abc123", "f0_5": 0.72},
+        }
+    }
+    write_tuned_configs(payload, out)
+    loaded = json.loads(out.read_text())
+    assert loaded["subsystem_1"]["_meta"]["run_id"] == "abc123"
+    assert loaded["subsystem_1"]["_meta"]["f0_5"] == pytest.approx(0.72)
+
+
 def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Preparation should fail fast on labels/errors shape mismatch."""
     from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
@@ -165,10 +185,14 @@ def test_run_all_sweeps_filters_and_runs(
     def _fake_run_hpo_sweep(subsystem: str, channels: list[str], *_args, **_kwargs):
         calls.append((subsystem, channels))
         return {
-            "error_smoothing_window": 10,
-            "threshold_window": 100,
-            "threshold_z": 2.5,
-            "threshold_min_anomaly_len": 2,
+            "config": {
+                "error_smoothing_window": 10,
+                "threshold_window": 100,
+                "threshold_z": 2.5,
+                "threshold_min_anomaly_len": 2,
+            },
+            "f0_5": 0.75,
+            "run_id": "fake-run-id-abc",
         }
 
     monkeypatch.setattr(
@@ -181,6 +205,12 @@ def test_run_all_sweeps_filters_and_runs(
     loaded = json.loads(out.read_text())
     assert list(loaded) == ["subsystem_1"]
     assert calls == [("subsystem_1", ["channel_1"])]
+    entry = loaded["subsystem_1"]
+    assert entry["error_smoothing_window"] == 10
+    assert entry["threshold_z"] == 2.5
+    assert "_meta" in entry
+    assert entry["_meta"]["run_id"] == "fake-run-id-abc"
+    assert entry["_meta"]["f0_5"] == pytest.approx(0.75)
 
 
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:

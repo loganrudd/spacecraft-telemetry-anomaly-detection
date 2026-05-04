@@ -15,14 +15,19 @@ score_all_channels(settings, mission, channels, *, max_channels=None,
 
 tuned_configs schema (Phase 6 writes, score_all_channels reads)
 ---------------------------------------------------------------
-A dict keyed by subsystem name mapping to a dict of ModelConfig scoring field
-overrides. Any subset of the four scoring fields is accepted:
+A dict keyed by subsystem name. Each entry contains scoring-param overrides
+and a ``_meta`` block written by run_all_sweeps:
 
     {
-        "subsystem_1": {"threshold_z": 2.8, "threshold_window": 200},
-        "subsystem_6": {"threshold_z": 3.2, "error_smoothing_window": 40}
+        "subsystem_1": {
+            "threshold_z": 2.8, "threshold_window": 200,
+            "_meta": {"run_id": "abc123...", "f0_5": 0.72}
+        }
     }
 
+``_meta`` is stripped before applying overrides to ModelConfig (not in
+_TUNABLE_SCORING_FIELDS). ``_meta.run_id`` is passed to score_channel as
+``parent_hpo_run_id`` to set the ``tuned_from_run`` MLflow lineage tag.
 Channels whose subsystem has no entry in tuned_configs (or when tuned_configs
 is None) use the unmodified base settings (Hundman defaults).
 """
@@ -309,6 +314,19 @@ def score_all_channels(
             settings_refs[subsystem] = ray.put(tuned_settings)
         return settings_refs[subsystem]
 
+    def _get_hpo_run_id(channel: str) -> str | None:
+        """Return the HPO MLflow run_id for this channel's subsystem, or None."""
+        if not tuned_configs:
+            return None
+        subsystem = ch_to_sub.get(channel)
+        if not subsystem:
+            return None
+        meta = tuned_configs.get(subsystem, {}).get("_meta")
+        if not meta or not isinstance(meta, dict):
+            return None
+        run_id = meta.get("run_id")
+        return str(run_id) if run_id is not None else None
+
     # Tuned-config scoring is evaluated on the held-out final portion to avoid
     # the HPO/eval leakage fixed in Phase 7 Step 3. Untuned scoring uses the
     # full test set for backward-compatible baseline metrics.
@@ -319,7 +337,7 @@ def score_all_channels(
         max_retries=settings.ray.max_retries,
     )
     futures = [
-        score_task.remote(_get_settings_ref(ch), mission, ch, eval_split)
+        score_task.remote(_get_settings_ref(ch), mission, ch, eval_split, _get_hpo_run_id(ch))
         for ch in work
     ]
     results: list[dict[str, Any]] = ray.get(futures)
