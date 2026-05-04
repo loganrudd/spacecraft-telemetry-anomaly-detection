@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import time
 import warnings
 from contextlib import suppress
 from pathlib import Path
@@ -284,6 +285,11 @@ def run_hpo_sweep(
         channel_data=channel_data,
     )
 
+    # Capture the wall-clock time just before launching the sweep.  Used below
+    # to scope the MLflow run search to trials from *this* sweep only, so that
+    # re-runs don't accidentally return the best run from a previous sweep.
+    _sweep_start_ms = int(time.time() * 1000)
+
     tuner = tune.Tuner(
         trial_fn,
         param_space=SEARCH_SPACE,
@@ -323,6 +329,8 @@ def run_hpo_sweep(
 
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
+    # Scoped to runs from this sweep only (start_time >= _sweep_start_ms) so
+    # that re-runs don't pick up the all-time best from a previous sweep.
     best_run_id: str | None = None
     with suppress(Exception):
         import mlflow as _mlflow
@@ -331,7 +339,10 @@ def run_hpo_sweep(
         if _exp:
             _runs = _client.search_runs(
                 [_exp.experiment_id],
-                filter_string=f"tags.subsystem = '{subsystem}'",
+                filter_string=(
+                    f"tags.subsystem = '{subsystem}'"
+                    f" and attributes.start_time >= {_sweep_start_ms}"
+                ),
                 order_by=["metrics.f0_5 DESC"],
                 max_results=1,
             )
