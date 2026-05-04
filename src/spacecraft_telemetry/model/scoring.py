@@ -12,6 +12,9 @@ Pipeline:
     thresh   = dynamic_threshold(smoothed, window, z)
     flags    = flag_anomalies(smoothed, thresh, min_run_length)
     metrics  = evaluate(window_is_anomaly, flags)
+
+Artifact I/O: all writes go through MLflow logging APIs (log_artifact_bytes,
+log_metrics_final). Never call path.write_bytes() or np.save(path, ...) here.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     log_metrics_final,
     log_params,
     open_run,
+    registered_model_name,
 )
 
 if TYPE_CHECKING:
@@ -222,20 +226,21 @@ def score_channel(
     from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
     from spacecraft_telemetry.model.io import (
-        artifact_paths,
-        load_model,
-        save_errors,
-        save_metrics,
-        save_threshold,
+        errors_to_bytes,
+        load_model_for_scoring,
+        threshold_to_bytes,
     )
 
     cfg = settings.model
     device = resolve_device(cfg.device)
-    paths = artifact_paths(settings, mission, channel)
 
     configure_mlflow(settings)
 
-    model, _, saved_window_size = load_model(paths, device)
+    # Load model from MLflow registry (single source of truth post-A1 pivot).
+    name = registered_model_name(cfg.model_type, mission, channel)
+    model, saved_window_size = load_model_for_scoring(
+        name, device, settings.mlflow.tracking_uri
+    )
     if cfg.window_size != saved_window_size:
         raise ValueError(
             f"settings.model.window_size={cfg.window_size} does not match the "
@@ -268,14 +273,12 @@ def score_channel(
 
     metrics = evaluate(eval_true, eval_pred)
 
-    # Filesystem saves — smoothed (errors) uses the full array always.
-    save_errors(paths, smoothed)
-    save_threshold(
-        paths,
-        threshold,
-        {"window": cfg.threshold_window, "z": cfg.threshold_z},
-    )
-    save_metrics(paths, metrics)
+    # Serialise numpy artifacts for MLflow logging (all writes inside open_run).
+    _errors_bytes = errors_to_bytes(smoothed)
+    _threshold_bytes = threshold_to_bytes(threshold)
+    _threshold_config_bytes = json.dumps(
+        {"window": cfg.threshold_window, "z": cfg.threshold_z}, indent=2
+    ).encode()
 
     # MLflow logging — subsystem lookup is best-effort.
     _subsystem: str | None = None
@@ -308,6 +311,9 @@ def score_channel(
             "eval_split": eval_split,
         })
         log_metrics_final({k: float(v) for k, v in metrics.items()})
+        log_artifact_bytes(_errors_bytes, "errors.npy")
+        log_artifact_bytes(_threshold_bytes, "threshold.npy")
+        log_artifact_bytes(_threshold_config_bytes, "threshold_config.json")
         log_artifact_bytes(
             json.dumps(metrics, indent=2).encode(),
             "metrics/metrics.json",

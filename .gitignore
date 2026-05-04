@@ -42,6 +42,7 @@ models/
 # MLflow
 mlruns/
 mlartifacts/
+mlflow*.db
 
 # Spark
 spark-warehouse/

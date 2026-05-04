@@ -104,6 +104,21 @@ def log_metrics_final(metrics: dict[str, float]) -> None:
         mlflow.log_metrics(metrics)
 
 
+def log_dict(data: Any, artifact_file: str) -> None:
+    """Log a dict or list as a JSON/YAML artifact in the active run.
+
+    The format is inferred from the file extension (.json or .yaml/.yml).
+    No-op when there is no active run.
+
+    Args:
+        data:          JSON-serialisable Python dict or list.
+        artifact_file: Destination filename within the run's artifact root,
+                       e.g. "train_log.json" or "normalization_params.json".
+    """
+    if mlflow.active_run() is not None:
+        mlflow.log_dict(data, artifact_file)
+
+
 def log_artifact_bytes(data: bytes, artifact_file: str) -> None:
     """Write bytes as a named artifact in the active run.
 

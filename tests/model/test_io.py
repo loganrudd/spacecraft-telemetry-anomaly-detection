@@ -1,152 +1,167 @@
-"""Tests for model.io — save/load round-trip, architecture-from-config, discipline check."""
+"""Tests for model.io — MLflow-backed artifact helpers.
+
+After the A1 pivot, model/io.py is a thin MLflow client wrapper.
+Tests cover:
+- errors_to_bytes / bytes_to_errors round-trip (serialisation helpers).
+- threshold_to_bytes round-trip.
+- download_artifact_bytes — fetches a run artifact via MlflowClient.
+- find_latest_run_for_channel — returns the most recent run for a channel.
+- load_model_for_scoring — loads a registered model + window_size from registry.
+- Discipline check: training.py and scoring.py must not call raw filesystem IO.
+"""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from spacecraft_telemetry.core.config import ModelConfig, Settings  # noqa: E402
-from spacecraft_telemetry.model.architecture import build_model  # noqa: E402
+import mlflow  # noqa: E402
+
 from spacecraft_telemetry.model.io import (  # noqa: E402
-    ModelArtifactPaths,
-    _read_bytes,
-    _write_bytes,
-    artifact_paths,
-    load_model,
-    save_model,
-    save_train_log,
+    bytes_to_errors,
+    download_artifact_bytes,
+    errors_to_bytes,
+    find_latest_run_for_channel,
+    load_model_for_scoring,
+    threshold_to_bytes,
 )
 
-# ---------------------------------------------------------------------------
-# _write_bytes / _read_bytes
-# ---------------------------------------------------------------------------
-
-
-def test_write_bytes_creates_parent_dirs(tmp_path: Path) -> None:
-    target = tmp_path / "a" / "b" / "c" / "data.bin"
-    _write_bytes(target, b"hello")
-    assert target.read_bytes() == b"hello"
-
-
-def test_read_bytes_round_trips(tmp_path: Path) -> None:
-    p = tmp_path / "file.bin"
-    _write_bytes(p, b"\x00\x01\x02")
-    assert _read_bytes(p) == b"\x00\x01\x02"
-
 
 # ---------------------------------------------------------------------------
-# artifact_paths
+# Serialisation helpers
 # ---------------------------------------------------------------------------
 
 
-def test_artifact_paths_layout(tmp_path: Path) -> None:
-    settings = Settings(model=ModelConfig(artifacts_dir=tmp_path / "models"))
-    paths = artifact_paths(settings, "ESA-Mission1", "channel_1")
-    root = tmp_path / "models" / "ESA-Mission1" / "channel_1"
-    assert Path(paths.model) == root / "model.pt"
-    assert Path(paths.config) == root / "model_config.json"
-    assert Path(paths.threshold) == root / "threshold.npy"
-    assert Path(paths.threshold_config) == root / "threshold_config.json"
-    assert Path(paths.train_log) == root / "train_log.json"
+def test_errors_round_trip() -> None:
+    """errors_to_bytes / bytes_to_errors must round-trip without data loss."""
+    original = np.array([0.1, 0.5, 1.2, 0.0, 3.7], dtype=np.float64)
+    data = errors_to_bytes(original)
+    recovered = bytes_to_errors(data)
+    np.testing.assert_array_equal(original, recovered)
+
+
+def test_threshold_to_bytes_round_trip() -> None:
+    """threshold_to_bytes must produce .npy-compatible bytes."""
+    original = np.linspace(0.0, 1.0, 20, dtype=np.float64)
+    data = threshold_to_bytes(original)
+    recovered = np.load(__import__("io").BytesIO(data))
+    np.testing.assert_array_equal(original, recovered)
+
+
+def test_errors_to_bytes_returns_bytes() -> None:
+    arr = np.zeros(5, dtype=np.float32)
+    assert isinstance(errors_to_bytes(arr), bytes)
 
 
 # ---------------------------------------------------------------------------
-# save_model / load_model round-trip
+# MLflow helpers — require an isolated tracking backend
 # ---------------------------------------------------------------------------
 
 
-def test_save_then_load_round_trip(tmp_path: Path) -> None:
-    cfg = ModelConfig(hidden_dim=16, num_layers=2)
+@pytest.fixture()
+def _mlflow_uri(tmp_path: Path):
+    """Isolated per-test SQLite MLflow backend."""
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    mlflow.set_tracking_uri(uri)
+    yield uri
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
+
+
+def _log_artifact_in_run(tracking_uri: str, channel: str, artifact_name: str, data: bytes) -> str:
+    """Helper: open a run tagged with channel_id, log an artifact, return run_id."""
+    import tempfile
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment("test-experiment")
+    with mlflow.start_run(tags={"channel_id": channel}) as run:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / artifact_name
+            p.write_bytes(data)
+            mlflow.log_artifact(str(p))
+    return run.info.run_id
+
+
+def test_download_artifact_bytes_retrieves_data(_mlflow_uri: str) -> None:
+    """download_artifact_bytes must return the exact bytes that were logged."""
+    payload = b"hello artifact"
+    run_id = _log_artifact_in_run(_mlflow_uri, "channel_1", "test.bin", payload)
+    result = download_artifact_bytes(run_id, "test.bin", _mlflow_uri)
+    assert result == payload
+
+
+def test_find_latest_run_for_channel_returns_most_recent(_mlflow_uri: str) -> None:
+    """find_latest_run_for_channel must return the last run for a channel."""
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-scoring")
+    with mlflow.start_run(tags={"channel_id": "channel_1"}):
+        mlflow.log_metric("step", 1)
+    with mlflow.start_run(tags={"channel_id": "channel_1"}) as run2:
+        mlflow.log_metric("step", 2)
+
+    found = find_latest_run_for_channel("test-scoring", "channel_1", _mlflow_uri)
+    assert found is not None
+    assert found.info.run_id == run2.info.run_id
+
+
+def test_find_latest_run_for_channel_returns_none_for_missing(_mlflow_uri: str) -> None:
+    """find_latest_run_for_channel returns None when no run exists for the channel."""
+    result = find_latest_run_for_channel("nonexistent-experiment", "channel_1", _mlflow_uri)
+    assert result is None
+
+
+def test_find_latest_run_for_channel_returns_none_when_channel_absent(_mlflow_uri: str) -> None:
+    """Returns None when the experiment exists but no run is tagged for the channel."""
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-scoring-2")
+    with mlflow.start_run(tags={"channel_id": "channel_2"}):
+        pass
+
+    result = find_latest_run_for_channel("test-scoring-2", "channel_1", _mlflow_uri)
+    assert result is None
+
+
+def test_load_model_for_scoring_returns_model_and_window_size(_mlflow_uri: str) -> None:
+    """load_model_for_scoring returns (model, window_size) from the registry."""
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, window_size=20)
     model = build_model(cfg)
+
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-training")
+    with mlflow.start_run():
+        mlflow.log_param("window_size", str(cfg.window_size))
+        mlflow.pytorch.log_model(
+            pytorch_model=model,
+            artifact_path="model",
+            registered_model_name="test-model",
+        )
+
+    device = torch.device("cpu")
+    loaded_model, window_size = load_model_for_scoring("test-model", device, _mlflow_uri)
+    assert window_size == 20
     model.eval()
-
-    root = tmp_path / "models" / "ESA-Mission1" / "channel_1"
-    paths = ModelArtifactPaths(
-        root=root,
-        model=root / "model.pt",
-        config=root / "model_config.json",
-        norm=root / "normalization_params.json",
-        errors=root / "errors.npy",
-        threshold=root / "threshold.npy",
-        threshold_config=root / "threshold_config.json",
-        metrics=root / "metrics.json",
-        train_log=root / "train_log.json",
-    )
-
-    save_model(model, paths, cfg, window_size=10)
-    assert Path(paths.model).exists()
-    assert Path(paths.config).exists()
-
-    loaded_model, loaded_cfg, loaded_window_size = load_model(paths, torch.device("cpu"))
     loaded_model.eval()
-
-    x = torch.zeros(2, 10, 1)
+    x = torch.zeros(2, cfg.window_size, 1)
     with torch.no_grad():
-        assert torch.equal(model(x), loaded_model(x))
-
-    assert loaded_cfg.hidden_dim == cfg.hidden_dim
-    assert loaded_cfg.num_layers == cfg.num_layers
-    assert loaded_window_size == 10
+        np.testing.assert_allclose(
+            model(x).numpy(), loaded_model(x).numpy(), rtol=1e-5
+        )
 
 
-def test_load_model_uses_saved_architecture_not_current_settings(
-    tmp_path: Path,
-) -> None:
-    """Model trained at hidden_dim=16 must reload as hidden_dim=16 even if
-    the current ModelConfig default is different."""
-    saved_cfg = ModelConfig(hidden_dim=16, num_layers=1, dropout=0.0)
-    model = build_model(saved_cfg)
-
-    root = tmp_path / "arts"
-    paths = ModelArtifactPaths(
-        root=root,
-        model=root / "model.pt",
-        config=root / "model_config.json",
-        norm=root / "normalization_params.json",
-        errors=root / "errors.npy",
-        threshold=root / "threshold.npy",
-        threshold_config=root / "threshold_config.json",
-        metrics=root / "metrics.json",
-        train_log=root / "train_log.json",
-    )
-    save_model(model, paths, saved_cfg, window_size=250)
-
-    # Reload — current ModelConfig default has hidden_dim=80 (the class default).
-    loaded_model, loaded_cfg, loaded_window_size = load_model(paths, torch.device("cpu"))
-    assert loaded_model.hidden_dim == 16
-    assert loaded_cfg.hidden_dim == 16
-    assert loaded_window_size == 250
-
-
-# ---------------------------------------------------------------------------
-# save_train_log
-# ---------------------------------------------------------------------------
-
-
-def test_save_train_log_writes_json(tmp_path: Path) -> None:
-    import json
-
-    root = tmp_path / "arts"
-    paths = ModelArtifactPaths(
-        root=root,
-        model=root / "model.pt",
-        config=root / "model_config.json",
-        norm=root / "normalization_params.json",
-        errors=root / "errors.npy",
-        threshold=root / "threshold.npy",
-        threshold_config=root / "threshold_config.json",
-        metrics=root / "metrics.json",
-        train_log=root / "train_log.json",
-    )
-    entries = [{"epoch": 0, "train_loss": 0.5, "val_loss": 0.4}]
-    save_train_log(paths, entries)
-
-    written = json.loads(Path(paths.train_log).read_bytes())
-    assert written == entries
+def test_load_model_for_scoring_raises_when_no_version(_mlflow_uri: str) -> None:
+    """load_model_for_scoring raises RuntimeError when no registered versions exist."""
+    mlflow.set_tracking_uri(_mlflow_uri)
+    with pytest.raises(RuntimeError, match="No registered versions found"):
+        load_model_for_scoring("nonexistent-model", torch.device("cpu"), _mlflow_uri)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +215,7 @@ def _check_no_raw_io(source_path: Path) -> list[str]:
 
 
 def test_no_direct_filesystem_writes_in_training_or_scoring() -> None:
-    """training.py and scoring.py must funnel all writes through model.io."""
+    """training.py and scoring.py must funnel all writes through MLflow APIs."""
     src = Path(__file__).parents[2] / "src" / "spacecraft_telemetry" / "model"
     violations: list[str] = []
     for module in ("training.py", "scoring.py"):
@@ -208,6 +223,6 @@ def test_no_direct_filesystem_writes_in_training_or_scoring() -> None:
         if path.exists():
             violations.extend(_check_no_raw_io(path))
     assert not violations, (
-        "Raw filesystem writes found — use model.io helpers instead:\n"
+        "Raw filesystem writes found — use MLflow logging APIs instead:\n"
         + "\n".join(violations)
     )

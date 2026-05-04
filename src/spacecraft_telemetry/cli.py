@@ -576,15 +576,12 @@ def model_train(
 
     result = train_channel(settings, mission, channel)
 
-    from spacecraft_telemetry.model.io import artifact_paths
-    paths = artifact_paths(settings, mission, channel)
-
     click.echo(f"Mission      : {mission}")
     click.echo(f"Channel      : {channel}")
     click.echo(f"Epochs run   : {result.epochs_run}")
     click.echo(f"Best epoch   : {result.best_epoch}")
     click.echo(f"Best val loss: {result.best_val_loss:.6f}")
-    click.echo(f"Artifacts    : {paths.root}")
+    click.echo(f"MLflow URI   : {settings.mlflow.tracking_uri}")
 
 
 @model.command("score")

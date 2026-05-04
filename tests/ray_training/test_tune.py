@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 
@@ -58,24 +57,30 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
 
     settings = load_settings("test")
 
-    class _Paths:
-        errors = "fake-errors.npy"
+    # 3-element errors array.
+    _errors_bytes = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    import io as _io
+    _buf = _io.BytesIO()
+    np.save(_buf, _errors_bytes)
+    _raw = _buf.getvalue()
 
-    def _fake_artifact_paths(*_args, **_kwargs):
-        return _Paths()
+    class _FakeRun:
+        class info:
+            run_id = "fake-run-id"
 
-    def _fake_read_bytes(*_args, **_kwargs):
-        arr = np.array([0.1, 0.2, 0.3], dtype=np.float64)
-        buf = io.BytesIO()
-        np.save(buf, arr)
-        return buf.getvalue()
-
-    def _fake_labels(*_args, **_kwargs):
-        return np.array([True, False], dtype=np.bool_)
-
-    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
-    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
-    monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        lambda *_args, **_kwargs: _raw,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.model.dataset.load_window_labels",
+        # 2-element labels — shape mismatch with 3-element errors.
+        lambda *_args, **_kwargs: np.array([True, False], dtype=np.bool_),
+    )
 
     with pytest.raises(ValueError, match="input mismatch"):
         _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
@@ -142,6 +147,11 @@ def test_run_all_sweeps_no_eligible_writes_empty(
         "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
         lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
     )
+    # No scoring run exists for any channel → all channels ineligible.
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: None,
+    )
 
     out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
     assert out.exists()
@@ -154,7 +164,6 @@ def test_run_all_sweeps_filters_and_runs(
     """run_all_sweeps should run only eligible scored channels per subsystem."""
     import ray
 
-    from spacecraft_telemetry.model.io import artifact_paths
     from spacecraft_telemetry.ray_training.tune import run_all_sweeps
 
     base_settings = load_settings("test")
@@ -165,12 +174,19 @@ def test_run_all_sweeps_filters_and_runs(
         }
     )
 
-    # Only channel_1 is scored.
-    ch1 = artifact_paths(settings, "ESA-Mission1", "channel_1").errors
-    Path(str(ch1)).parent.mkdir(parents=True, exist_ok=True)
-    Path(str(ch1)).write_bytes(b"not_used_by_this_test")
+    # channel_1 has a scoring run in MLflow; channel_2 and channel_3 do not.
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    def _fake_find_latest_run(exp: str, ch: str, uri: str):
+        return _FakeRun() if ch == "channel_1" else None
 
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        _fake_find_latest_run,
+    )
     monkeypatch.setattr(
         "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
         lambda *_args, **_kwargs: {
@@ -221,23 +237,27 @@ def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
     n_total = 10
     expected_n = int(n_total * settings.tune.hpo_eval_fraction)  # floor(10 * 0.6) = 6
 
-    class _Paths:
-        errors = "fake-errors.npy"
+    import io as _io
+    _buf = _io.BytesIO()
+    np.save(_buf, np.ones(n_total, dtype=np.float64))
+    _raw = _buf.getvalue()
 
-    def _fake_artifact_paths(*_args, **_kwargs):
-        return _Paths()
+    class _FakeRun:
+        class info:
+            run_id = "fake-run-id"
 
-    def _fake_read_bytes(*_args, **_kwargs):
-        buf = io.BytesIO()
-        np.save(buf, np.ones(n_total, dtype=np.float64))
-        return buf.getvalue()
-
-    def _fake_labels(*_args, **_kwargs):
-        return np.ones(n_total, dtype=np.bool_)  # anomalies in both halves
-
-    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
-    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
-    monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        lambda *_args, **_kwargs: _raw,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.model.dataset.load_window_labels",
+        lambda *_args, **_kwargs: np.ones(n_total, dtype=np.bool_),
+    )
 
     result = _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
 
@@ -254,24 +274,28 @@ def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -
     settings = load_settings("test")  # hpo_eval_fraction = 0.6
     n_total = 10  # HPO: first 6, held-out: last 4
 
-    class _Paths:
-        errors = "fake-errors.npy"
+    import io as _io
+    _buf = _io.BytesIO()
+    np.save(_buf, np.ones(n_total, dtype=np.float64))
+    _raw = _buf.getvalue()
 
-    def _fake_artifact_paths(*_args, **_kwargs):
-        return _Paths()
-
-    def _fake_read_bytes(*_args, **_kwargs):
-        buf = io.BytesIO()
-        np.save(buf, np.ones(n_total, dtype=np.float64))
-        return buf.getvalue()
+    class _FakeRun:
+        class info:
+            run_id = "fake-run-id"
 
     def _fake_labels(*_args, **_kwargs):
         labels = np.zeros(n_total, dtype=np.bool_)
         labels[:6] = True  # all anomalies in HPO portion, none in held-out tail
         return labels
 
-    monkeypatch.setattr("spacecraft_telemetry.model.io.artifact_paths", _fake_artifact_paths)
-    monkeypatch.setattr("spacecraft_telemetry.model.io._read_bytes", _fake_read_bytes)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        lambda *_args, **_kwargs: _raw,
+    )
     monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
 
     with pytest.warns(UserWarning, match="Held-out portion"):
