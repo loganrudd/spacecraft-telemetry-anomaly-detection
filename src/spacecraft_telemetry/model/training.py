@@ -5,18 +5,21 @@ Entrypoint: train_channel(settings, mission, channel) -> TrainingResult
 Follows the Explore → Plan → Execute discipline:
 - Reads per-timestep series Parquet written by Phase 2 Spark pipeline (Plan 002.5).
 - Trains a TelemanomLSTM with early stopping on the val split.
-- Persists model weights, architecture config, and per-epoch loss log via model.io.
-- Logs the run, per-epoch metrics, and a registered model version to MLflow.
+- Logs model artifacts, normalization params, and per-epoch losses to MLflow.
+  MLflow is the single source of truth — no filesystem artifact copies.
 
-All artifact writes go through model.io — never call path.write_bytes() or
-torch.save(path) directly here. See model/io.py for the Phase 5 swap rationale.
+All artifact writes go through MLflow logging APIs (mlflow.log_dict,
+log_artifact_bytes, mlflow.pytorch.log_model via register_pytorch_model).
+Never call path.write_bytes() or torch.save(path) directly here.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -28,6 +31,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
     experiment_name,
+    log_dict,
     log_metrics_final,
     log_metrics_step,
     log_params,
@@ -39,12 +43,6 @@ from spacecraft_telemetry.mlflow_tracking import (
 from spacecraft_telemetry.model.architecture import build_model
 from spacecraft_telemetry.model.dataset import make_dataloaders
 from spacecraft_telemetry.model.device import resolve_device
-from spacecraft_telemetry.model.io import (
-    artifact_paths,
-    save_model,
-    save_norm_params,
-    save_train_log,
-)
 
 log = get_logger(__name__)
 
@@ -220,23 +218,29 @@ def train_channel(
         if best_state is not None:
             model.load_state_dict(best_state)
 
-        paths = artifact_paths(settings, mission, channel)
-        save_model(model, paths, cfg, window_size=settings.model.window_size)
-        save_norm_params(paths, settings.spark.processed_data_dir, mission, channel)
-        save_train_log(
-            paths,
-            [
-                {"epoch": i, "train_loss": tl, "val_loss": vl}
-                for i, (tl, vl) in enumerate(zip(train_losses, val_losses, strict=False))
-            ],
-        )
-
         log_metrics_final({
             "best_val_loss": best_val_loss,
             "best_epoch": float(best_epoch),
             "epochs_run": float(len(train_losses)),
         })
 
+        # Log normalization params for this channel (sourced from Spark output).
+        _norm_src = (
+            Path(settings.spark.processed_data_dir) / mission / "normalization_params.json"
+        )
+        _all_norm = json.loads(_norm_src.read_bytes())
+        log_dict(_all_norm[channel], "normalization_params.json")
+
+        # Log per-epoch loss history.
+        log_dict(
+            [
+                {"epoch": i, "train_loss": tl, "val_loss": vl}
+                for i, (tl, vl) in enumerate(zip(train_losses, val_losses, strict=False))
+            ],
+            "train_log.json",
+        )
+
+        # Register model in MLflow registry (calls mlflow.pytorch.log_model internally).
         if _run is not None:
             register_pytorch_model(
                 model=model,

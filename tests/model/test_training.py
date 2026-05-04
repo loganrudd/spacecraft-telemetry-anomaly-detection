@@ -20,7 +20,6 @@ from datetime import UTC  # noqa: E402
 import mlflow  # noqa: E402
 
 from spacecraft_telemetry.core.config import Settings  # noqa: E402
-from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
 from spacecraft_telemetry.model.training import (  # noqa: E402
     TrainingResult,
     train_channel,
@@ -96,14 +95,20 @@ def _write_const_parquet(
 @pytest.mark.slow
 def test_train_channel_runs_and_saves_artifacts(
     tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
     tmp_path: Path,
 ) -> None:
-    """train_channel returns a TrainingResult and writes model.pt + train_log.json."""
+    """train_channel returns a TrainingResult and logs model + train_log + norm_params to MLflow."""
     from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
 
     fx = tiny_series_parquet
     settings = _override_settings(
-        load_settings("test"),
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
         processed_dir=fx.processed_dir,
         artifacts_dir=tmp_path / "models",
     )
@@ -115,10 +120,18 @@ def test_train_channel_runs_and_saves_artifacts(
     assert result.epochs_run == len(result.val_losses)
     assert 0 <= result.best_epoch < result.epochs_run
 
-    paths = artifact_paths(settings, fx.mission, fx.channel)
-    assert Path(paths.model).exists(), "model.pt not written"
-    assert Path(paths.config).exists(), "model_config.json not written"
-    assert Path(paths.train_log).exists(), "train_log.json not written"
+    # Verify that the MLflow run contains all expected artifacts.
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    artifacts = client.list_artifacts(runs[0].info.run_id)
+    artifact_names = {a.path for a in artifacts}
+    assert "model" in artifact_names, "mlflow.pytorch.log_model artifact dir missing"
+    assert "normalization_params.json" in artifact_names, "norm params not logged to MLflow"
+    assert "train_log.json" in artifact_names, "train_log.json not logged to MLflow"
 
 
 @pytest.mark.slow

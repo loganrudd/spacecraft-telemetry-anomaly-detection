@@ -23,6 +23,7 @@ from spacecraft_telemetry.mlflow_tracking.registry import (
 from spacecraft_telemetry.mlflow_tracking.runs import (
     configure_mlflow,
     log_artifact_bytes,
+    log_dict,
     log_metrics_final,
     log_metrics_step,
     log_params,
@@ -35,6 +36,7 @@ __all__ = [
     "experiment_name",
     "latest_uri",
     "log_artifact_bytes",
+    "log_dict",
     "log_metrics_final",
     "log_metrics_step",
     "log_params",

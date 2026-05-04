@@ -21,7 +21,6 @@ write_tuned_configs  Persist subsystem → best_config mapping as JSON.
 from __future__ import annotations
 
 import concurrent.futures
-import io
 import json
 import warnings
 from pathlib import Path
@@ -35,6 +34,11 @@ from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
+)
+from spacecraft_telemetry.model.io import (
+    bytes_to_errors,
+    download_artifact_bytes,
+    find_latest_run_for_channel,
 )
 from spacecraft_telemetry.ray_training.runner import (
     _with_abs_paths,
@@ -63,36 +67,41 @@ def _prepare_channel_data(
 ) -> dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]]:
     """Load, validate, and temporally slice per-channel trial inputs.
 
-    Returns a mapping of channel -> (errors, labels) where each pair is sliced
-    to the first ``hpo_eval_fraction`` fraction of its full length.  The
-    remaining tail is the held-out eval portion reserved for ``score_channel``'s
-    ``eval_split`` path (Phase 5 / Step 5).
-
-    Channels missing errors or failing label-load validation are skipped.
-    Raises when no usable channel remains, or when labels/errors shapes are
-    incompatible.
+    Reads smoothed errors for each channel from the most recent MLflow scoring
+    run (``errors.npy`` artifact).  Channels with no scoring run in MLflow are
+    skipped.  Raises when no usable channel remains, or when labels/errors
+    shapes are incompatible.
 
     Emits ``UserWarning`` when either the HPO or held-out portion contains no
     labeled anomaly windows across all channels — both cases produce misleading
     F0.5 scores (always 0) that would silently corrupt HPO or final eval.
     """
     from spacecraft_telemetry.model.dataset import load_window_labels
-    from spacecraft_telemetry.model.io import _read_bytes, artifact_paths
 
     missing_errors: list[str] = []
     shape_mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
     load_failures: list[tuple[str, str]] = []
     prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]] = {}
 
+    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
+
     for channel in channels:
-        paths = artifact_paths(settings, mission, channel)
+        # Find the most recent scoring run for this channel in MLflow.
+        _run = find_latest_run_for_channel(
+            _scoring_exp, channel, settings.mlflow.tracking_uri
+        )
+        if _run is None:
+            missing_errors.append(channel)
+            continue
         try:
-            raw = _read_bytes(paths.errors)
-        except (FileNotFoundError, OSError):
+            raw = download_artifact_bytes(
+                _run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+            )
+        except (OSError, Exception):
             missing_errors.append(channel)
             continue
 
-        errors: np.ndarray[Any, Any] = np.load(io.BytesIO(raw))
+        errors: np.ndarray[Any, Any] = bytes_to_errors(raw)
         try:
             labels = load_window_labels(settings, mission, channel)
         except (FileNotFoundError, OSError, ValueError, RuntimeError) as exc:
@@ -121,7 +130,7 @@ def _prepare_channel_data(
     if not prepared:
         msg = (
             "run_hpo_sweep has no usable channels: all channels are missing "
-            "errors.npy or label loading failed."
+            "a scoring run in MLflow or label loading failed."
         )
         if missing_errors:
             msg += f" Missing errors for {len(missing_errors)} channel(s)."
@@ -365,8 +374,6 @@ def run_all_sweeps(
     Returns:
         Path to the written tuned_configs.json file.
     """
-    from spacecraft_telemetry.model.io import artifact_paths
-
     if not ray.is_initialized():
         raise RuntimeError(
             "Ray is not initialized. Call run_all_sweeps from a caller that owns "
@@ -384,13 +391,16 @@ def run_all_sweeps(
             continue
         by_subsystem.setdefault(sub, []).append(ch)
 
-    # Retain only subsystems that have ≥1 scored channel (errors.npy exists).
+    # Retain only subsystems that have ≥1 scored channel (scoring run in MLflow).
+    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
     eligible: dict[str, list[str]] = {}
     for sub, sub_channels in by_subsystem.items():
         scored = [
             ch
             for ch in sub_channels
-            if Path(str(artifact_paths(settings, mission, ch).errors)).exists()
+            if find_latest_run_for_channel(
+                _scoring_exp, ch, settings.mlflow.tracking_uri
+            ) is not None
         ]
         if scored:
             eligible[sub] = scored
@@ -398,7 +408,7 @@ def run_all_sweeps(
             log.info(
                 "tune.all_sweeps.skip_subsystem",
                 subsystem=sub,
-                reason="no errors.npy found",
+                reason="no scoring run found in MLflow",
             )
 
     output = Path(settings.model.artifacts_dir) / mission / "tuned_configs.json"
@@ -407,7 +417,6 @@ def run_all_sweeps(
         log.warning("tune.all_sweeps.no_eligible_subsystems", mission=mission)
         write_tuned_configs({}, output)
         return output
-
     def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
         """Convert run_hpo_sweep result to the on-disk tuned_configs entry."""
         return {
