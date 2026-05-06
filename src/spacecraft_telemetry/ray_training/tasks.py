@@ -110,15 +110,29 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
     from spacecraft_telemetry.core.logging import get_logger
 
     @ray.remote(num_cpus=1, num_gpus=num_gpus, max_retries=max_retries)
-    def _score(settings: Any, mission: str, channel: str) -> dict[str, Any]:
+    def _score(
+        settings: Any,
+        mission: str,
+        channel: str,
+        eval_split: str = "full_test",
+        parent_hpo_run_id: str | None = None,
+    ) -> dict[str, Any]:
         log = get_logger(__name__)
         # Ray auto-dereferences ObjectRefs passed to .remote() — settings is
         # already the Settings object, not a ref.
         typed_settings: Settings = settings
         try:
-            from spacecraft_telemetry.model.scoring import score_channel
+            from typing import Literal, cast
 
-            metrics = score_channel(typed_settings, mission, channel)
+            from spacecraft_telemetry.model.scoring import score_channel
+            _split = cast(
+                Literal["full_test", "hpo_portion", "final_portion"], eval_split
+            )
+            metrics = score_channel(
+                typed_settings, mission, channel,
+                eval_split=_split,
+                parent_hpo_run_id=parent_hpo_run_id,
+            )
             return {
                 "channel": channel,
                 "status": "ok",

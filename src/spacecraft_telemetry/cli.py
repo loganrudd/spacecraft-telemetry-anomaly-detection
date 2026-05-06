@@ -576,15 +576,12 @@ def model_train(
 
     result = train_channel(settings, mission, channel)
 
-    from spacecraft_telemetry.model.io import artifact_paths
-    paths = artifact_paths(settings, mission, channel)
-
     click.echo(f"Mission      : {mission}")
     click.echo(f"Channel      : {channel}")
     click.echo(f"Epochs run   : {result.epochs_run}")
     click.echo(f"Best epoch   : {result.best_epoch}")
     click.echo(f"Best val loss: {result.best_val_loss:.6f}")
-    click.echo(f"Artifacts    : {paths.root}")
+    click.echo(f"MLflow URI   : {settings.mlflow.tracking_uri}")
 
 
 @model.command("score")
@@ -648,7 +645,12 @@ def _ray_session(settings: Settings) -> Any:
         address=settings.ray.address,
         num_cpus=settings.ray.num_cpus,
         ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
+        runtime_env={"env_vars": {
+            "PYTHONPATH": _pythonpath,
+            # Propagate the resolved tracking URI so workers start with the
+            # correct database and configure_mlflow() never sees a mismatch.
+            "MLFLOW_TRACKING_URI": settings.mlflow.tracking_uri,
+        }},
     )
     try:
         yield
@@ -974,15 +976,132 @@ def ray_tune(
                     ) from err
                 log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
 
-        existing[subsystem] = best
+        entry: dict[str, Any] = {
+            **best.get("config", {}),
+            "_meta": {
+                "run_id": best.get("run_id"),
+                "f0_5": best.get("f0_5", 0.0),
+            },
+        }
+        existing[subsystem] = entry
         write_tuned_configs(existing, output_path)
 
     click.echo(f"Mission       : {mission}")
     click.echo(f"Channels      : {len(subsystem_channels)}")
     click.echo(f"Subsystem     : {subsystem}")
     click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
-    click.echo(f"Best config   : {best}")
+    click.echo(f"Best config   : {best.get('config', best)}")
     click.echo(f"Output        : {output_path}")
 
 
 main.add_command(ray_group, name="ray")
+
+
+# ---------------------------------------------------------------------------
+# mlflow group
+# ---------------------------------------------------------------------------
+
+
+@click.group()
+def mlflow_group() -> None:
+    """MLflow model registry commands."""
+
+
+@mlflow_group.command("promote")
+@click.option(
+    "--name",
+    required=True,
+    help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1).",
+)
+@click.option(
+    "--version",
+    "model_version",
+    type=int,
+    default=None,
+    help="Model version number. Defaults to latest non-archived version.",
+)
+@click.option(
+    "--stage",
+    required=True,
+    type=click.Choice(["Staging", "Production", "Archived"]),
+    help="Target stage for the model version.",
+)
+@click.pass_context
+def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
+    """Promote a registered model version to Staging, Production, or Archived."""
+    import mlflow
+    from spacecraft_telemetry.mlflow_tracking.registry import promote
+
+    settings: Settings = ctx.obj["settings"]
+    tracking_uri = settings.mlflow.tracking_uri
+    mlflow.set_tracking_uri(tracking_uri)
+
+    try:
+        promote(name=name, version=model_version, stage=stage)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    resolved_version = model_version if model_version is not None else "(latest non-archived)"
+    click.echo(f"Model         : {name}")
+    click.echo(f"Version       : {resolved_version}")
+    click.echo(f"Stage         : {stage}")
+    click.echo(f"Tracking URI  : {tracking_uri}")
+
+
+@mlflow_group.command("ui")
+@click.option(
+    "--port",
+    type=int,
+    default=5001,
+    show_default=True,
+    help="Port to serve MLflow UI on.",
+)
+@click.pass_context
+def mlflow_ui(ctx: click.Context, port: int) -> None:
+    """Start the MLflow tracking server against the configured backend store.
+
+    Starts a full MLflow server (not the read-only UI) so that concurrent Ray
+    workers can write runs through the HTTP REST API, avoiding SQLite write-lock
+    contention.  The UI is also served at the same port.
+
+    When tracking_uri is an HTTP endpoint, the server is started against
+    backend_store_uri (the underlying SQLite file).  When tracking_uri is a
+    SQLite URI directly, it is used as both the backend and the client endpoint.
+    """
+    import os
+
+    settings: Settings = ctx.obj["settings"]
+    tracking_uri = settings.mlflow.tracking_uri
+
+    if tracking_uri.startswith(("http://", "https://")):
+        backend = settings.mlflow.backend_store_uri
+        if not backend:
+            raise click.ClickException(
+                "tracking_uri is an HTTP endpoint but mlflow.backend_store_uri is not "
+                "set in config. Add backend_store_uri: 'sqlite:///mlflow.db' under the "
+                "mlflow section of your config file."
+            )
+        _db_path = backend.removeprefix("sqlite:///")
+    else:
+        backend = tracking_uri
+        _db_path = tracking_uri.removeprefix("sqlite:///")
+
+    from pathlib import Path as _Path
+    _artifact_root = str(_Path(_db_path).parent / "mlartifacts")
+    click.echo(f"Backend store : {backend}")
+    click.echo(f"Artifact root : {_artifact_root}")
+    click.echo(f"Port          : {port}")
+    click.echo(f"UI URL        : http://127.0.0.1:{port}")
+    os.execvp(
+        "mlflow",
+        [
+            "mlflow", "server",
+            "--backend-store-uri", backend,
+            "--default-artifact-root", _artifact_root,
+            "--host", "127.0.0.1",
+            "--port", str(port),
+        ],
+    )
+
+
+main.add_command(mlflow_group, name="mlflow")

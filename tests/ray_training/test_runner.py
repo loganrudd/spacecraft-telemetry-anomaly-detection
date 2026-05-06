@@ -163,12 +163,16 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     assert len(results) == 1
     assert results[0]["status"] == "ok", f"Expected ok, got: {results[0].get('error_msg')}"
 
-    # Verify the override was actually written to the artifact.
-    threshold_cfg_path = (
-        Path(settings.model.artifacts_dir) / "ESA-Mission1" / "channel_1" / "threshold_config.json"
-    )
-    with threshold_cfg_path.open() as f:
-        saved = json.load(f)
+    # Verify the override was actually written to the MLflow artifact (A1: no filesystem writes).
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.io import download_artifact_bytes, find_latest_run_for_channel
+
+    tracking_uri = settings.mlflow.tracking_uri
+    scoring_exp = experiment_name(settings.model.model_type, "scoring", "ESA-Mission1")
+    run = find_latest_run_for_channel(scoring_exp, "channel_1", tracking_uri)
+    assert run is not None, "No scoring run found in MLflow"
+    cfg_bytes = download_artifact_bytes(run.info.run_id, "threshold_config.json", tracking_uri)
+    saved = json.loads(cfg_bytes.decode())
     assert saved["z"] == pytest.approx(2.5), (
         f"Expected z=2.5 in threshold_config.json, got: {saved}"
     )

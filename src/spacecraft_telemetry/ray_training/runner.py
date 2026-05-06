@@ -15,27 +15,32 @@ score_all_channels(settings, mission, channels, *, max_channels=None,
 
 tuned_configs schema (Phase 6 writes, score_all_channels reads)
 ---------------------------------------------------------------
-A dict keyed by subsystem name mapping to a dict of ModelConfig scoring field
-overrides. Any subset of the four scoring fields is accepted:
+A dict keyed by subsystem name. Each entry contains scoring-param overrides
+and a ``_meta`` block written by run_all_sweeps:
 
     {
-        "subsystem_1": {"threshold_z": 2.8, "threshold_window": 200},
-        "subsystem_6": {"threshold_z": 3.2, "error_smoothing_window": 40}
+        "subsystem_1": {
+            "threshold_z": 2.8, "threshold_window": 200,
+            "_meta": {"run_id": "abc123...", "f0_5": 0.72}
+        }
     }
 
+``_meta`` is stripped before applying overrides to ModelConfig (not in
+_TUNABLE_SCORING_FIELDS). ``_meta.run_id`` is passed to score_channel as
+``parent_hpo_run_id`` to set the ``tuned_from_run`` MLflow lineage tag.
 Channels whose subsystem has no entry in tuned_configs (or when tuned_configs
 is None) use the unmodified base settings (Hundman defaults).
 """
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 from typing import Any
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 
 log = get_logger(__name__)
 
@@ -81,63 +86,10 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
     )
 
 
-def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, str]:
-    """Return a mapping of channel_id -> subsystem name.
-
-    Lookup order:
-    1) Processed metadata file:
-       {spark.processed_data_dir}/{mission}/metadata/channel_subsystems.json
-    2) Raw metadata CSV fallback:
-       {data.raw_data_dir}/{mission}/channels.csv
-
-    The processed metadata path keeps training/scoring metadata colocated with
-    processed artifacts. CSV fallback is retained for backward compatibility.
-    """
-    processed_map_path = (
-        Path(str(settings.spark.processed_data_dir))
-        / mission
-        / "metadata"
-        / "channel_subsystems.json"
-    )
-    if processed_map_path.exists():
-        try:
-            loaded = json.loads(processed_map_path.read_text())
-        except json.JSONDecodeError:
-            log.warning(
-                "processed subsystem map is invalid JSON; falling back to channels.csv",
-                path=str(processed_map_path),
-            )
-        else:
-            if isinstance(loaded, dict):
-                processed_mapping = {
-                    str(channel): str(subsystem)
-                    for channel, subsystem in loaded.items()
-                    if str(channel).strip() and str(subsystem).strip()
-                }
-                if processed_mapping:
-                    return processed_mapping
-                log.warning(
-                    "processed subsystem map is empty; falling back to channels.csv",
-                    path=str(processed_map_path),
-                )
-
-    # CSV fallback for compatibility with current preprocessing output.
-    csv_path = Path(str(settings.data.raw_data_dir)) / mission / "channels.csv"
-    if not csv_path.exists():
-        log.warning(
-            "channels.csv not found; tuned_configs will not be applied",
-            path=str(csv_path),
-        )
-        return {}
-    mapping: dict[str, str] = {}
-    with csv_path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            channel = row.get("Channel", "").strip()
-            subsystem = row.get("Subsystem", "").strip()
-            if channel and subsystem:
-                mapping[channel] = subsystem
-    return mapping
+# load_channel_subsystem_map is defined in core.metadata and re-exported here
+# for backward-compatibility with callers that import from ray_training.runner.
+# (ray_training/__init__.py and cli.py import it from here.)
+__all_runner_exports__ = ["load_channel_subsystem_map"]
 
 
 def _with_abs_paths(settings: Settings) -> Settings:
@@ -164,6 +116,39 @@ def _with_abs_paths(settings: Settings) -> Settings:
             ),
         }
     )
+
+
+def _ensure_mlflow_experiments(settings: Settings, mission: str, phases: list[str]) -> None:
+    """Pre-create MLflow experiments in the driver process before Ray tasks run.
+
+    When the experiment doesn't yet exist, multiple Ray workers calling
+    mlflow.set_experiment() concurrently hit a TOCTOU race: each worker calls
+    get_experiment_by_name (returns None) then create_experiment, but only one
+    creation succeeds.  MLflow's client does not always retry gracefully on the
+    "already exists" error, so the losing workers may fall back to the "Default"
+    experiment and log runs there instead of the intended one.
+
+    Creating the experiment once in the driver (serial, no race) ensures it
+    exists before any worker tries to use it.  Workers then always take the
+    "experiment exists → get ID" branch, which is idempotent and race-free.
+
+    Failures are suppressed — a missing experiment is non-fatal; workers have
+    their own fallback behaviour.
+    """
+    from contextlib import suppress
+
+    import mlflow
+
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    with suppress(Exception):
+        configure_mlflow(settings)
+    for phase in phases:
+        name = experiment_name("telemanom", phase, mission)
+        with suppress(Exception):
+            mlflow.set_experiment(name)
+            log.debug("mlflow.experiment.ensured", name=name)
 
 
 def train_all_channels(
@@ -197,6 +182,7 @@ def train_all_channels(
         log.warning("ray.train.no_channels", mission=mission)
         return []
 
+    _ensure_mlflow_experiments(settings, mission, ["training"])
     log.info("ray.train.sweep.start", mission=mission, n_channels=len(work))
 
     train_task = make_train_task(
@@ -256,6 +242,7 @@ def score_all_channels(
         log.warning("ray.score.no_channels", mission=mission)
         return []
 
+    _ensure_mlflow_experiments(settings, mission, ["scoring"])
     log.info("ray.score.sweep.start", mission=mission, n_channels=len(work),
              tuned=tuned_configs is not None)
 
@@ -309,11 +296,35 @@ def score_all_channels(
             settings_refs[subsystem] = ray.put(tuned_settings)
         return settings_refs[subsystem]
 
+    def _get_hpo_run_id(channel: str) -> str | None:
+        """Return the HPO MLflow run_id for this channel's subsystem, or None."""
+        if not tuned_configs:
+            return None
+        subsystem = ch_to_sub.get(channel)
+        if not subsystem:
+            return None
+        meta = tuned_configs.get(subsystem, {}).get("_meta")
+        if not meta or not isinstance(meta, dict):
+            return None
+        run_id = meta.get("run_id")
+        return str(run_id) if run_id is not None else None
+
+    # Both baseline and tuned scoring evaluate on the same held-out final
+    # portion so F0.5 comparisons are apples-to-apples. HPO only saw
+    # hpo_portion (first hpo_eval_fraction of test windows), so final_portion
+    # is genuinely unseen for both default and tuned params.
+    # Use eval_split="full_test" only when you want an overall-model-quality
+    # metric independent of any HPO comparison.
+    eval_split = "final_portion"
+
     score_task = make_score_task(
         num_gpus=settings.ray.num_gpus_per_task,
         max_retries=settings.ray.max_retries,
     )
-    futures = [score_task.remote(_get_settings_ref(ch), mission, ch) for ch in work]
+    futures = [
+        score_task.remote(_get_settings_ref(ch), mission, ch, eval_split, _get_hpo_run_id(ch))
+        for ch in work
+    ]
     results: list[dict[str, Any]] = ray.get(futures)
 
     n_ok = sum(1 for r in results if r["status"] == "ok")

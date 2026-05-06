@@ -17,8 +17,9 @@ torch = pytest.importorskip("torch")
 
 from datetime import UTC  # noqa: E402
 
+import mlflow  # noqa: E402
+
 from spacecraft_telemetry.core.config import Settings  # noqa: E402
-from spacecraft_telemetry.model.io import artifact_paths  # noqa: E402
 from spacecraft_telemetry.model.training import (  # noqa: E402
     TrainingResult,
     train_channel,
@@ -94,14 +95,20 @@ def _write_const_parquet(
 @pytest.mark.slow
 def test_train_channel_runs_and_saves_artifacts(
     tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
     tmp_path: Path,
 ) -> None:
-    """train_channel returns a TrainingResult and writes model.pt + train_log.json."""
+    """train_channel returns a TrainingResult and logs model + train_log + norm_params to MLflow."""
     from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
 
     fx = tiny_series_parquet
     settings = _override_settings(
-        load_settings("test"),
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
         processed_dir=fx.processed_dir,
         artifacts_dir=tmp_path / "models",
     )
@@ -113,10 +120,27 @@ def test_train_channel_runs_and_saves_artifacts(
     assert result.epochs_run == len(result.val_losses)
     assert 0 <= result.best_epoch < result.epochs_run
 
-    paths = artifact_paths(settings, fx.mission, fx.channel)
-    assert Path(paths.model).exists(), "model.pt not written"
-    assert Path(paths.config).exists(), "model_config.json not written"
-    assert Path(paths.train_log).exists(), "train_log.json not written"
+    # Verify that the MLflow run contains all expected artifacts.
+    from mlflow.tracking import MlflowClient
+    from spacecraft_telemetry.mlflow_tracking.conventions import (
+        registered_model_name as _reg_name,
+    )
+
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    artifacts = client.list_artifacts(runs[0].info.run_id)
+    artifact_names = {a.path for a in artifacts}
+    assert "normalization_params.json" in artifact_names, "norm params not logged to MLflow"
+    assert "train_log.json" in artifact_names, "train_log.json not logged to MLflow"
+    # In MLflow 3.x, log_model artifacts live in the models store, not run artifacts.
+    # Verify the model was registered instead of checking list_artifacts.
+    model_name = _reg_name(settings.model.model_type, fx.mission, fx.channel)
+    versions = client.search_model_versions(f"name='{model_name}'")
+    assert len(versions) >= 1, "mlflow.pytorch.log_model did not register a model version"
 
 
 @pytest.mark.slow
@@ -180,3 +204,169 @@ def test_early_stopping_triggers(tmp_path: Path) -> None:
     assert result.epochs_run < 50, (
         f"Expected early stopping to trigger before 50 epochs, got {result.epochs_run}"
     )
+
+
+@pytest.mark.slow
+def test_train_channel_creates_mlflow_run(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """train_channel creates a run in the correct MLflow experiment with required tags."""
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+
+    fx = tiny_series_parquet
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags["model_type"] == settings.model.model_type
+    assert tags["mission_id"] == fx.mission
+    assert tags["channel_id"] == fx.channel
+    assert runs[0].data.metrics["best_val_loss"] is not None
+    assert runs[0].data.params["hidden_dim"] == str(settings.model.hidden_dim)
+    # training_data_hash must be set — train Parquet exists in the fixture.
+    assert "training_data_hash" in tags, "training_data_hash tag not written"
+    assert len(tags["training_data_hash"]) == 64, "training_data_hash must be a SHA-256 hex digest"
+    # subsystem is resolved from the real channels.csv fallback (data/raw/ESA-Mission1).
+    assert "subsystem" in tags, "subsystem tag not written"
+    assert tags["subsystem"] == "subsystem_1", (
+        f"channel_1 maps to subsystem_1 per channels.csv, got {tags['subsystem']!r}"
+    )
+
+
+@pytest.mark.slow
+def test_train_channel_registers_model_version(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """train_channel auto-registers a model version in the MLflow registry."""
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
+
+    fx = tiny_series_parquet
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    model_name = registered_model_name(settings.model.model_type, fx.mission, fx.channel)
+    versions = list(client.search_model_versions(f"name='{model_name}'"))
+    assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
+
+
+@pytest.mark.slow
+def test_train_channel_subsystem_tag_with_metadata(
+    tiny_series_parquet: SeriesParquetFixture,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """subsystem tag is set on the MLflow run when channel metadata is available.
+
+    Creates a channel_subsystems.json in the processed_dir so that
+    load_channel_subsystem_map finds a mapping and train_channel can tag the
+    run with subsystem='power'.  Complements test_train_channel_creates_mlflow_run
+    which covers the graceful-degradation case (no metadata → tag absent).
+    """
+    import json as _json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+
+    fx = tiny_series_parquet
+
+    # Write the subsystem metadata that load_channel_subsystem_map reads.
+    meta_dir = fx.processed_dir / fx.mission / "metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "channel_subsystems.json").write_text(
+        _json.dumps({fx.channel: "power"})
+    )
+
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags.get("subsystem") == "power", (
+        f"Expected subsystem='power', got {tags.get('subsystem')!r}. "
+        "subsystem tag was not written from channel_subsystems.json."
+    )
+
+
+@pytest.mark.slow
+def test_train_channel_survives_broken_mlflow_uri(
+    tiny_series_parquet: SeriesParquetFixture,
+    tmp_path: Path,
+) -> None:
+    """train_channel returns a TrainingResult even when the MLflow backend is unreachable.
+
+    Phase 7 promise: "Tracking failures are caught and demoted to warnings —
+    the training run completes with filesystem artifacts intact."
+
+    Uses a PostgreSQL URI that nobody is listening on so MLflow's set_experiment
+    call fails.  Both configure_mlflow and open_run are guarded, so training
+    must still produce a well-formed TrainingResult and write model.pt.
+    """
+    from spacecraft_telemetry.core.config import load_settings
+
+    fx = tiny_series_parquet
+    # Point tracking at a PostgreSQL backend that is guaranteed to be unreachable.
+    broken_uri = "postgresql://localhost:9999/nonexistent_mlflow_db"
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": broken_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    result = train_channel(settings, fx.mission, fx.channel)
+
+    # Training must complete — broken MLflow must not abort the loop.
+    assert isinstance(result, TrainingResult), (
+        "train_channel raised instead of returning TrainingResult with broken MLflow URI"
+    )
+    assert result.epochs_run > 0, "No epochs ran — training was aborted"

@@ -130,9 +130,9 @@ class FeastConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     # Identifies which model family this config applies to.
-    # Used by io.load_model() and MLflow experiment schema.
+    # Used by io.load_model() and MLflow experiment / registry naming.
     # Future values: "dc_vae"
-    scorer_type: Literal["telemanom"] = "telemanom"
+    model_type: Literal["telemanom"] = "telemanom"
     hidden_dim: int = 80
     num_layers: int = 2
     dropout: float = 0.3
@@ -232,8 +232,10 @@ class TuneConfig(BaseModel):
     max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
     parallel_subsystems: bool = False   # run subsystem sweeps concurrently (cloud default)
     max_parallel_subsystems: int = 2    # cap concurrent subsystem sweeps when enabled
-    mlflow_experiment_prefix: str = "hpo"   # experiments named hpo-{subsystem}
-    mlflow_tracking_uri: str = "mlruns"     # file-based local default
+    # Fraction of each channel's test-set windows used for HPO optimisation;
+    # the remaining (1 - fraction) are the held-out final-eval portion.
+    # This prevents the HPO target and the reported metric from being the same data.
+    hpo_eval_fraction: float = 0.6
 
     @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
     @classmethod
@@ -241,6 +243,66 @@ class TuneConfig(BaseModel):
         if v < 1:
             raise ValueError(f"must be >= 1, got {v}")
         return v
+
+    @field_validator("hpo_eval_fraction")
+    @classmethod
+    def fraction_in_open_unit_interval(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"hpo_eval_fraction must be in (0, 1), got {v}")
+        return v
+
+
+class MlflowConfig(BaseModel):
+    """MLflow tracking and registry configuration (Phase 7)."""
+
+    # Default is resolved to an absolute path at import time so Ray workers
+    # (which run from a session temp dir) always point to the same database.
+    tracking_uri: str = f"sqlite:///{(_REPO_ROOT / 'mlflow.db').resolve()}"
+    # When None, the registry falls back to tracking_uri (MLflow default behaviour).
+    registry_uri: str | None = None
+    # SQLite backend URI used when starting the MLflow server locally.  When
+    # tracking_uri is an HTTP endpoint, mlflow-server reads this to know which
+    # database file to serve.  Ignored when tracking_uri is already a SQLite URI.
+    backend_store_uri: str | None = None
+    # Optional prefix applied to every experiment name, e.g. "dev-" to isolate
+    # development runs from production ones without a separate tracking server.
+    experiment_prefix: str = ""
+
+    @field_validator("backend_store_uri")
+    @classmethod
+    def _resolve_backend_store_uri(cls, v: str | None) -> str | None:
+        """Resolve a relative sqlite:///relpath backend_store_uri to an absolute path."""
+        if v is None:
+            return v
+        if not v.startswith("sqlite:///"):
+            return v
+        rest = v[len("sqlite:///"):]
+        if rest.startswith("/"):
+            return v
+        resolved = (_REPO_ROOT / rest).resolve()
+        return f"sqlite:///{resolved}"
+
+    @field_validator("tracking_uri")
+    @classmethod
+    def _resolve_sqlite_relative_uri(cls, v: str) -> str:
+        """Resolve sqlite:///relpath to sqlite:////abs/path at construction time.
+
+        Ray workers run from a session temp directory.  Without this, a relative
+        SQLite URI such as ``sqlite:///mlflow.db`` resolves to a fresh database
+        in the worker's temp dir, silently discarding all logged runs.
+
+        Absolute SQLite URIs (``sqlite:////abs/path``), HTTP(S) URIs, and
+        non-SQLite schemes are passed through unchanged.
+        """
+        if not v.startswith("sqlite:///"):
+            return v
+        rest = v[len("sqlite:///"):]
+        if rest.startswith("/"):
+            return v  # already absolute (sqlite:////abs/path on Unix)
+        # Relative path — resolve against the repo root so the database always
+        # lands next to configs/ and pyproject.toml regardless of CWD.
+        resolved = (_REPO_ROOT / rest).resolve()
+        return f"sqlite:///{resolved}"
 
 
 class _YamlConfigSource(PydanticBaseSettingsSource):
@@ -283,6 +345,7 @@ class Settings(BaseSettings):
     model: ModelConfig = ModelConfig()
     ray: RayConfig = RayConfig()
     tune: TuneConfig = TuneConfig()
+    mlflow: MlflowConfig = MlflowConfig()
 
     @classmethod
     def settings_customise_sources(

@@ -335,26 +335,34 @@ def _override_settings_for_scoring(
 @pytest.mark.slow
 def test_score_channel_artifacts_and_metrics(
     tiny_series_parquet: object,
+    mlflow_uri: str,
     tmp_path: Path,
 ) -> None:
-    """score_channel must write artifacts and return a well-formed metrics dict.
+    """score_channel must log artifacts to MLflow and return a well-formed metrics dict.
 
     Mirrors test_train_channel_runs_and_saves_artifacts on the scoring side.
     Trains a tiny model first (the same pattern as the training integration test),
     then calls score_channel and validates:
     - returned dict has all expected keys with float values in [0, 1]
     - support count keys are non-negative integers
-    - errors.npy, threshold.npy, threshold_config.json, metrics.json all exist on disk
+    - errors.npy, threshold.npy, threshold_config.json, metrics/ all exist in MLflow run
     """
+    from mlflow.tracking import MlflowClient
+
     from spacecraft_telemetry.core.config import load_settings
-    from spacecraft_telemetry.model.io import artifact_paths
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.io import find_latest_run_for_channel
     from spacecraft_telemetry.model.scoring import score_channel
     from spacecraft_telemetry.model.training import train_channel
     from tests.model.conftest import SeriesParquetFixture
 
     fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
     settings = _override_settings_for_scoring(
-        load_settings("test"),
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
         processed_dir=fx.processed_dir,
         artifacts_dir=tmp_path / "models",
     )
@@ -376,9 +384,212 @@ def test_score_channel_artifacts_and_metrics(
         assert isinstance(metrics[k], int), f"{k} must be int"
         assert metrics[k] >= 0, f"{k} must be non-negative"
 
-    # --- artifact files ---
-    paths = artifact_paths(settings, fx.mission, fx.channel)
-    assert Path(paths.errors).exists(), "errors.npy not written"
-    assert Path(paths.threshold).exists(), "threshold.npy not written"
-    assert Path(paths.threshold_config).exists(), "threshold_config.json not written"
-    assert Path(paths.metrics).exists(), "metrics.json not written"
+    # --- artifact files in MLflow (A1: filesystem writes removed) ---
+    scoring_exp = experiment_name(settings.model.model_type, "scoring", fx.mission)
+    run = find_latest_run_for_channel(scoring_exp, fx.channel, mlflow_uri)
+    assert run is not None, "No scoring run found in MLflow"
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    artifact_names = {a.path for a in client.list_artifacts(run.info.run_id)}
+    assert "errors.npy" in artifact_names, "errors.npy not logged to MLflow"
+    assert "threshold.npy" in artifact_names, "threshold.npy not logged to MLflow"
+    assert "threshold_config.json" in artifact_names, "threshold_config.json not logged to MLflow"
+    assert "metrics" in artifact_names, "metrics/ dir not logged to MLflow"
+
+
+@pytest.mark.slow
+def test_score_channel_mlflow_run_has_eval_split_tag(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """score_channel creates an MLflow run tagged with eval_split and channel metadata."""
+    import mlflow
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    score_channel(settings, fx.mission, fx.channel, eval_split="final_portion")
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "scoring", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"scoring experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags["eval_split"] == "final_portion"
+    assert tags["model_type"] == settings.model.model_type
+    assert tags["mission_id"] == fx.mission
+    assert tags["channel_id"] == fx.channel
+    assert runs[0].data.params["eval_split"] == "final_portion"
+
+
+@pytest.mark.slow
+def test_score_channel_eval_split_changes_anomaly_count(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """eval_split slices the label arrays: hpo_portion sees no anomalies in this fixture.
+
+    tiny_series_parquet places all anomaly rows at the END of the test segment.
+    With hpo_eval_fraction=0.6 those rows fall entirely in the final_portion,
+    so hpo_portion must report n_true_positive_labels == 0 while full_test > 0.
+    """
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    metrics_full = score_channel(settings, fx.mission, fx.channel, eval_split="full_test")
+    metrics_hpo = score_channel(settings, fx.mission, fx.channel, eval_split="hpo_portion")
+
+    # tiny_series_parquet puts anomaly windows at the end of the test segment.
+    # With hpo_eval_fraction=0.6, they fall past the HPO cutoff.
+    assert metrics_full["n_true_positive_labels"] > 0, (
+        "full_test should see labeled anomalies from the test fixture"
+    )
+    assert metrics_hpo["n_true_positive_labels"] == 0, (
+        "hpo_portion (first 60%) should see no anomaly labels — "
+        "all anomalies are at the end of the test segment"
+    )
+
+
+@pytest.mark.slow
+def test_score_channel_errors_npy_unaffected_by_eval_split(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """errors.npy is saved from the full smoothed array regardless of eval_split."""
+    import numpy as np
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.io import (
+        bytes_to_errors,
+        download_artifact_bytes,
+        find_latest_run_for_channel,
+    )
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+
+    scoring_exp = experiment_name(settings.model.model_type, "scoring", fx.mission)
+
+    score_channel(settings, fx.mission, fx.channel, eval_split="full_test")
+    run_full = find_latest_run_for_channel(scoring_exp, fx.channel, mlflow_uri)
+    assert run_full is not None, "No scoring run for full_test found in MLflow"
+    errors_full = bytes_to_errors(
+        download_artifact_bytes(run_full.info.run_id, "errors.npy", mlflow_uri)
+    )
+
+    score_channel(settings, fx.mission, fx.channel, eval_split="final_portion")
+    run_final = find_latest_run_for_channel(scoring_exp, fx.channel, mlflow_uri)
+    assert run_final is not None, "No scoring run for final_portion found in MLflow"
+    # find_latest_run_for_channel returns the most recent — must be the new run.
+    assert run_final.info.run_id != run_full.info.run_id, (
+        "Expected a new run to be created for final_portion scoring"
+    )
+    errors_final = bytes_to_errors(
+        download_artifact_bytes(run_final.info.run_id, "errors.npy", mlflow_uri)
+    )
+
+    np.testing.assert_array_equal(
+        errors_full, errors_final,
+        err_msg="errors.npy must be identical regardless of eval_split",
+    )
+
+
+@pytest.mark.slow
+def test_score_channel_writes_tuned_from_run_tag(
+    tiny_series_parquet: object,
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """score_channel writes tuned_from_run tag when parent_hpo_run_id is supplied.
+
+    This is the HPO → scoring lineage feature: tune.py looks up the best HPO
+    run and passes its run_id to score_channel so the scoring run records
+    which HPO trial produced its parameters.
+    """
+    import mlflow
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from tests.model.conftest import SeriesParquetFixture
+
+    fx: SeriesParquetFixture = tiny_series_parquet  # type: ignore[assignment]
+    settings = _override_settings_for_scoring(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=fx.processed_dir,
+        artifacts_dir=tmp_path / "models",
+    )
+
+    train_channel(settings, fx.mission, fx.channel)
+    score_channel(
+        settings,
+        fx.mission,
+        fx.channel,
+        parent_hpo_run_id="test-hpo-run-abc123",
+    )
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "scoring", fx.mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None, f"scoring experiment {exp_name!r} was not created"
+
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert tags.get("tuned_from_run") == "test-hpo-run-abc123", (
+        f"Expected tuned_from_run='test-hpo-run-abc123', got {tags.get('tuned_from_run')!r}. "
+        "HPO → scoring lineage tag was not written."
+    )

@@ -15,10 +15,12 @@ are encoded in directory names, exactly as Spark writes them.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -141,6 +143,17 @@ def _write_partition(table: pa.Table, partition_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
+    """Per-test isolated SQLite MLflow store for model tests."""
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    mlflow.set_tracking_uri(uri)
+    yield uri
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
 
 
 @pytest.fixture()

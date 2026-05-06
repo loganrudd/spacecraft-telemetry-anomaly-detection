@@ -8,9 +8,11 @@ from spacecraft_telemetry.core.config import (
     DataConfig,
     FeastConfig,
     LoggingConfig,
+    MlflowConfig,
     ModelConfig,
     Settings,
     SparkConfig,
+    TuneConfig,
     load_settings,
 )
 
@@ -228,6 +230,99 @@ class TestLoadSettings:
         )
         assert settings.data.sample_fraction == 0.5
         assert settings.logging.format == "json"
+
+    def test_mlflow_section_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text(
+            "mlflow:\n  tracking_uri: 'sqlite:///test.db'\n  experiment_prefix: 'ci-'\n"
+        )
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.mlflow.tracking_uri.endswith("/test.db")
+        assert Path(settings.mlflow.tracking_uri.removeprefix("sqlite:///")).is_absolute()
+        assert settings.mlflow.experiment_prefix == "ci-"
+        assert settings.mlflow.registry_uri is None
+
+    def test_hpo_eval_fraction_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text("tune:\n  hpo_eval_fraction: 0.7\n")
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.tune.hpo_eval_fraction == 0.7
+
+    def test_model_type_default(self) -> None:
+        settings = Settings()
+        assert settings.model.model_type == "telemanom"
+
+
+# ---------------------------------------------------------------------------
+# TuneConfig
+# ---------------------------------------------------------------------------
+
+
+class TestTuneConfig:
+    def test_defaults(self) -> None:
+        cfg = TuneConfig()
+        assert cfg.num_samples == 50
+        assert cfg.max_concurrent_trials == 2
+        assert cfg.hpo_eval_fraction == 0.6
+        assert cfg.parallel_subsystems is False
+
+    def test_hpo_eval_fraction_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="hpo_eval_fraction"):
+            TuneConfig(hpo_eval_fraction=0.0)
+
+    def test_hpo_eval_fraction_one_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="hpo_eval_fraction"):
+            TuneConfig(hpo_eval_fraction=1.0)
+
+    def test_hpo_eval_fraction_valid(self) -> None:
+        cfg = TuneConfig(hpo_eval_fraction=0.75)
+        assert cfg.hpo_eval_fraction == 0.75
+
+    def test_num_samples_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            TuneConfig(num_samples=0)
+
+
+# ---------------------------------------------------------------------------
+# MlflowConfig
+# ---------------------------------------------------------------------------
+
+
+class TestMlflowConfig:
+    def test_defaults(self) -> None:
+        cfg = MlflowConfig()
+        # sqlite:///mlflow.db is resolved to an absolute path at construction time (A4).
+        assert cfg.tracking_uri.startswith("sqlite:///")
+        assert Path(cfg.tracking_uri.removeprefix("sqlite:///")).is_absolute()
+        assert cfg.tracking_uri.endswith("mlflow.db")
+        assert cfg.registry_uri is None
+        assert cfg.experiment_prefix == ""
+
+    def test_custom_tracking_uri(self) -> None:
+        cfg = MlflowConfig(tracking_uri="http://localhost:5000")
+        assert cfg.tracking_uri == "http://localhost:5000"
+
+    def test_registry_uri_can_be_set(self) -> None:
+        cfg = MlflowConfig(registry_uri="sqlite:///registry.db")
+        assert cfg.registry_uri == "sqlite:///registry.db"
+
+    def test_experiment_prefix_stored(self) -> None:
+        cfg = MlflowConfig(experiment_prefix="dev-")
+        assert cfg.experiment_prefix == "dev-"
 
 
 # ---------------------------------------------------------------------------
