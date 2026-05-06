@@ -645,7 +645,12 @@ def _ray_session(settings: Settings) -> Any:
         address=settings.ray.address,
         num_cpus=settings.ray.num_cpus,
         ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": _pythonpath}},
+        runtime_env={"env_vars": {
+            "PYTHONPATH": _pythonpath,
+            # Propagate the resolved tracking URI so workers start with the
+            # correct database and configure_mlflow() never sees a mismatch.
+            "MLFLOW_TRACKING_URI": settings.mlflow.tracking_uri,
+        }},
     )
     try:
         yield
@@ -1063,11 +1068,23 @@ def mlflow_ui(ctx: click.Context, port: int) -> None:
 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
+    # Derive a local artifact root next to the DB so the UI server never
+    # creates experiments with mlflow-artifacts:// URIs — those only work
+    # while the server is running and break offline/direct-SQLite runs.
+    from pathlib import Path as _Path
+    _db_path = tracking_uri.lstrip("sqlite:///")
+    _artifact_root = str(_Path(_db_path).parent / "mlartifacts")
     click.echo(f"Tracking URI  : {tracking_uri}")
+    click.echo(f"Artifact root : {_artifact_root}")
     click.echo(f"Port          : {port}")
     os.execvp(
         "mlflow",
-        ["mlflow", "ui", "--backend-store-uri", tracking_uri, "--port", str(port)],
+        [
+            "mlflow", "ui",
+            "--backend-store-uri", tracking_uri,
+            "--default-artifact-root", _artifact_root,
+            "--port", str(port),
+        ],
     )
 
 

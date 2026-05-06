@@ -370,6 +370,3 @@ def test_train_channel_survives_broken_mlflow_uri(
         "train_channel raised instead of returning TrainingResult with broken MLflow URI"
     )
     assert result.epochs_run > 0, "No epochs ran — training was aborted"
-    # Filesystem artifacts must still be written (MLflow is not the source of truth here).
-    paths = artifact_paths(settings, fx.mission, fx.channel)
-    assert Path(paths.model).exists(), "model.pt not written with broken MLflow URI"

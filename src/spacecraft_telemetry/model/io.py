@@ -83,7 +83,7 @@ def find_latest_run_for_channel(
     """
     import mlflow
 
-    client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     exp = client.get_experiment_by_name(experiment_name)
     if exp is None:
         return None
@@ -121,7 +121,7 @@ def download_artifact_bytes(
     """
     import mlflow
 
-    client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_path = client.download_artifacts(run_id, artifact_path, tmp_dir)
         return Path(local_path).read_bytes()
@@ -156,9 +156,9 @@ def load_model_for_scoring(
         RuntimeError: If no registered version exists for ``name``.
     """
     import mlflow
-    import mlflow.pytorch
+    import mlflow.pytorch as mlflow_pytorch
 
-    client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     versions = client.search_model_versions(f"name='{name}'")
     if not versions:
         raise RuntimeError(
@@ -166,13 +166,18 @@ def load_model_for_scoring(
             "Run 'model train' for this channel before scoring."
         )
     latest = max(versions, key=lambda v: int(v.version))
-    model = mlflow.pytorch.load_model(
-        f"runs:/{latest.run_id}/model",
+    run_id = latest.run_id
+    if run_id is None:
+        raise RuntimeError(
+            f"Latest version of {name!r} has no associated run_id."
+        )
+    model = mlflow_pytorch.load_model(
+        f"runs:/{run_id}/model",
         map_location=device,
     )
-    run = client.get_run(latest.run_id)
+    run = client.get_run(run_id)
     window_size = int(run.data.params["window_size"])
-    return model, window_size
+    return model, window_size  # type: ignore[return-value]
 
 
 
