@@ -81,9 +81,7 @@ make ray-tune MISSION=ESA-Mission1
 
 # 4) Re-score using tuned params, evaluated on the held-out final 40%
 #    (avoids leakage between HPO search and reported metrics)
-uv run spacecraft-telemetry ray score \
-  --mission ESA-Mission1 \
-  --tuned-configs models/ESA-Mission1/tuned_configs.json
+make ray-score MISSION=ESA-Mission1 TUNED_CONFIGS=models/ESA-Mission1/tuned_configs.json
 
 # 5) Inspect experiments and registered models
 make mlflow-ui                      # opens at http://localhost:5001

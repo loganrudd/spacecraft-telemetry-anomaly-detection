@@ -19,7 +19,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         feast-apply feast-materialize feast-test \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-ui mlflow-promote \
+        mlflow-server mlflow-ui mlflow-promote \
         clean clean-processed clean-models clean-feast clean-data clean-all
 
 help:          ## Show this help message
@@ -124,8 +124,9 @@ model-test:       ## Run only model tests (fast; excludes @pytest.mark.slow)
 ray-train:        ## Train channels in parallel with Ray (MISSION=…)
 	$(RUN) spacecraft-telemetry ray train --mission $(MISSION)
 
-ray-score:        ## Score channels in parallel with Ray (MISSION=…)
-	$(RUN) spacecraft-telemetry ray score --mission $(MISSION)
+ray-score:        ## Score channels in parallel with Ray (MISSION=…, TUNED_CONFIGS=path/to/tuned_configs.json)
+	$(RUN) spacecraft-telemetry ray score --mission $(MISSION) \
+		$(if $(TUNED_CONFIGS),--tuned-configs $(TUNED_CONFIGS),)
 
 ray-tune:         ## Run Ray Tune HPO (all discovered subsystems)
 	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION)
@@ -144,8 +145,9 @@ ray-test:         ## Run Ray training/tuning unit tests (fast only)
 # ---------------------------------------------------------------------------
 
 STAGE         ?= Production
+TUNED_CONFIGS ?=
 
-mlflow-ui:        ## Open MLflow UI against the local SQLite tracking store (port 5001)
+mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
 
 mlflow-promote:   ## Promote a registered model to STAGE (MISSION=…, CHANNEL=…, STAGE=Production)

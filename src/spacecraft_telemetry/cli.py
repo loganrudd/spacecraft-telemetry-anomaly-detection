@@ -1058,31 +1058,47 @@ def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, sta
 )
 @click.pass_context
 def mlflow_ui(ctx: click.Context, port: int) -> None:
-    """Launch the MLflow UI against the configured tracking store.
+    """Start the MLflow tracking server against the configured backend store.
 
-    Uses MLFLOW_TRACKING_URI from settings so you don't have to remember the
-    backend-store path. Defaults to port 5001 (port 5000 is reserved by
-    AirPlay Receiver on macOS Monterey+).
+    Starts a full MLflow server (not the read-only UI) so that concurrent Ray
+    workers can write runs through the HTTP REST API, avoiding SQLite write-lock
+    contention.  The UI is also served at the same port.
+
+    When tracking_uri is an HTTP endpoint, the server is started against
+    backend_store_uri (the underlying SQLite file).  When tracking_uri is a
+    SQLite URI directly, it is used as both the backend and the client endpoint.
     """
     import os
 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
-    # Derive a local artifact root next to the DB so the UI server never
-    # creates experiments with mlflow-artifacts:// URIs — those only work
-    # while the server is running and break offline/direct-SQLite runs.
+
+    if tracking_uri.startswith(("http://", "https://")):
+        backend = settings.mlflow.backend_store_uri
+        if not backend:
+            raise click.ClickException(
+                "tracking_uri is an HTTP endpoint but mlflow.backend_store_uri is not "
+                "set in config. Add backend_store_uri: 'sqlite:///mlflow.db' under the "
+                "mlflow section of your config file."
+            )
+        _db_path = backend.removeprefix("sqlite:///")
+    else:
+        backend = tracking_uri
+        _db_path = tracking_uri.removeprefix("sqlite:///")
+
     from pathlib import Path as _Path
-    _db_path = tracking_uri.lstrip("sqlite:///")
     _artifact_root = str(_Path(_db_path).parent / "mlartifacts")
-    click.echo(f"Tracking URI  : {tracking_uri}")
+    click.echo(f"Backend store : {backend}")
     click.echo(f"Artifact root : {_artifact_root}")
     click.echo(f"Port          : {port}")
+    click.echo(f"UI URL        : http://127.0.0.1:{port}")
     os.execvp(
         "mlflow",
         [
-            "mlflow", "ui",
-            "--backend-store-uri", tracking_uri,
+            "mlflow", "server",
+            "--backend-store-uri", backend,
             "--default-artifact-root", _artifact_root,
+            "--host", "127.0.0.1",
             "--port", str(port),
         ],
     )

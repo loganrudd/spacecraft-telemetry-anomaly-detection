@@ -260,9 +260,27 @@ class MlflowConfig(BaseModel):
     tracking_uri: str = f"sqlite:///{(_REPO_ROOT / 'mlflow.db').resolve()}"
     # When None, the registry falls back to tracking_uri (MLflow default behaviour).
     registry_uri: str | None = None
+    # SQLite backend URI used when starting the MLflow server locally.  When
+    # tracking_uri is an HTTP endpoint, mlflow-server reads this to know which
+    # database file to serve.  Ignored when tracking_uri is already a SQLite URI.
+    backend_store_uri: str | None = None
     # Optional prefix applied to every experiment name, e.g. "dev-" to isolate
     # development runs from production ones without a separate tracking server.
     experiment_prefix: str = ""
+
+    @field_validator("backend_store_uri")
+    @classmethod
+    def _resolve_backend_store_uri(cls, v: str | None) -> str | None:
+        """Resolve a relative sqlite:///relpath backend_store_uri to an absolute path."""
+        if v is None:
+            return v
+        if not v.startswith("sqlite:///"):
+            return v
+        rest = v[len("sqlite:///"):]
+        if rest.startswith("/"):
+            return v
+        resolved = (_REPO_ROOT / rest).resolve()
+        return f"sqlite:///{resolved}"
 
     @field_validator("tracking_uri")
     @classmethod

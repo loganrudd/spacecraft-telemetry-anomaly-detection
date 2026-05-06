@@ -70,5 +70,11 @@ tune:
   hpo_eval_fraction: 0.6
 
 mlflow:
-  tracking_uri: "sqlite:///mlflow.db"
+  # HTTP endpoint — all clients (Ray workers, model-train, etc.) write through
+  # the server process, which serialises SQLite writes and eliminates "database
+  # is locked" errors under concurrent Ray tasks.
+  # Run `make mlflow-server` in a separate terminal before any training targets.
+  tracking_uri: "http://127.0.0.1:5001"
+  # SQLite file the server process opens.  Clients never touch this directly.
+  backend_store_uri: "sqlite:///mlflow.db"
   experiment_prefix: ""

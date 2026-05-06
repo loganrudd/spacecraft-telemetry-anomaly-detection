@@ -118,6 +118,39 @@ def _with_abs_paths(settings: Settings) -> Settings:
     )
 
 
+def _ensure_mlflow_experiments(settings: Settings, mission: str, phases: list[str]) -> None:
+    """Pre-create MLflow experiments in the driver process before Ray tasks run.
+
+    When the experiment doesn't yet exist, multiple Ray workers calling
+    mlflow.set_experiment() concurrently hit a TOCTOU race: each worker calls
+    get_experiment_by_name (returns None) then create_experiment, but only one
+    creation succeeds.  MLflow's client does not always retry gracefully on the
+    "already exists" error, so the losing workers may fall back to the "Default"
+    experiment and log runs there instead of the intended one.
+
+    Creating the experiment once in the driver (serial, no race) ensures it
+    exists before any worker tries to use it.  Workers then always take the
+    "experiment exists → get ID" branch, which is idempotent and race-free.
+
+    Failures are suppressed — a missing experiment is non-fatal; workers have
+    their own fallback behaviour.
+    """
+    from contextlib import suppress
+
+    import mlflow
+
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    with suppress(Exception):
+        configure_mlflow(settings)
+    for phase in phases:
+        name = experiment_name("telemanom", phase, mission)
+        with suppress(Exception):
+            mlflow.set_experiment(name)
+            log.debug("mlflow.experiment.ensured", name=name)
+
+
 def train_all_channels(
     settings: Settings,
     mission: str,
@@ -149,6 +182,7 @@ def train_all_channels(
         log.warning("ray.train.no_channels", mission=mission)
         return []
 
+    _ensure_mlflow_experiments(settings, mission, ["training"])
     log.info("ray.train.sweep.start", mission=mission, n_channels=len(work))
 
     train_task = make_train_task(
@@ -208,6 +242,7 @@ def score_all_channels(
         log.warning("ray.score.no_channels", mission=mission)
         return []
 
+    _ensure_mlflow_experiments(settings, mission, ["scoring"])
     log.info("ray.score.sweep.start", mission=mission, n_channels=len(work),
              tuned=tuned_configs is not None)
 
