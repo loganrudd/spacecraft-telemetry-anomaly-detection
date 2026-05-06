@@ -309,10 +309,13 @@ def score_all_channels(
         run_id = meta.get("run_id")
         return str(run_id) if run_id is not None else None
 
-    # Tuned-config scoring is evaluated on the held-out final portion to avoid
-    # the HPO/eval leakage fixed in Phase 7 Step 3. Untuned scoring uses the
-    # full test set for backward-compatible baseline metrics.
-    eval_split = "final_portion" if tuned_configs else "full_test"
+    # Both baseline and tuned scoring evaluate on the same held-out final
+    # portion so F0.5 comparisons are apples-to-apples. HPO only saw
+    # hpo_portion (first hpo_eval_fraction of test windows), so final_portion
+    # is genuinely unseen for both default and tuned params.
+    # Use eval_split="full_test" only when you want an overall-model-quality
+    # metric independent of any HPO comparison.
+    eval_split = "final_portion"
 
     score_task = make_score_task(
         num_gpus=settings.ray.num_gpus_per_task,
