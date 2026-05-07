@@ -11,9 +11,9 @@ train_all_channels(settings, mission, channels, *, max_channels=None) -> list[di
 score_all_channels(settings, mission, channels, *, max_channels=None,
                    tuned_configs=None) -> list[dict]
     Fan out score_channel across all channels, optionally applying per-subsystem
-    scoring param overrides from Phase 6 HPO output (tuned_configs.json).
+    scoring param overrides from Phase 5 HPO output (tuned_configs.json).
 
-tuned_configs schema (Phase 6 writes, score_all_channels reads)
+tuned_configs schema (Phase 5 writes, score_all_channels reads)
 ---------------------------------------------------------------
 A dict keyed by subsystem name. Each entry contains scoring-param overrides
 and a ``_meta`` block written by run_all_sweeps:
@@ -44,7 +44,7 @@ from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 
 log = get_logger(__name__)
 
-# Scoring fields that Phase 6 is allowed to tune; any other key in tuned_configs
+# Scoring fields that Phase 5 is allowed to tune; any other key in tuned_configs
 # is ignored. This prevents an accidental override of architecture params.
 _TUNABLE_SCORING_FIELDS = frozenset(
     {"threshold_z", "threshold_window", "error_smoothing_window", "threshold_min_anomaly_len"}
@@ -210,7 +210,7 @@ def score_all_channels(
 ) -> list[dict[str, Any]]:
     """Fan out score_channel across channels using Ray Core.
 
-    Optionally applies per-subsystem scoring param overrides from Phase 6 HPO
+    Optionally applies per-subsystem scoring param overrides from Phase 5 HPO
     output. Each channel is mapped to its subsystem via channels.csv; if the
     subsystem has a tuned config, the scoring params are overridden before
     dispatching the task.

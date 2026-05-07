@@ -422,9 +422,9 @@ def _ray_session(settings: Settings) -> Any:
     they can find installed packages when launched via `uv run`.
 
     NOTE: The PYTHONPATH injection works correctly for local dev where driver
-    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 11),
+    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 10),
     workers run in the container image, so PYTHONPATH from the driver node is
-    irrelevant. Phase 11 must replace this with runtime_env derived from the
+    irrelevant. Phase 10 must replace this with runtime_env derived from the
     container image (e.g. runtime_env={"pip": requirements_path}) or rely on
     the image having the package pre-installed.
     """
@@ -554,7 +554,7 @@ def ray_train(
     "--tuned-configs",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to JSON file with per-subsystem scoring param overrides (Phase 6 output).",
+    help="Path to JSON file with per-subsystem scoring param overrides (Phase 5 output).",
 )
 @click.pass_context
 def ray_score(
@@ -568,14 +568,14 @@ def ray_score(
 
     Loads trained model artifacts and runs anomaly scoring on test data.
     Scores all channels by default. Optionally applies per-subsystem scoring
-    param overrides from Phase 6 HPO output (--tuned-configs path/to/tuned_configs.json).
+    param overrides from Phase 5 HPO output (--tuned-configs path/to/tuned_configs.json).
 
     Examples:
 
         # Score all channels with Hundman defaults
         spacecraft-telemetry ray score --mission ESA-Mission1
 
-        # With Phase 6 HPO-tuned params
+        # With Phase 5 HPO-tuned params
         spacecraft-telemetry ray score --mission ESA-Mission1 \\
             --tuned-configs outputs/tuned_configs.json
     """
@@ -667,7 +667,7 @@ def ray_tune(
     num_samples: int | None,
     overwrite_existing: bool,
 ) -> None:
-    """Run Ray Tune HPO for scoring parameters (Phase 6).
+    """Run Ray Tune HPO for scoring parameters (Phase 5).
 
     Runs one Tune sweep per subsystem by default, or a single named subsystem
     when --subsystem is provided. Uses channel discovery unless --channels is

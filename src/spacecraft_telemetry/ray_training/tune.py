@@ -1,4 +1,4 @@
-"""Ray Tune HPO sweep for Telemanom scoring parameters (Phase 6).
+"""Ray Tune HPO sweep for Telemanom scoring parameters (Phase 5).
 
 Tunes all 4 scoring parameters (error_smoothing_window, threshold_window,
 threshold_z, threshold_min_anomaly_len) without re-training any LSTM models.
@@ -375,7 +375,7 @@ def run_all_sweeps(
 
     Subsystems where no channel has an errors.npy artifact are skipped. This
     allows the sweep to run cleanly when only a subset of channels have been
-    scored by Phase 5 (e.g. local dev with 1-5 channels).
+    scored by Phase 4 (e.g. local dev with 1-5 channels).
 
     Args:
         settings: Fully resolved Settings.

@@ -341,7 +341,7 @@ def test_train_channel_survives_broken_mlflow_uri(
 ) -> None:
     """train_channel returns a TrainingResult even when the MLflow backend is unreachable.
 
-    Phase 7 promise: "Tracking failures are caught and demoted to warnings —
+    Phase 6 promise: "Tracking failures are caught and demoted to warnings —
     the training run completes with filesystem artifacts intact."
 
     Uses a PostgreSQL URI that nobody is listening on so MLflow's set_experiment

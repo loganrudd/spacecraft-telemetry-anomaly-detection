@@ -1,4 +1,4 @@
-"""MLflow tracking and model registry — Phase 7.
+"""MLflow tracking and model registry — Phase 6.
 
 Public API
 ----------

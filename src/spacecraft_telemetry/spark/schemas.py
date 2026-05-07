@@ -66,7 +66,7 @@ CLEANED_CHANNEL_SCHEMA = StructType(
 # Per-timestep series (written to data/processed/{mission}/train/ and test/)
 # ---------------------------------------------------------------------------
 # One row per telemetry timestep. Windows are constructed on-the-fly in the
-# PyTorch DataLoader (Phase 4+), so window_size is a DataLoader parameter,
+# PyTorch DataLoader (Phase 3+), so window_size is a DataLoader parameter,
 # not baked into the on-disk schema. This avoids the 250x storage inflation
 # of pre-materialized windows (see Plan 002.5).
 

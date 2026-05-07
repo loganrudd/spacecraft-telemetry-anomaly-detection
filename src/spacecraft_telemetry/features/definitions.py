@@ -5,10 +5,10 @@ it is computed. Every phase that produces or consumes features imports from here
 
     Phase 2 (Spark)     — translates each FeatureDefinition to a Spark window
                           function; tests assert Spark output matches compute_numpy
-    Phase 8 (Evidently) — canonical column names for batch drift monitoring;
+    Phase 7 (Evidently) — canonical column names for batch drift monitoring;
                           compute_features_numpy() computes rolling features on
                           train/test Parquet at monitoring time
-    Phase 9 (FastAPI)   — calls compute_features_numpy() on a sliding value buffer
+    Phase 8 (FastAPI)   — calls compute_features_numpy() on a sliding value buffer
                           per tick of the SSE telemetry stream
 
 Adding a new feature here automatically propagates it to all phases that iterate
@@ -31,7 +31,7 @@ class FeatureDefinition:
     Attributes:
         name: Column name used everywhere (Parquet, Feast, Evidently).
         dtype: Feast/Spark type string — "float32" for all current features.
-        description: Plain-English definition. Phase 9 must match this exactly.
+        description: Plain-English definition. Phase 8 must match this exactly.
         window_size: Number of values the computation looks back over.
                      None means the feature uses a fixed look-back (e.g. 2 for ROC).
         compute_numpy: Pure-NumPy reference implementation.
@@ -163,7 +163,7 @@ def normalize_value(x: float, mean: float, std: float) -> float:
 
     This is the canonical formula used by both the Spark preprocessing pipeline
     (offline, via transforms.normalize()) and the FastAPI serving layer (online,
-    Phase 9) to normalize raw telemetry values at inference time.
+    Phase 8) to normalize raw telemetry values at inference time.
 
     Keeping the formula here — rather than inlined in transforms.py or the serving
     code — prevents train-serve skew: any drift in the formula is caught by the
@@ -207,7 +207,7 @@ def compute_features_numpy(
     """Compute all registered features for the most recent point in a buffer.
 
     This is the reference implementation consumed directly by:
-    - Phase 9 FastAPI streaming loop (one call per incoming telemetry tick)
+    - Phase 8 FastAPI streaming loop (one call per incoming telemetry tick)
     - Phase 2 Spark equivalence tests (validate Spark output matches this)
 
     Args:

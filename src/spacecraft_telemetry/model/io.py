@@ -1,6 +1,6 @@
 """Artifact I/O for Telemanom model files — MLflow-backed.
 
-After the A1 pivot (Phase 7 review), MLflow is the single source of truth for
+After the A1 pivot (Phase 6 review), MLflow is the single source of truth for
 all model artifacts.  All writes go through MLflow logging APIs inside
 training.py and scoring.py.  This module provides the read-path helpers:
 
@@ -10,7 +10,7 @@ training.py and scoring.py.  This module provides the read-path helpers:
 - errors_to_bytes / threshold_to_bytes: serialise numpy arrays for log_artifact_bytes.
 - bytes_to_errors: deserialise errors bytes back to a numpy array.
 
-Phase 5 note: _write_bytes / _read_bytes no longer exist.  The `gs://`
+Phase 4 note: _write_bytes / _read_bytes no longer exist.  The `gs://`
 indirection is handled by the MLflow artifact store — configure
 MLFLOW_ARTIFACTS_DESTINATION to a `gs://` bucket for cloud runs.
 """
@@ -128,7 +128,7 @@ def download_artifact_bytes(
 
 
 # ---------------------------------------------------------------------------
-# Model load (used by scoring.py and Phase 9 FastAPI)
+# Model load (used by scoring.py and Phase 8 FastAPI)
 # ---------------------------------------------------------------------------
 
 

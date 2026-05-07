@@ -202,7 +202,7 @@ class RayConfig(BaseModel):
 
 
 class TuneConfig(BaseModel):
-    """Ray Tune HPO configuration (Phase 6)."""
+    """Ray Tune HPO configuration (Phase 5)."""
 
     num_samples: int = 50               # trials per subsystem sweep
     max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
@@ -229,7 +229,7 @@ class TuneConfig(BaseModel):
 
 
 class MlflowConfig(BaseModel):
-    """MLflow tracking and registry configuration (Phase 7)."""
+    """MLflow tracking and registry configuration (Phase 6)."""
 
     # Default is resolved to an absolute path at import time so Ray workers
     # (which run from a session temp dir) always point to the same database.

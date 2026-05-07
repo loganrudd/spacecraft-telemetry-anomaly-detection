@@ -16,7 +16,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 6 of 12 complete (MLflow integration).**
+**Current phase: 6 of 11 complete (MLflow integration).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -64,7 +64,7 @@ make test
 
 ## Demo Workflow
 
-Full Phase 7 lifecycle (train → baseline score → HPO tune → tuned score → promote):
+Full Phase 6 lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
 ```bash
 # 1) Train all discovered channels (logged to MLflow training experiment)

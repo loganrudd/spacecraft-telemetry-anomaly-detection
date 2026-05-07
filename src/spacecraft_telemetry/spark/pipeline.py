@@ -131,7 +131,7 @@ def run_preprocessing(
 
         if train_count == 0:
             # Channel produced no training rows — no model will be trained.
-            # Omit from normalization_params so Phase 9 ignores this channel.
+            # Omit from normalization_params so Phase 8 ignores this channel.
             log.warning(
                 "pipeline.channel.no_train_rows",
                 channel_id=channel_id,
@@ -153,7 +153,7 @@ def run_preprocessing(
             test_rows=test_count,
         )
 
-    # Persist normalization params — required at inference time (Phase 9) to apply
+    # Persist normalization params — required at inference time (Phase 8) to apply
     # the identical z-score transform to incoming telemetry. Only channels that
     # produced training windows are included (others have no trained model).
     params_path = output_dir / mission / "normalization_params.json"

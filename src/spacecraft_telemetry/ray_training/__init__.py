@@ -1,4 +1,4 @@
-"""ray_training: Ray Core parallel training + Ray Tune HPO (Phase 5/6).
+"""ray_training: Ray Core parallel training + Ray Tune HPO (Phase 4/5).
 
 Public API
 ----------

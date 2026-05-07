@@ -5,7 +5,7 @@ Input:  (B, window_size, 1)
 Output: (B, 1)  — one-step-ahead prediction
 
 Architecture is intentionally off-the-shelf. Do NOT modify without a plan revision.
-Phase 6 (Ray Tune) varies hidden_dim / num_layers / dropout via ModelConfig overrides.
+Phase 5 (Ray Tune) varies hidden_dim / num_layers / dropout via ModelConfig overrides.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def build_model(model_config: ModelConfig) -> TelemanomLSTM:
     """Construct a TelemanomLSTM from a ModelConfig.
 
     Keeps Settings out of the architecture module so it can be imported
-    independently in Phase 9 (FastAPI serving) without the full config stack.
+    independently in Phase 8 (FastAPI serving) without the full config stack.
     """
     return TelemanomLSTM(
         hidden_dim=model_config.hidden_dim,
