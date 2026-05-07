@@ -7,7 +7,7 @@ from 3 ESA missions, ~225 telemetry channels.
 The model ([Telemanom LSTM, Hundman et al. 2018](https://arxiv.org/abs/1802.04431)) is
 intentionally off-the-shelf: one small LSTM per channel trains on nominal data and flags
 when sensor readings diverge from its predictions. The engineering emphasis is the platform
-wrapping it — Spark preprocessing, a Feast feature store, Ray Core for parallelizing
+wrapping it — Spark preprocessing, Ray Core for parallelizing
 hundreds of training jobs, Ray Tune for per-subsystem HPO, MLflow for experiment tracking
 and model registry, Evidently for drift monitoring, FastAPI with SSE for real-time stream
 replay, and Cloud Run for serving.
@@ -16,22 +16,20 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 7 of 12 complete (MLflow integration).**
+**Current phase: 6 of 12 complete (MLflow integration).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
 - Phase 2: PySpark preprocessing
-- Phase 3: Feast feature store integration
-- Phase 4: Telemanom model drop-in
-- Phase 5: Ray parallel training + scoring
-- Phase 6: Ray Tune scoring-parameter HPO
-- Phase 7: MLflow experiment tracking + model registry
+- Phase 3: Telemanom model drop-in
+- Phase 4: Ray parallel training + scoring
+- Phase 5: Ray Tune scoring-parameter HPO
+- Phase 6: MLflow experiment tracking + model registry
 
 ## What Works Today
 
 - End-to-end local workflow on sampled ESA data
 - Spark preprocessing to partitioned Parquet outputs
-- Feast apply/materialize and historical/online retrieval helpers
 - Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
 - Ray Tune HPO over scoring parameters per subsystem
@@ -102,12 +100,11 @@ Expected key artifacts:
 ## Repository Map
 
 Top-level directories:
-- `src/spacecraft_telemetry/`: application modules (ingest, spark, feast, model, ray, api)
+- `src/spacecraft_telemetry/`: application modules (ingest, spark, model, ray, api)
 - `tests/`: unit and integration tests mirroring source structure
 - `configs/`: environment YAML configs (`local`, `test`, `cloud`)
 - `data/`: raw, sampled, and processed telemetry
 - `models/`: per-mission/channel model and scoring artifacts
-- `feature_repo/`: Feast repository and local store config
 - `docs/`: plans, reviews, architecture notes
 
 ## Architecture Overview
@@ -116,7 +113,6 @@ Top-level directories:
 ESA Parquet (Zenodo/GCS)
   -> Download + Sample
   -> Spark preprocessing
-  -> Feast feature store
   -> Telemanom LSTM (per-channel)
   -> Ray parallel train/score
   -> Ray Tune scoring HPO
@@ -133,16 +129,15 @@ ESA Parquet (Zenodo/GCS)
 |---|---|---|
 | 1 | Repo scaffold + data ingestion | Complete |
 | 2 | PySpark preprocessing pipeline | Complete |
-| 3 | Feast feature store integration | Complete |
-| 4 | Telemanom model drop-in | Complete |
-| 5 | Ray parallel training | Complete |
-| 6 | Ray Tune HPO | Complete |
-| 7 | MLflow integration | Complete |
-| 8 | Evidently monitoring | In progress |
-| 9 | FastAPI serving layer | Planned |
-| 10 | React dashboard | Planned |
-| 11 | GCP deployment | Planned |
-| 12 | Documentation + polish | Planned |
+| 3 | Telemanom model drop-in | Complete |
+| 4 | Ray parallel training | Complete |
+| 5 | Ray Tune HPO | Complete |
+| 6 | MLflow integration | Complete |
+| 7 | Evidently monitoring | In progress |
+| 8 | FastAPI serving layer | Planned |
+| 9 | React dashboard | Planned |
+| 10 | GCP deployment | Planned |
+| 11 | Documentation + polish | Planned |
 
 ## Links
 

@@ -1,8 +1,7 @@
 """Spark preprocessing pipeline orchestration.
 
-Orchestrates: read → null-fill → gap-detect → normalize → label_timesteps → branch:
-  Features: add_rolling_features → write features/
-  Series:   temporal_train_test_split → write_series train/ + test/
+Orchestrates: read → null-fill → gap-detect → normalize → label_timesteps → split:
+  Series: temporal_train_test_split → write_series train/ + test/
 
 Processes channels sequentially to respect the M1 RAM constraint (512 m driver).
 Windowing is deferred to the PyTorch DataLoader (Plan 002.5).
@@ -19,10 +18,8 @@ from pyspark.sql import functions as F
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, FeatureDefinition
-from spacecraft_telemetry.spark.io import read_channel, read_labels, write_features, write_series
+from spacecraft_telemetry.spark.io import read_channel, read_labels, write_series
 from spacecraft_telemetry.spark.transforms import (
-    add_rolling_features,
     detect_gaps,
     handle_nulls,
     label_timesteps,
@@ -42,7 +39,6 @@ def run_preprocessing(
 
     Reads channel Parquet files from {data_dir}/{mission}/channels/ and labels from
     {data_dir}/{mission}/labels.csv (optional). Writes output to {output_dir}/{mission}/:
-      - features/  — one row per timestamp, partitioned by mission_id + channel_id
       - train/     — LSTM training windows, anomalies excluded, partitioned
       - test/      — LSTM evaluation windows (includes labeled anomaly windows), partitioned
       - normalization_params.json — per-channel mean/std for inference-time normalization
@@ -56,8 +52,7 @@ def run_preprocessing(
         mission: Mission name matching a subdirectory in the data dir (e.g. "ESA-Mission1").
 
     Returns:
-        Summary dict: {channels_processed, rows_in, feature_rows_out,
-        train_rows, test_rows}.
+        Summary dict: {channels_processed, rows_in, train_rows, test_rows}.
 
     Raises:
         FileNotFoundError: If no channel Parquet files are found in the channels directory.
@@ -81,23 +76,12 @@ def run_preprocessing(
         labels_df = read_labels(spark, labels_path)
 
     # Feature definitions restricted to the configured window sizes.
-    feature_defs: list[FeatureDefinition] = [
-        fd
-        for fd in FEATURE_DEFINITIONS
-        if fd.name == "rate_of_change" or fd.window_size in cfg.feature_windows
-    ]
-    feature_output_cols = [
-        "telemetry_timestamp",
-        "channel_id",
-        "mission_id",
-        "value_normalized",
-    ] + [fd.name for fd in feature_defs]
+    # (Kept for reference by Evidently monitoring — not used in this pipeline.)
 
     # Clear output dirs: re-runs must not accumulate duplicates across channels.
-    features_out = output_dir / mission / "features"
     train_out = output_dir / mission / "train"
     test_out = output_dir / mission / "test"
-    for out_dir in (features_out, train_out, test_out):
+    for out_dir in (train_out, test_out):
         if out_dir.exists():
             shutil.rmtree(out_dir)
 
@@ -116,7 +100,7 @@ def run_preprocessing(
         gapped = detect_gaps(cleaned, gap_multiplier=cfg.gap_multiplier)
         normalized, params = normalize(gapped, method=cfg.normalization)
 
-        # Cache the normalized result — both branches build from here.
+        # Cache the normalized result — series branch builds from here.
         # count() forces materialisation into the cache so subsequent reads are fast.
         normalized = normalized.cache()
         n_rows = normalized.count()
@@ -128,12 +112,6 @@ def run_preprocessing(
         else:
             # No labels file: mark everything nominal so the schema stays consistent.
             labeled = normalized.withColumn("is_anomaly", F.lit(False))
-
-        # Features branch: rolling stats → write for Feast (Phase 3).
-        # Uses normalized (without is_anomaly) to keep the feature schema clean.
-        features_df = add_rolling_features(normalized, feature_defs=feature_defs)
-        cols_to_write = [c for c in feature_output_cols if c in features_df.columns]
-        write_features(features_df.select(*cols_to_write), features_out, mode="append")
 
         # Series branch: temporal split → write per-timestep rows.
         # Anomaly exclusion is a DataLoader concern (skip_anomalous_windows flag),
@@ -185,7 +163,6 @@ def run_preprocessing(
     summary: dict[str, int] = {
         "channels_processed": len(channel_paths),
         "rows_in": total_rows_in,
-        "feature_rows_out": total_rows_in,  # add_rolling_features preserves row count
         "train_rows": total_train_rows,
         "test_rows": total_test_rows,
     }

@@ -6,7 +6,6 @@ import pytest
 
 from spacecraft_telemetry.core.config import (
     DataConfig,
-    FeastConfig,
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
@@ -323,85 +322,3 @@ class TestMlflowConfig:
     def test_experiment_prefix_stored(self) -> None:
         cfg = MlflowConfig(experiment_prefix="dev-")
         assert cfg.experiment_prefix == "dev-"
-
-
-# ---------------------------------------------------------------------------
-# FeastConfig
-# ---------------------------------------------------------------------------
-
-_YAML_WITH_FEAST = """\
-feast:
-  repo_path: feature_repo
-  project: spacecraft_telemetry
-  feature_view_name: telemetry_features
-  source_path: data/processed/ESA-Mission1/features
-  source_root: data/processed
-  ttl_days: 365
-"""
-
-
-class TestFeastConfig:
-    def test_defaults(self) -> None:
-        cfg = FeastConfig()
-        assert cfg.project == "spacecraft_telemetry"
-        assert cfg.feature_view_name == "telemetry_features"
-        assert cfg.ttl_days == 365
-        assert cfg.repo_path == Path("feature_repo")
-        assert cfg.source_path == Path("data/processed/ESA-Mission1/features")
-        assert cfg.source_root == Path("data/processed")
-
-    def test_ttl_zero_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="ttl_days"):
-            FeastConfig(ttl_days=0)
-
-    def test_ttl_negative_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="ttl_days"):
-            FeastConfig(ttl_days=-1)
-
-    def test_ttl_one_is_valid(self) -> None:
-        cfg = FeastConfig(ttl_days=1)
-        assert cfg.ttl_days == 1
-
-    def test_project_digits_first_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="project"):
-            FeastConfig(project="123bad")
-
-    def test_project_hyphen_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="project"):
-            FeastConfig(project="my-project")
-
-    def test_project_underscore_start_is_valid(self) -> None:
-        cfg = FeastConfig(project="_my_project")
-        assert cfg.project == "_my_project"
-
-    def test_project_alphanumeric_is_valid(self) -> None:
-        cfg = FeastConfig(project="spacecraft_telemetry")
-        assert cfg.project == "spacecraft_telemetry"
-
-    def test_load_settings_includes_feast(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        config_dir = tmp_path / "configs"
-        config_dir.mkdir()
-        (config_dir / "local.yaml").write_text(_YAML_WITH_FEAST)
-        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
-        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
-
-        settings = load_settings("local")
-
-        assert settings.feast.project == "spacecraft_telemetry"
-        assert settings.feast.ttl_days == 365
-        assert settings.feast.source_path == Path("data/processed/ESA-Mission1/features")
-        assert settings.feast.source_root == Path("data/processed")
-
-    def test_feast_env_var_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        config_dir = tmp_path / "configs"
-        config_dir.mkdir()
-        (config_dir / "local.yaml").write_text(_YAML_WITH_FEAST)
-        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
-        monkeypatch.setenv("SPACECRAFT_FEAST__TTL_DAYS", "30")
-        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
-
-        settings = load_settings("local")
-
-        assert settings.feast.ttl_days == 30  # env var overrides YAML

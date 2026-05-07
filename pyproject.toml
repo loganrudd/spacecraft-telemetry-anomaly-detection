@@ -37,7 +37,6 @@ serving = [
 ]
 tracking = [
     "mlflow>=3.0,<4",
-    "feast>=0.40,<1",
     "evidently>=0.4,<1",
 ]
 gcp = [

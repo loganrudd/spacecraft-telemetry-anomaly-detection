@@ -23,14 +23,6 @@ spark:
   gap_multiplier: 3.0
   feature_windows: [3, 5]  # small for fast tests
 
-feast:
-  repo_path: feature_repo
-  project: spacecraft_telemetry
-  feature_view_name: telemetry_features
-  source_path: data/processed/ESA-Mission1/features  # overridden to tmp_path in Feast tests
-  source_root: data/processed
-  ttl_days: 365
-
 model:
   hidden_dim: 16
   num_layers: 2

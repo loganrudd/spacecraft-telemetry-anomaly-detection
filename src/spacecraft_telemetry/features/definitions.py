@@ -3,12 +3,13 @@
 This module is the single source of truth for what each feature means and how
 it is computed. Every phase that produces or consumes features imports from here:
 
-    Phase 2 (Spark)   — translates each FeatureDefinition to a Spark window
-                        function; tests assert Spark output matches compute_numpy
-    Phase 3 (Feast)   — generates FeatureView schema from FEATURE_DEFINITIONS
-    Phase 9 (FastAPI) — calls compute_features_numpy() on a sliding value buffer
-                        and pushes results to the Feast online store
-    Phase 8 (Evidently) — references feature names for drift detection columns
+    Phase 2 (Spark)     — translates each FeatureDefinition to a Spark window
+                          function; tests assert Spark output matches compute_numpy
+    Phase 8 (Evidently) — canonical column names for batch drift monitoring;
+                          compute_features_numpy() computes rolling features on
+                          train/test Parquet at monitoring time
+    Phase 9 (FastAPI)   — calls compute_features_numpy() on a sliding value buffer
+                          per tick of the SSE telemetry stream
 
 Adding a new feature here automatically propagates it to all phases that iterate
 FEATURE_DEFINITIONS — no hardcoded column lists elsewhere.

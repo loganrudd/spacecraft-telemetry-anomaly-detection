@@ -16,11 +16,10 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
 .PHONY: help setup test test-all lint format typecheck \
         download-sample explore \
         spark-test spark-preprocess \
-        feast-apply feast-materialize feast-test \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
         mlflow-server mlflow-ui mlflow-promote \
-        clean clean-processed clean-models clean-feast clean-data clean-all
+        clean clean-processed clean-models clean-data clean-all
 
 help:          ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -80,21 +79,6 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=ESA-Mission1)
 	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
 		--mission $(MISSION)
-
-# ---------------------------------------------------------------------------
-# Feast feature store (Phase 3)
-# ---------------------------------------------------------------------------
-
-feast-apply:      ## Register Feast definitions to local registry
-	$(RUN) spacecraft-telemetry feast apply --mission $(MISSION)
-
-feast-materialize: ## Materialize features to online store — incremental (MISSION=ESA-Mission1)
-	$(RUN) spacecraft-telemetry feast materialize --mission $(MISSION)
-
-feast-test:       ## Run only Feast tests
-	$(RUN) python -m pytest tests/feast_client/ -v
-
-
 
 # ---------------------------------------------------------------------------
 # Telemanom model (Phase 4)
@@ -170,11 +154,8 @@ clean-processed: ## Remove Spark output (data/processed/) — re-run spark-prepr
 clean-models:    ## Remove trained model artifacts (models/) — re-run model-train to rebuild
 	rm -rf models/
 
-clean-feast:     ## Wipe Feast local registry and online store
-	rm -rf feature_repo/data/
-
 clean-data:      ## Remove downloaded raw + sample data — requires re-running download-sample
 	rm -rf data/raw/ data/sample/
 
-clean-all:       ## Remove everything: caches + processed + models + Feast + downloaded data
-	$(MAKE) clean clean-processed clean-models clean-feast clean-data
+clean-all:       ## Remove everything: caches + processed + models + downloaded data
+	$(MAKE) clean clean-processed clean-models clean-data
