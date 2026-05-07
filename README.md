@@ -16,7 +16,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 6 of 11 complete (MLflow integration).**
+**Current phase: 7 of 11 complete (Evidently drift monitoring).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -25,6 +25,7 @@ Completed:
 - Phase 4: Ray parallel training + scoring
 - Phase 5: Ray Tune scoring-parameter HPO
 - Phase 6: MLflow experiment tracking + model registry
+- Phase 7: Evidently batch drift detection + MLflow artifact logging
 
 ## What Works Today
 
@@ -36,6 +37,10 @@ Completed:
 - MLflow experiment tracking (training, scoring, HPO experiments per mission)
 - MLflow model registry with `telemanom-{mission}-{channel}` naming convention
 - `mlflow promote` CLI for Staging → Production stage transitions
+- Evidently batch drift detection (14 features: `value_normalized` + rolling stats)
+- Drift reports (HTML) logged as MLflow artifacts; per-feature metrics logged per run
+- `drift batch` CLI: build reference profile → run report → log to MLflow
+- `drift batch-mission` CLI: run all channels for a mission, print summary table
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -86,6 +91,14 @@ make mlflow-ui                      # opens at http://localhost:5001
 
 # 6) Promote a model to Production
 make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
+
+# 7) Run drift monitoring for a single channel
+#    Builds reference profile from train split, compares to test split,
+#    logs HTML report + per-feature metrics to telemanom-monitoring-ESA-Mission1 experiment.
+uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+
+# 8) Run drift monitoring for all discovered channels in a mission
+uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
@@ -117,7 +130,7 @@ ESA Parquet (Zenodo/GCS)
   -> Ray parallel train/score
   -> Ray Tune scoring HPO
   -> MLflow experiment tracking + model registry
-  -> Evidently monitoring (next)
+  -> Evidently drift monitoring (batch, per-channel, HTML reports in MLflow)
   -> FastAPI + SSE serving (next)
   -> React dashboard (next)
   -> GCP deployment
@@ -133,7 +146,7 @@ ESA Parquet (Zenodo/GCS)
 | 4 | Ray parallel training | Complete |
 | 5 | Ray Tune HPO | Complete |
 | 6 | MLflow integration | Complete |
-| 7 | Evidently monitoring | In progress |
+| 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Planned |
 | 9 | React dashboard | Planned |
 | 10 | GCP deployment | Planned |

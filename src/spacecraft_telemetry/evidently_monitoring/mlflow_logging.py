@@ -22,9 +22,9 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
 )
 
 try:
-    from evidently.legacy.report import Report  # type: ignore[import-untyped]
+    from evidently.legacy.report import Report
 except ImportError:  # pragma: no cover — Evidently not installed in some envs
-    Report = object  # type: ignore[assignment, misc]
+    Report = object
 
 
 def log_drift_report(

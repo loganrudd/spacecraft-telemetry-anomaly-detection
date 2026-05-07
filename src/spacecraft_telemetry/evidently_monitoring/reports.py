@@ -99,7 +99,7 @@ def report_to_bytes(report: Report) -> bytes:
     Returns:
         UTF-8 encoded HTML bytes.
     """
-    return report.get_html().encode("utf-8")
+    return str(report.get_html()).encode("utf-8")
 
 
 def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:

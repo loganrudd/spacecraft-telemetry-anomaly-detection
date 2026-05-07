@@ -126,12 +126,12 @@ class TestRunDriftReportNominal:
 
 
 # ---------------------------------------------------------------------------
-# run_drift_report — drifted (5σ mean shift on all columns)
+# run_drift_report — drifted (5-sigma mean shift on all columns)
 # ---------------------------------------------------------------------------
 
 
 class TestRunDriftReportDrifted:
-    """Current data mean-shifted by 5σ → all columns should drift."""
+    """Current data mean-shifted by 5-sigma → all columns should drift."""
 
     @pytest.fixture(scope="class")
     def drifted_result(self) -> tuple:

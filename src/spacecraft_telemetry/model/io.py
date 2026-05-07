@@ -171,13 +171,13 @@ def load_model_for_scoring(
         raise RuntimeError(
             f"Latest version of {name!r} has no associated run_id."
         )
-    model = mlflow_pytorch.load_model(
+    model = mlflow_pytorch.load_model(  # type: ignore[no-untyped-call]
         f"runs:/{run_id}/model",
         map_location=device,
     )
     run = client.get_run(run_id)
     window_size = int(run.data.params["window_size"])
-    return model, window_size  # type: ignore[return-value]
+    return model, window_size
 
 
 

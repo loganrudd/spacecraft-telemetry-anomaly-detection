@@ -34,10 +34,10 @@ from ray import tune
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
 )
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,

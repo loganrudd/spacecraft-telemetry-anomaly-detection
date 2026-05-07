@@ -94,7 +94,7 @@ class TestMonitoringFeatureCols:
         assert MONITORING_FEATURE_COLS[0] == "value_normalized"
 
     def test_contains_14_columns(self) -> None:
-        # value_normalized + 4 stats × 3 windows + rate_of_change = 14
+        # value_normalized + 4 stats x 3 windows + rate_of_change = 14
         assert len(MONITORING_FEATURE_COLS) == 14
 
     def test_contains_rate_of_change(self) -> None:

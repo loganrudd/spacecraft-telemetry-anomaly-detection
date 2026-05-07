@@ -17,10 +17,9 @@ import pytest
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.evidently_monitoring.mlflow_logging import log_drift_report
 from spacecraft_telemetry.evidently_monitoring.reference import (
-    MONITORING_FEATURE_COLS,
     compute_feature_dataframe,
 )
-from spacecraft_telemetry.evidently_monitoring.reports import DriftResult, run_drift_report
+from spacecraft_telemetry.evidently_monitoring.reports import run_drift_report
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -79,7 +78,7 @@ def nominal_report_and_result() -> tuple:
 
 @pytest.fixture(scope="module")
 def drifted_report_and_result() -> tuple:
-    """Module-scoped: 5σ mean-shifted current, guaranteed full drift."""
+    """Module-scoped: 5-sigma mean-shifted current, guaranteed full drift."""
     ref = _make_feature_df(seed=0)
     cur = _make_feature_df(shift=5.0, seed=0)
     return run_drift_report(ref, cur, Settings())

@@ -823,6 +823,7 @@ def mlflow_group() -> None:
 def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
     """Promote a registered model version to Staging, Production, or Archived."""
     import mlflow
+
     from spacecraft_telemetry.mlflow_tracking.registry import promote
 
     settings: Settings = ctx.obj["settings"]
