@@ -58,3 +58,9 @@ mlflow:
   # Tests override tracking_uri per-fixture via tmp_path to keep runs isolated.
   tracking_uri: "sqlite:///mlflow.test.db"
   experiment_prefix: ""
+
+monitoring:
+  drift_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+  report_output_dir: monitoring/reports
+  reference_sample_rows: 500  # small enough to build quickly in test fixtures

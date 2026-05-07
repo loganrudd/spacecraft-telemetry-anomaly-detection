@@ -70,3 +70,9 @@ mlflow:
   # SQLite file the server process opens.  Clients never touch this directly.
   backend_store_uri: "sqlite:///mlflow.db"
   experiment_prefix: ""
+
+monitoring:
+  drift_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+  report_output_dir: monitoring/reports
+  reference_sample_rows: 5000

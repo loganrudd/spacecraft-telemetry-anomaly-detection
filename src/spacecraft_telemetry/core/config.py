@@ -281,6 +281,34 @@ class MlflowConfig(BaseModel):
         return f"sqlite:///{resolved}"
 
 
+class MonitoringConfig(BaseModel):
+    """Evidently drift monitoring configuration (Phase 7)."""
+
+    # Fraction of features that must drift to emit a retraining trigger.
+    drift_threshold: float = 0.30
+    # Where reference profiles (train-split feature DataFrames) are persisted.
+    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+    # Where HTML drift reports are written before upload to MLflow.
+    report_output_dir: Path = Path("monitoring/reports")
+    # Max rows sampled from the train split when building a reference profile.
+    # Keeps memory bounded for long-running channels (full train can be 100K+ rows).
+    reference_sample_rows: int = 5000
+
+    @field_validator("drift_threshold")
+    @classmethod
+    def threshold_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"drift_threshold must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("reference_sample_rows")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"reference_sample_rows must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -321,6 +349,7 @@ class Settings(BaseSettings):
     ray: RayConfig = RayConfig()
     tune: TuneConfig = TuneConfig()
     mlflow: MlflowConfig = MlflowConfig()
+    monitoring: MonitoringConfig = MonitoringConfig()
 
     @classmethod
     def settings_customise_sources(

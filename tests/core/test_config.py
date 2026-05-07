@@ -9,6 +9,7 @@ from spacecraft_telemetry.core.config import (
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
+    MonitoringConfig,
     Settings,
     SparkConfig,
     TuneConfig,
@@ -322,3 +323,86 @@ class TestMlflowConfig:
     def test_experiment_prefix_stored(self) -> None:
         cfg = MlflowConfig(experiment_prefix="dev-")
         assert cfg.experiment_prefix == "dev-"
+
+
+# ---------------------------------------------------------------------------
+# MonitoringConfig
+# ---------------------------------------------------------------------------
+
+
+class TestMonitoringConfig:
+    def test_defaults(self) -> None:
+        cfg = MonitoringConfig()
+        assert cfg.drift_threshold == 0.30
+        assert cfg.reference_profiles_dir == Path("monitoring/reference_profiles")
+        assert cfg.report_output_dir == Path("monitoring/reports")
+        assert cfg.reference_sample_rows == 5000
+
+    def test_drift_threshold_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="drift_threshold"):
+            MonitoringConfig(drift_threshold=0.0)
+
+    def test_drift_threshold_one_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="drift_threshold"):
+            MonitoringConfig(drift_threshold=1.0)
+
+    def test_drift_threshold_valid(self) -> None:
+        cfg = MonitoringConfig(drift_threshold=0.5)
+        assert cfg.drift_threshold == 0.5
+
+    def test_reference_sample_rows_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="reference_sample_rows"):
+            MonitoringConfig(reference_sample_rows=0)
+
+    def test_reference_sample_rows_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="reference_sample_rows"):
+            MonitoringConfig(reference_sample_rows=-1)
+
+    def test_reference_sample_rows_custom(self) -> None:
+        cfg = MonitoringConfig(reference_sample_rows=500)
+        assert cfg.reference_sample_rows == 500
+
+    def test_custom_dirs(self) -> None:
+        cfg = MonitoringConfig(
+            reference_profiles_dir=Path("custom/profiles"),
+            report_output_dir=Path("custom/reports"),
+        )
+        assert cfg.reference_profiles_dir == Path("custom/profiles")
+        assert cfg.report_output_dir == Path("custom/reports")
+
+    def test_settings_has_monitoring_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.monitoring, MonitoringConfig)
+        assert settings.monitoring.drift_threshold == 0.30
+
+    def test_monitoring_round_trips_yaml(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text(
+            "monitoring:\n"
+            "  drift_threshold: 0.25\n"
+            "  reference_sample_rows: 1000\n"
+        )
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.monitoring.drift_threshold == 0.25
+        assert settings.monitoring.reference_sample_rows == 1000
+
+    def test_monitoring_env_var_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text("monitoring:\n  drift_threshold: 0.40\n")
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("SPACECRAFT_MONITORING__DRIFT_THRESHOLD", "0.20")
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.monitoring.drift_threshold == 0.20  # env var wins
