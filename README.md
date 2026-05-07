@@ -87,7 +87,7 @@ make ray-tune MISSION=ESA-Mission1
 make ray-score MISSION=ESA-Mission1 TUNED_CONFIGS=models/ESA-Mission1/tuned_configs.json
 
 # 5) Inspect experiments and registered models
-make mlflow-ui                      # opens at http://localhost:5001
+make mlflow-server                      # opens at http://localhost:5001
 
 # 6) Promote a model to Production
 make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production

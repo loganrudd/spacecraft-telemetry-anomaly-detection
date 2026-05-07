@@ -899,3 +899,176 @@ def mlflow_ui(ctx: click.Context, port: int) -> None:
 
 
 main.add_command(mlflow_group, name="mlflow")
+
+
+# ---------------------------------------------------------------------------
+# drift group
+# ---------------------------------------------------------------------------
+
+
+@click.group()
+def drift_group() -> None:
+    """Evidently batch drift monitoring commands."""
+
+
+def _run_drift_batch(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> dict[str, object]:
+    """Core logic for a single channel drift check.
+
+    Returns a result dict with keys: channel, drift_detected,
+    share_drifted, n_drifted, n_features, run_id, experiment.
+    """
+    import pyarrow.parquet as pq
+
+    from spacecraft_telemetry.evidently_monitoring import (
+        build_reference_profile,
+        log_drift_report,
+        reference_profile_path,
+        run_drift_report,
+        save_reference_profile,
+    )
+    from spacecraft_telemetry.evidently_monitoring.reference import (
+        compute_feature_dataframe,
+    )
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+
+    # 1) Build + save reference profile from train split.
+    reference = build_reference_profile(settings, mission, channel)
+    ref_path = reference_profile_path(settings, mission, channel)
+    save_reference_profile(reference, ref_path)
+
+    # 2) Load test split → compute feature DataFrame → "current".
+    partition_dir = (
+        Path(settings.spark.processed_data_dir)
+        / mission
+        / "test"
+        / f"mission_id={mission}"
+        / f"channel_id={channel}"
+    )
+    if not partition_dir.exists():
+        raise click.ClickException(
+            f"No test series Parquet for mission={mission!r} channel={channel!r}. "
+            f"Expected: {partition_dir}"
+        )
+    table = pq.read_table(str(partition_dir))
+    test_df = table.to_pandas()
+    test_df = test_df.sort_values("telemetry_timestamp").reset_index(drop=True)
+    current = compute_feature_dataframe(test_df, settings)
+
+    # 3) Run drift report.
+    report, result = run_drift_report(reference, current, settings)
+
+    # 4) Log to MLflow.
+    exp = experiment_name("telemanom", "monitoring", mission)
+    run_id = log_drift_report(report, result, settings, mission, channel)
+
+    return {
+        "channel": channel,
+        "drift_detected": result.drift_detected,
+        "share_drifted": result.share_of_drifted_columns,
+        "n_drifted": result.n_drifted,
+        "n_features": result.n_features,
+        "run_id": run_id,
+        "experiment": exp,
+    }
+
+
+@drift_group.command("batch")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option("--channel", required=True, help="Channel ID (e.g. channel_1).")
+@click.pass_context
+def drift_batch(ctx: click.Context, mission: str, channel: str) -> None:
+    """Run drift monitoring for a single channel.
+
+    Builds the reference profile from the train split, compares it to the test
+    split, and logs the HTML drift report + per-feature metrics to MLflow.
+
+    Examples:
+
+        spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+    """
+    settings: Settings = ctx.obj["settings"]
+    r = _run_drift_batch(settings, mission, channel)
+
+    click.echo(f"Channel       : {r['channel']}")
+    click.echo(f"Drift detected: {r['drift_detected']}")
+    click.echo(f"Share drifted : {r['share_drifted']:.3f}")
+    click.echo(f"N drifted     : {r['n_drifted']} / {r['n_features']}")
+    click.echo(f"Experiment    : {r['experiment']}")
+    click.echo(f"Run ID        : {r['run_id']}")
+
+
+@drift_group.command("batch-mission")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option(
+    "--max-channels",
+    type=int,
+    default=None,
+    help="Cap sweep at this many channels (useful for smoke tests).",
+)
+@click.pass_context
+def drift_batch_mission(
+    ctx: click.Context,
+    mission: str,
+    max_channels: int | None,
+) -> None:
+    """Run drift monitoring for all discovered channels in a mission.
+
+    Iterates over all channels found in the processed-data directory,
+    runs a drift check per channel, and prints a summary table.
+
+    Examples:
+
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1
+
+        # Smoke test: first 3 channels only
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --max-channels 3
+    """
+    from spacecraft_telemetry.ray_training import discover_channels
+
+    settings: Settings = ctx.obj["settings"]
+    channels = discover_channels(settings, mission)
+    if not channels:
+        raise click.ClickException(
+            f"No preprocessed channels found for {mission}. "
+            "Run `spacecraft-telemetry spark preprocess` first."
+        )
+    if max_channels is not None:
+        channels = channels[:max_channels]
+
+    results: list[dict[str, object]] = []
+    errors: list[tuple[str, str]] = []
+    for ch in channels:
+        try:
+            r = _run_drift_batch(settings, mission, ch)
+            results.append(r)
+        except Exception as exc:
+            errors.append((ch, str(exc)))
+
+    # Summary table
+    click.echo(f"\nMission : {mission}")
+    click.echo(f"Channels: {len(results) + len(errors)}\n")
+    col_w = max((len(str(r["channel"])) for r in results), default=10)
+    click.echo(f"  {'Channel':<{col_w}}  Drifted  Share   N drifted")
+    click.echo(f"  {'-' * col_w}  -------  ------  ---------")
+    for r in results:
+        flag = "YES" if r["drift_detected"] else "no"
+        click.echo(
+            f"  {r['channel']:<{col_w}}  {flag:<7}  "
+            f"{r['share_drifted']:.3f}   "
+            f"{r['n_drifted']}/{r['n_features']}"
+        )
+    for ch, err in errors:
+        click.echo(f"  {ch:<{col_w}}  ERROR    {err}")
+
+    n_drifted = sum(1 for r in results if r["drift_detected"])
+    click.echo(f"\nChannels with drift: {n_drifted} / {len(results)}")
+
+    if errors:
+        raise SystemExit(1)
+
+
+main.add_command(drift_group, name="drift")
