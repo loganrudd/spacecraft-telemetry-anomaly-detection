@@ -934,6 +934,11 @@ def _run_drift_batch(
         compute_feature_dataframe,
     )
     from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    # Lock in the tracking URI before Evidently's MLflow integration can
+    # auto-detect the local SQLite file and set a conflicting URI.
+    configure_mlflow(settings)
 
     # 1) Build + save reference profile from train split.
     reference = build_reference_profile(settings, mission, channel)
