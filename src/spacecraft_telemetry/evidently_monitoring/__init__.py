@@ -1,4 +1,4 @@
-"""evidently_monitoring: batch drift detection and model monitoring — Phase 8.
+"""evidently_monitoring: batch drift detection and model monitoring — Phase 7.
 
 Public API
 ----------
