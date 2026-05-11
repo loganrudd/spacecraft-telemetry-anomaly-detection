@@ -105,17 +105,20 @@ def report_to_bytes(report: Report) -> bytes:
 def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:
     """Extract DriftResult from the Evidently 0.7.x result dict.
 
-    Evidently 0.7.x result layout (after ``report.run()``):
+    Evidently 0.7.x result layout (after ``report.run()``), accessed by metric
+    name to avoid positional coupling across Evidently versions:
 
     .. code-block:: text
 
-        report.as_dict()["metrics"][0]   → DatasetDriftMetric
-            result["share_of_drifted_columns"] : float
-            result["number_of_drifted_columns"]: int
-            result["number_of_columns"]        : int
+        by_name = {m["metric"]: m["result"] for m in report.as_dict()["metrics"]}
 
-        report.as_dict()["metrics"][1]   → DataDriftTable
-            result["drift_by_columns"]   : dict[str, dict]
+        by_name["DatasetDriftMetric"]
+            ["share_of_drifted_columns"] : float
+            ["number_of_drifted_columns"]: int
+            ["number_of_columns"]        : int
+
+        by_name["DataDriftTable"]
+            ["drift_by_columns"]   : dict[str, dict]
                 [col]["drift_detected"]  : bool  (KS p < 0.05)
 
     If the Evidently version changes and this path breaks, fix only here.
@@ -127,16 +130,16 @@ def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:
     Returns:
         :class:`DriftResult` populated from the report data.
     """
-    metrics = report.as_dict()["metrics"]
+    by_name = {m["metric"]: m["result"] for m in report.as_dict()["metrics"]}
 
-    # DatasetDriftMetric (index 0) — aggregate stats
-    dataset_metric = metrics[0]["result"]
+    # DatasetDriftMetric — aggregate stats
+    dataset_metric = by_name["DatasetDriftMetric"]
     n_features: int = dataset_metric["number_of_columns"]
     n_drifted: int = dataset_metric["number_of_drifted_columns"]
     share: float = dataset_metric["share_of_drifted_columns"]
 
-    # DataDriftTable (index 1) — per-column KS results
-    drift_table = metrics[1]["result"]
+    # DataDriftTable — per-column KS results
+    drift_table = by_name["DataDriftTable"]
     per_column_drift: dict[str, bool] = {
         col: info["drift_detected"]
         for col, info in drift_table["drift_by_columns"].items()
