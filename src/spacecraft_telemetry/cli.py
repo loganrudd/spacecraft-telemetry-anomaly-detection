@@ -1015,6 +1015,7 @@ def drift_batch_mission(
     """
     from spacecraft_telemetry.ray_training import discover_channels
 
+    log = get_logger(__name__)
     settings: Settings = ctx.obj["settings"]
     channels = discover_channels(settings, mission)
     if not channels:
@@ -1036,6 +1037,7 @@ def drift_batch_mission(
             r = _run_drift_batch(settings, mission, ch)
             results.append(r)
         except Exception as exc:
+            log.exception("drift.batch.channel.failed", channel=ch)
             errors.append((ch, str(exc)))
 
     # Summary table
