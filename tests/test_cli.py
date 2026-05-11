@@ -647,3 +647,115 @@ class TestMlflowCli:
 
         assert result.exit_code != 0
         assert "No promotable versions" in result.output
+
+
+# ---------------------------------------------------------------------------
+# drift group
+# ---------------------------------------------------------------------------
+
+import pyarrow as _pa
+import pyarrow.parquet as _pq
+
+_DRIFT_SERIES_SCHEMA = _pa.schema(
+    [
+        _pa.field("telemetry_timestamp", _pa.timestamp("us", tz="UTC")),
+        _pa.field("value_normalized", _pa.float32()),
+        _pa.field("segment_id", _pa.int32()),
+        _pa.field("is_anomaly", _pa.bool_()),
+    ]
+)
+
+
+def _write_split_parquet(
+    base: Path,
+    mission: str,
+    channel: str,
+    split: str,
+    n: int = 300,
+    seed: int = 0,
+) -> None:
+    """Write a tiny Hive-partitioned series Parquet for one mission/channel/split."""
+    rng = np.random.default_rng(seed)
+    timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
+    table = _pa.table(
+        {
+            "telemetry_timestamp": _pa.array(timestamps.astype("datetime64[us, UTC]")),
+            "value_normalized": _pa.array(rng.standard_normal(n).astype("float32")),
+            "segment_id": _pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": _pa.array(np.zeros(n, dtype=bool)),
+        },
+        schema=_DRIFT_SERIES_SCHEMA,
+    )
+    partition_dir = (
+        base / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
+    )
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    _pq.write_table(table, partition_dir / "part.parquet")
+
+
+class TestDriftCommands:
+    """CLI smoke tests for `drift batch` and `drift batch-mission`."""
+
+    def test_drift_batch_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "drift", "batch", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--channel" in result.output
+
+    def test_drift_batch_mission_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "drift", "batch-mission", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--max-channels" in result.output
+
+    def test_drift_batch_runs_and_prints_channel(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
+        from spacecraft_telemetry.core.config import MonitoringConfig, Settings, SparkConfig
+
+        mission = "TEST-Mission"
+        channel = "ch_1"
+        _write_split_parquet(tmp_path, mission, channel, "train")
+        _write_split_parquet(tmp_path, mission, channel, "test", seed=1)
+
+        mlflow_uri = f"sqlite:///{tmp_path}/mlflow.db"
+        # Use Settings() defaults — test.yaml has feature_windows=[3, 5] which
+        # doesn't match MONITORING_FEATURE_COLS (built from [10, 50, 100]).
+        settings = Settings(
+            spark=SparkConfig(processed_data_dir=tmp_path),
+            mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+            monitoring=MonitoringConfig(reference_profiles_dir=tmp_path / "profiles"),
+        )
+
+        with patch("spacecraft_telemetry.cli.load_settings", return_value=settings):
+            result = runner.invoke(
+                main,
+                ["--env=test", "drift", "batch", f"--mission={mission}", f"--channel={channel}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Channel" in result.output
+        assert channel in result.output
+
+    def test_drift_batch_missing_channel_errors(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """drift batch fails with FileNotFoundError when channel data is absent."""
+        from spacecraft_telemetry.core.config import Settings, SparkConfig
+
+        mission = "TEST-Mission"
+        settings = Settings(
+            spark=SparkConfig(processed_data_dir=tmp_path),
+            mlflow=Settings().mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        )
+
+        with patch("spacecraft_telemetry.cli.load_settings", return_value=settings):
+            result = runner.invoke(
+                main,
+                ["--env=test", "drift", "batch", f"--mission={mission}", "--channel=nonexistent"],
+            )
+
+        assert result.exit_code != 0

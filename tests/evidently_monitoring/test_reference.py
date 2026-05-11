@@ -172,6 +172,40 @@ class TestComputeFeatureDataframe:
 
 
 # ---------------------------------------------------------------------------
+# compute_feature_dataframe — failure paths
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFeatureDataframeFailures:
+    def test_missing_value_normalized_raises_key_error(self) -> None:
+        """value_normalized is required; omitting it causes an immediate KeyError."""
+        df = _make_series_df(300).drop(columns=["value_normalized"])
+        with pytest.raises(KeyError):
+            compute_feature_dataframe(df, Settings())
+
+    def test_empty_dataframe_returns_empty(self) -> None:
+        """Empty input produces empty output without crashing."""
+        df = _make_series_df(0)
+        result = compute_feature_dataframe(df, Settings())
+        assert len(result) == 0
+        assert list(result.columns) == MONITORING_FEATURE_COLS
+
+    def test_mismatched_feature_windows_raises_value_error(self) -> None:
+        """feature_windows that don't match MONITORING_FEATURE_COLS raise ValueError."""
+        from spacecraft_telemetry.core.config import SparkConfig
+
+        settings = Settings(spark=SparkConfig(feature_windows=[5, 20]))
+        with pytest.raises(ValueError, match="feature_windows"):
+            compute_feature_dataframe(_make_series_df(300), settings)
+
+    def test_series_shorter_than_max_window_returns_empty(self) -> None:
+        """A series with fewer rows than max(windows) produces an empty DataFrame after dropna."""
+        df = _make_series_df(50)  # max window=100; warmup period > available rows
+        result = compute_feature_dataframe(df, Settings())
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
 # save / load round-trip
 # ---------------------------------------------------------------------------
 
