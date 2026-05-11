@@ -33,8 +33,11 @@ def _make_feature_df(
 ) -> pd.DataFrame:
     """Synthetic feature DataFrame with all MONITORING_FEATURE_COLS.
 
-    Builds a raw series, computes features, then optionally applies a mean-shift
-    and/or scale change to *all* feature columns to simulate data drift.
+    Applies shift and scale to the raw ``value_normalized`` signal *before*
+    computing features.  This models realistic drift — a mean shift leaves
+    rolling_std and rate_of_change unchanged (both are shift-invariant), while
+    a scale change affects rolling_std.  Tests that assert specific per-column
+    drift patterns should account for this behavior.
     """
     rng = np.random.default_rng(seed)
     timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
@@ -44,10 +47,11 @@ def _make_feature_df(
             "value_normalized": rng.standard_normal(n).astype(np.float32),
         }
     )
-    df = compute_feature_dataframe(raw, Settings())
     if shift != 0.0 or scale != 1.0:
-        df = df * scale + shift
-    return df
+        raw["value_normalized"] = (raw["value_normalized"] * scale + shift).astype(
+            np.float32
+        )
+    return compute_feature_dataframe(raw, Settings())
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +135,18 @@ class TestRunDriftReportNominal:
 
 
 class TestRunDriftReportDrifted:
-    """Current data mean-shifted by 5-sigma → all columns should drift."""
+    """Current raw signal mean-shifted 5-sigma → mean/min/max features drift.
+
+    Rolling std and rate_of_change are shift-invariant and may not drift.
+    At least 10 of 14 features (value_normalized + 3×mean + 3×min + 3×max)
+    should drift reliably with a 5-sigma shift and 300 samples.
+    """
 
     @pytest.fixture(scope="class")
     def drifted_result(self) -> tuple:
         ref = _make_feature_df(shift=0.0, seed=0)
-        # 5-sigma shift: with 200+ samples per column, KS test will detect drift
+        # 5-sigma shift on raw signal: mean/min/max features reliably drift;
+        # rolling_std and rate_of_change remain stable (shift-invariant).
         cur = _make_feature_df(shift=5.0, seed=1)
         return run_drift_report(ref, cur, Settings())
 
@@ -144,17 +154,21 @@ class TestRunDriftReportDrifted:
         _, result = drifted_result
         assert result.drift_detected is True
 
-    def test_share_equals_one(self, drifted_result: tuple) -> None:
+    def test_share_above_default_threshold(self, drifted_result: tuple) -> None:
         _, result = drifted_result
-        assert result.share_of_drifted_columns == 1.0
+        assert result.share_of_drifted_columns > 0.30
 
-    def test_all_columns_marked_drifted(self, drifted_result: tuple) -> None:
+    def test_mean_min_max_columns_all_drifted(self, drifted_result: tuple) -> None:
         _, result = drifted_result
-        assert all(result.per_column_drift.values())
+        for stat in ("mean", "min", "max"):
+            for w in (10, 50, 100):
+                col = f"rolling_{stat}_{w}"
+                assert result.per_column_drift[col] is True, f"{col} should drift"
+        assert result.per_column_drift["value_normalized"] is True
 
-    def test_n_drifted_equals_n_features(self, drifted_result: tuple) -> None:
+    def test_n_drifted_at_least_10(self, drifted_result: tuple) -> None:
         _, result = drifted_result
-        assert result.n_drifted == result.n_features == 14
+        assert result.n_drifted >= 10
 
 
 # ---------------------------------------------------------------------------
