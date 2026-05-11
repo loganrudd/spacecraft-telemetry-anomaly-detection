@@ -53,17 +53,12 @@ def configure_mlflow(settings: Settings) -> None:
     uri = settings.mlflow.tracking_uri
     _current = mlflow.get_tracking_uri()
     # Warn when switching away from a previously configured non-default URI.
-    # Suppressed for two expected cases:
-    #   1. Default mlruns/ paths start with "file://" — first call in a fresh process.
-    #   2. _current equals backend_store_uri — Evidently's report.run() has built-in
-    #      MLflow auto-detection and quietly resets the URI to the local SQLite file.
-    #      Correcting back to tracking_uri (e.g. the HTTP server) is intentional, not
-    #      a database-mismatch bug.
-    _is_own_backend = (
-        settings.mlflow.backend_store_uri is not None
-        and _current == settings.mlflow.backend_store_uri
-    )
-    if _current and not _current.startswith("file://") and _current != uri and not _is_own_backend:
+    # Suppressed only for the "file://" default path — the first call in a
+    # fresh process before any URI has been explicitly set.
+    # If this warning fires, an entry point is missing configure_mlflow(settings)
+    # before its first Evidently or Ray call — fix the calling order rather than
+    # adding suppression here.
+    if _current and not _current.startswith("file://") and _current != uri:
         log.warning(
             "mlflow.configure.uri_changed",
             previous=_current,
