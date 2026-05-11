@@ -88,6 +88,53 @@ def compute_feature_dataframe(
     return df[MONITORING_FEATURE_COLS].dropna().reset_index(drop=True)
 
 
+def _load_channel_series(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    split: str,
+) -> pd.DataFrame:
+    """Read raw series Parquet for one channel from the Hive-partitioned layout.
+
+    Path: ``{processed_data_dir}/{mission}/{split}/mission_id={M}/channel_id={C}/``
+
+    Only ``telemetry_timestamp`` and ``value_normalized`` are loaded — the two
+    columns needed to compute monitoring features.  Loading the full SERIES_SCHEMA
+    (segment_id, is_anomaly) doubles I/O for no gain.
+
+    Args:
+        settings: Runtime settings.
+        mission:  Mission identifier, e.g. ``"ESA-Mission1"``.
+        channel:  Channel identifier, e.g. ``"channel_1"``.
+        split:    ``"train"`` or ``"test"``.
+
+    Returns:
+        DataFrame with ``telemetry_timestamp`` and ``value_normalized``, sorted
+        by timestamp, index reset to 0-based.
+
+    Raises:
+        FileNotFoundError: If the partition directory does not exist.
+    """
+    partition_dir = (
+        Path(settings.spark.processed_data_dir)
+        / mission
+        / split
+        / f"mission_id={mission}"
+        / f"channel_id={channel}"
+    )
+    if not partition_dir.exists():
+        raise FileNotFoundError(
+            f"No {split} series Parquet for mission={mission!r} channel={channel!r}. "
+            f"Expected: {partition_dir}"
+        )
+    table = pq.read_table(
+        str(partition_dir),
+        columns=["telemetry_timestamp", "value_normalized"],
+    )
+    df = table.to_pandas()
+    return df.sort_values("telemetry_timestamp").reset_index(drop=True)
+
+
 def build_reference_profile(
     settings: Settings,
     mission: str,
@@ -116,24 +163,38 @@ def build_reference_profile(
     Raises:
         FileNotFoundError: If the channel partition directory does not exist.
     """
-    partition_dir = (
-        Path(settings.spark.processed_data_dir)
-        / mission
-        / "train"
-        / f"mission_id={mission}"
-        / f"channel_id={channel}"
-    )
-    if not partition_dir.exists():
-        raise FileNotFoundError(
-            f"No train series Parquet for mission={mission!r} channel={channel!r}. "
-            f"Expected: {partition_dir}"
-        )
-
-    table = pq.read_table(str(partition_dir))
-    df = table.to_pandas()
-    df = df.sort_values("telemetry_timestamp").reset_index(drop=True)
+    df = _load_channel_series(settings, mission, channel, "train")
     df = compute_feature_dataframe(df, settings)
+    n = settings.monitoring.reference_sample_rows
+    if len(df) > n:
+        df = df.sample(n=n, random_state=42).reset_index(drop=True)
+    return df
 
+
+def build_current_profile(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> pd.DataFrame:
+    """Build a current feature DataFrame from the test split for drift comparison.
+
+    Mirrors ``build_reference_profile`` but reads the test split.  Called by
+    ``drift batch`` to produce the "current" side of the Evidently report.
+
+    Args:
+        settings: Runtime settings (paths, window sizes, sample cap).
+        mission:  Mission identifier, e.g. ``"ESA-Mission1"``.
+        channel:  Channel identifier, e.g. ``"channel_1"``.
+
+    Returns:
+        DataFrame with columns ``MONITORING_FEATURE_COLS``, at most
+        ``settings.monitoring.reference_sample_rows`` rows.
+
+    Raises:
+        FileNotFoundError: If the test partition directory does not exist.
+    """
+    df = _load_channel_series(settings, mission, channel, "test")
+    df = compute_feature_dataframe(df, settings)
     n = settings.monitoring.reference_sample_rows
     if len(df) > n:
         df = df.sample(n=n, random_state=42).reset_index(drop=True)

@@ -921,17 +921,13 @@ def _run_drift_batch(
     Returns a result dict with keys: channel, drift_detected,
     share_drifted, n_drifted, n_features, run_id, experiment.
     """
-    import pyarrow.parquet as pq
-
     from spacecraft_telemetry.evidently_monitoring import (
+        build_current_profile,
         build_reference_profile,
         log_drift_report,
         reference_profile_path,
         run_drift_report,
         save_reference_profile,
-    )
-    from spacecraft_telemetry.evidently_monitoring.reference import (
-        compute_feature_dataframe,
     )
     from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
@@ -946,22 +942,7 @@ def _run_drift_batch(
     save_reference_profile(reference, ref_path)
 
     # 2) Load test split → compute feature DataFrame → "current".
-    partition_dir = (
-        Path(settings.spark.processed_data_dir)
-        / mission
-        / "test"
-        / f"mission_id={mission}"
-        / f"channel_id={channel}"
-    )
-    if not partition_dir.exists():
-        raise click.ClickException(
-            f"No test series Parquet for mission={mission!r} channel={channel!r}. "
-            f"Expected: {partition_dir}"
-        )
-    table = pq.read_table(str(partition_dir))
-    test_df = table.to_pandas()
-    test_df = test_df.sort_values("telemetry_timestamp").reset_index(drop=True)
-    current = compute_feature_dataframe(test_df, settings)
+    current = build_current_profile(settings, mission, channel)
 
     # 3) Run drift report.
     report, result = run_drift_report(reference, current, settings)
