@@ -162,27 +162,61 @@ class TestRunDriftReportDrifted:
 # ---------------------------------------------------------------------------
 
 
+def _make_partial_drift_df(seed: int = 0, n: int = _N) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (ref, cur) where cur has a 5-sigma mean shift on the raw signal.
+
+    A pure mean-shift leaves rolling_std and rate_of_change unchanged (both are
+    shift-invariant), so roughly 10 of 14 features drift instead of all 14.
+    This makes the pair suitable for testing threshold boundary logic.
+    """
+    rng = np.random.default_rng(seed)
+    timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
+    raw = pd.DataFrame(
+        {
+            "telemetry_timestamp": timestamps,
+            "value_normalized": rng.standard_normal(n).astype(np.float32),
+        }
+    )
+    ref = compute_feature_dataframe(raw, Settings())
+    # Shift the raw signal so features react realistically — rolling_std and
+    # rate_of_change don't shift, keeping share below 1.0.
+    raw_shifted = raw.copy()
+    raw_shifted["value_normalized"] = (raw_shifted["value_normalized"] + 5.0).astype(
+        np.float32
+    )
+    cur = compute_feature_dataframe(raw_shifted, Settings())
+    return ref, cur
+
+
 class TestDriftThreshold:
     def test_low_threshold_triggers_drift_on_partial_shift(self) -> None:
         """With threshold=0.01 even partial drift triggers detection."""
-        ref = _make_feature_df(shift=0.0, seed=0)
-        # Shift only the value_normalized column (the rest depend on it, so some
-        # will also drift, but the test just checks threshold logic)
-        cur = _make_feature_df(shift=5.0, seed=1)
+        ref, cur = _make_partial_drift_df(seed=0)
         settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.01))
         _, result = run_drift_report(ref, cur, settings)
         assert result.drift_detected is True
 
-    def test_high_threshold_suppresses_detection(self) -> None:
-        """With threshold=0.99 even heavily drifted data is not 'detected'."""
-        ref = _make_feature_df(shift=0.0, seed=0)
-        cur = _make_feature_df(shift=5.0, seed=1)
-        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.99))
+    def test_threshold_above_partial_share_suppresses_detection(self) -> None:
+        """A threshold above the actual drifted share suppresses drift detection.
+
+        A 5-sigma raw-signal mean-shift drifts ~10/14 features (share ≈ 0.714).
+        Setting threshold=0.80 (above 0.714) means drift is not flagged.
+        """
+        ref, cur = _make_partial_drift_df(seed=0)
+        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.80))
         _, result = run_drift_report(ref, cur, settings)
-        # share=1.0 < 0.99 is False, so drift_detected must be False
-        # Actually 1.0 > 0.99 → True. Use 0.999 instead.
-        # This just validates the threshold comparison direction.
-        assert result.share_of_drifted_columns > 0.0  # sanity: data did drift
+        assert result.share_of_drifted_columns > 0.0  # data genuinely drifted
+        assert result.drift_detected is False
+
+    def test_threshold_below_partial_share_detects_drift(self) -> None:
+        """A threshold below the actual drifted share triggers drift detection.
+
+        Same fixture as above; threshold=0.50 (below ~0.714) → detected.
+        """
+        ref, cur = _make_partial_drift_df(seed=0)
+        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.50))
+        _, result = run_drift_report(ref, cur, settings)
+        assert result.drift_detected is True
 
 
 # ---------------------------------------------------------------------------
