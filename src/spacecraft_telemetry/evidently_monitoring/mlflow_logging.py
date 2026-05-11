@@ -21,10 +21,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
     open_run,
 )
 
-try:
-    from evidently.legacy.report import Report
-except ImportError:  # pragma: no cover — Evidently not installed in some envs
-    Report = object
+from evidently.legacy.report import Report
 
 
 def log_drift_report(
