@@ -147,7 +147,7 @@ ESA Parquet (Zenodo/GCS)
 | 5 | Ray Tune HPO | Complete |
 | 6 | MLflow integration | Complete |
 | 7 | Evidently monitoring | Complete |
-| 8 | FastAPI serving layer | Planned |
+| 8 | FastAPI serving layer | In Progress |
 | 9 | React dashboard | Planned |
 | 10 | GCP deployment | Planned |
 | 11 | Documentation + polish | Planned |
