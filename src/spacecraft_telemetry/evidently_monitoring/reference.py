@@ -26,7 +26,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
+from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, _DEFAULT_WINDOWS
 
 # ---------------------------------------------------------------------------
 # Monitoring column set
@@ -40,6 +40,11 @@ from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
 MONITORING_FEATURE_COLS: list[str] = ["value_normalized"] + [
     fd.name for fd in FEATURE_DEFINITIONS
 ]
+
+# Rolling windows that MONITORING_FEATURE_COLS was built from.  Sourced directly
+# from _DEFAULT_WINDOWS in features/definitions.py — the two share one definition.
+# compute_feature_dataframe validates settings.spark.feature_windows against this.
+_MONITORING_WINDOWS: list[int] = sorted(_DEFAULT_WINDOWS)
 
 
 def compute_feature_dataframe(
@@ -63,8 +68,15 @@ def compute_feature_dataframe(
         DataFrame with columns ``MONITORING_FEATURE_COLS``, NaN warmup rows
         dropped, index reset to 0-based sequential integers.
     """
+    windows = list(settings.spark.feature_windows)
+    if sorted(windows) != _MONITORING_WINDOWS:
+        raise ValueError(
+            f"settings.spark.feature_windows {sorted(windows)} does not match the "
+            f"windows used to build MONITORING_FEATURE_COLS {_MONITORING_WINDOWS}. "
+            "Update FEATURE_DEFINITIONS or set feature_windows to "
+            f"{_MONITORING_WINDOWS} in your config."
+        )
     df = series_df.copy()
-    windows = settings.spark.feature_windows
 
     for w in windows:
         rolled = df["value_normalized"].rolling(window=w)
