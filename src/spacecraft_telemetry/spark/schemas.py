@@ -3,7 +3,6 @@
 Defining schemas here (rather than relying on inference) ensures:
 - Type errors surface at read time, not buried in transforms
 - ANSI mode strict typing is satisfied from the start
-- Feast feature view definitions have a single authoritative type reference
 """
 
 from __future__ import annotations
@@ -17,8 +16,6 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
-
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS
 
 # ---------------------------------------------------------------------------
 # Raw channel input
@@ -66,32 +63,10 @@ CLEANED_CHANNEL_SCHEMA = StructType(
 )
 
 # ---------------------------------------------------------------------------
-# Feature output (written to data/processed/{mission}/features/)
-# ---------------------------------------------------------------------------
-# One row per timestamp. Ingested by Feast offline store.
-# Feature columns are derived from FEATURE_DEFINITIONS so this schema stays
-# in sync automatically when new features are added to the registry.
-
-def _build_feature_schema() -> StructType:
-    base = [
-        StructField("telemetry_timestamp", TimestampType(), nullable=False),
-        StructField("channel_id", StringType(), nullable=False),
-        StructField("mission_id", StringType(), nullable=False),
-        StructField("value_normalized", FloatType(), nullable=False),
-    ]
-    feature_fields = [
-        StructField(fd.name, FloatType(), nullable=True) for fd in FEATURE_DEFINITIONS
-    ]
-    return StructType(base + feature_fields)
-
-
-FEATURE_SCHEMA = _build_feature_schema()
-
-# ---------------------------------------------------------------------------
 # Per-timestep series (written to data/processed/{mission}/train/ and test/)
 # ---------------------------------------------------------------------------
 # One row per telemetry timestep. Windows are constructed on-the-fly in the
-# PyTorch DataLoader (Phase 4+), so window_size is a DataLoader parameter,
+# PyTorch DataLoader (Phase 3+), so window_size is a DataLoader parameter,
 # not baked into the on-disk schema. This avoids the 250x storage inflation
 # of pre-materialized windows (see Plan 002.5).
 

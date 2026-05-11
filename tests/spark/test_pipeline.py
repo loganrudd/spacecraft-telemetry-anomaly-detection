@@ -59,7 +59,6 @@ class TestSummaryDict:
         assert set(summary.keys()) == {
             "channels_processed",
             "rows_in",
-            "feature_rows_out",
             "train_rows",
             "test_rows",
         }
@@ -96,26 +95,12 @@ class TestSummaryDict:
         # 100 rows, train_fraction=0.8 → last 20 rows go to test
         assert summary["test_rows"] == 20
 
-    def test_feature_rows_out_equals_rows_in(self, spark_session, settings) -> None:
-        from spacecraft_telemetry.spark.pipeline import run_preprocessing
-
-        summary = run_preprocessing(spark_session, settings, "ESA-Mission1")
-        # Features are 1-to-1 with input rows (one feature row per timestamp)
-        assert summary["feature_rows_out"] == summary["rows_in"]
-
-
 # ---------------------------------------------------------------------------
 # Output directory existence
 # ---------------------------------------------------------------------------
 
 
 class TestOutputDirectories:
-    def test_features_dir_created(self, spark_session, settings) -> None:
-        from spacecraft_telemetry.spark.pipeline import run_preprocessing
-
-        run_preprocessing(spark_session, settings, "ESA-Mission1")
-        assert (_output(settings) / "features").exists()
-
     def test_train_dir_created(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
@@ -127,15 +112,6 @@ class TestOutputDirectories:
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         assert (_output(settings) / "test").exists()
-
-    def test_partition_dirs_created_for_features(self, spark_session, settings) -> None:
-        from spacecraft_telemetry.spark.pipeline import run_preprocessing
-
-        run_preprocessing(spark_session, settings, "ESA-Mission1")
-        partition = (
-            _output(settings) / "features" / "mission_id=ESA-Mission1" / "channel_id=channel_1"
-        )
-        assert partition.is_dir()
 
     def test_partition_dirs_created_for_train(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
@@ -160,19 +136,6 @@ class TestOutputDirectories:
 
 
 class TestOutputSchemas:
-    def test_features_has_required_columns(self, spark_session, settings) -> None:
-        from spacecraft_telemetry.spark.pipeline import run_preprocessing
-
-        run_preprocessing(spark_session, settings, "ESA-Mission1")
-        df = spark_session.read.parquet(str(_output(settings) / "features"))
-        for col in (
-            "telemetry_timestamp",
-            "value_normalized",
-            "rolling_mean_10",
-            "rate_of_change",
-        ):
-            assert col in df.columns, f"Missing feature column: {col}"
-
     def test_train_has_is_anomaly_column(self, spark_session, settings) -> None:
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
@@ -253,9 +216,8 @@ class TestIdempotency:
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         run_preprocessing(spark_session, settings, "ESA-Mission1")
-        # If output was duplicated, feature_rows_out would double
-        df = spark_session.read.parquet(str(_output(settings) / "features"))
-        assert df.count() == 100
+        df = spark_session.read.parquet(str(_output(settings) / "train"))
+        assert df.count() == 80
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,6 @@ from spacecraft_telemetry.model.io import (  # noqa: E402
     threshold_to_bytes,
 )
 
-
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
@@ -80,11 +79,13 @@ def _log_artifact_in_run(tracking_uri: str, channel: str, artifact_name: str, da
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment("test-experiment")
-    with mlflow.start_run(tags={"channel_id": channel}) as run:
-        with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / artifact_name
-            p.write_bytes(data)
-            mlflow.log_artifact(str(p))
+    with (
+        mlflow.start_run(tags={"channel_id": channel}) as run,
+        tempfile.TemporaryDirectory() as tmp,
+    ):
+        p = Path(tmp) / artifact_name
+        p.write_bytes(data)
+        mlflow.log_artifact(str(p))
     return run.info.run_id
 
 

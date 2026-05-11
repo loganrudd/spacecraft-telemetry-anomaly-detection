@@ -260,7 +260,7 @@ def make_test_dataloader(
         target_timestamps: (M,) datetime64[ns] — timestamp at each window's
                            target position (index s + W + H - 1).
         window_is_anomaly: (M,) bool — True iff any step in [s, s+W+H) is
-                           anomalous (``any(...)`` semantics; matches Phase 4
+                           anomalous (``any(...)`` semantics; matches Phase 3
                            window-overlap definition for metric continuity).
 
     Args:
@@ -307,7 +307,7 @@ def load_window_labels(
 
     Uses the same windowing logic as make_test_dataloader() but has no torch
     dependency — suitable for import in numpy-only Ray Tune trial functions
-    (Phase 6).
+    (Phase 5).
 
     Returns:
         (M,) bool array — True iff any timestep in the window+horizon span

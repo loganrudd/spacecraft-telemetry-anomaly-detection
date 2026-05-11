@@ -257,230 +257,6 @@ class TestExploreCommand:
 
 
 # ---------------------------------------------------------------------------
-# feast group
-# ---------------------------------------------------------------------------
-
-
-class TestFeastCommands:
-    """Smoke tests for the feast CLI group.
-
-    These mock feast_client internals so no real Feast store is created — the
-    feast integration is covered thoroughly in tests/feast_client/.
-    """
-
-    def test_feast_help_lists_subcommands(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["feast", "--help"])
-        assert result.exit_code == 0
-        assert "apply" in result.output
-        assert "materialize" in result.output
-        assert "retrieve" in result.output
-
-    def test_feast_apply_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["feast", "apply", "--help"])
-        assert result.exit_code == 0
-        assert "--mission" in result.output
-
-    def test_feast_apply_calls_apply_definitions(
-        self, runner: CliRunner
-    ) -> None:
-        mock_store = MagicMock()
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.store.apply_definitions",
-                return_value={"entities": 2, "feature_views": 1},
-            ) as mock_apply,
-        ):
-            result = runner.invoke(main, ["--env=local", "feast", "apply"])
-
-        assert result.exit_code == 0, result.output
-        # apply_definitions(store, settings) — only check store arg; settings vary by env
-        call_args = mock_apply.call_args
-        assert call_args is not None
-        assert call_args.args[0] is mock_store
-        assert "Feature views : 1" in result.output
-
-    def test_feast_apply_mission_override(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        processed_dir = tmp_path / "processed"
-        monkeypatch.setenv(
-            "SPACECRAFT_FEAST__SOURCE_ROOT", str(processed_dir)
-        )
-        mock_store = MagicMock()
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ) as mock_create,
-            patch(
-                "spacecraft_telemetry.feast_client.store.apply_definitions",
-                return_value={"entities": 2, "feature_views": 1},
-            ),
-        ):
-            result = runner.invoke(
-                main, ["--env=local", "feast", "apply", "--mission=ESA-Mission1"]
-            )
-
-        assert result.exit_code == 0, result.output
-        # source_path should be overridden to processed_dir/ESA-Mission1/features
-        applied_settings = mock_create.call_args[0][0]
-        expected = processed_dir / "ESA-Mission1" / "features"
-        assert applied_settings.feast.source_path == expected
-
-    def test_feast_materialize_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["feast", "materialize", "--help"])
-        assert result.exit_code == 0
-        assert "--start-date" in result.output
-        assert "--end-date" in result.output
-
-    def test_feast_materialize_incremental(self, runner: CliRunner) -> None:
-        mock_store = MagicMock()
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.store.apply_definitions",
-                return_value={"entities": 2, "feature_views": 1},
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.store.materialize"
-            ) as mock_materialize,
-        ):
-            result = runner.invoke(main, ["--env=local", "feast", "materialize"])
-
-        assert result.exit_code == 0, result.output
-        mock_materialize.assert_called_once()
-        # start_date should be None (incremental)
-        assert mock_materialize.call_args.kwargs.get("start_date") is None
-
-    def test_feast_retrieve_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(main, ["feast", "retrieve", "--help"])
-        assert result.exit_code == 0
-        assert "--channel" in result.output
-        assert "--mission" in result.output
-        assert "--mode" in result.output
-
-    def test_feast_retrieve_requires_channel_and_mission(
-        self, runner: CliRunner
-    ) -> None:
-        result = runner.invoke(main, ["feast", "retrieve"])
-        assert result.exit_code != 0
-
-    def test_feast_retrieve_online_mode(self, runner: CliRunner) -> None:
-        mock_store = MagicMock()
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.store.apply_definitions",
-                return_value={"entities": 2, "feature_views": 1},
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.client.get_online_features_for_channel",
-                return_value={"telemetry_features__rolling_mean_10": 0.42},
-            ) as mock_online,
-        ):
-            result = runner.invoke(
-                main,
-                [
-                    "--env=local",
-                    "feast",
-                    "retrieve",
-                    "--channel=channel_1",
-                    "--mission=ESA-Mission1",
-                    "--mode=online",
-                ],
-            )
-
-        assert result.exit_code == 0, result.output
-        mock_online.assert_called_once_with(
-            mock_store, channel_id="channel_1", mission_id="ESA-Mission1"
-        )
-        assert "0.42" in result.output
-
-    def test_feast_retrieve_historical_requires_start(
-        self, runner: CliRunner
-    ) -> None:
-        mock_store = MagicMock()
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ),
-            patch(
-                "spacecraft_telemetry.feast_client.store.apply_definitions",
-                return_value={"entities": 2, "feature_views": 1},
-            ),
-        ):
-            result = runner.invoke(
-                main,
-                [
-                    "--env=local",
-                    "feast",
-                    "retrieve",
-                    "--channel=channel_1",
-                    "--mission=ESA-Mission1",
-                    "--mode=historical",
-                ],
-            )
-
-        assert result.exit_code != 0
-        assert "start" in result.output.lower()
-
-    def test_feast_retrieve_historical_with_start(self, runner: CliRunner) -> None:
-        # Asserts that --mode=historical builds a correctly-shaped entity_df and
-        # passes it to get_historical_features.
-        mock_store = MagicMock()
-        captured: dict[str, pd.DataFrame] = {}
-
-        def _capture_historical(store: object, entity_df: pd.DataFrame) -> pd.DataFrame:
-            captured["entity_df"] = entity_df
-            return pd.DataFrame({"rolling_mean_10": [0.5]})
-
-        with (
-            patch(
-                "spacecraft_telemetry.feast_client.store.create_feature_store",
-                return_value=mock_store,
-            ),
-            patch("spacecraft_telemetry.feast_client.store.apply_definitions"),
-            patch(
-                "spacecraft_telemetry.feast_client.client.get_historical_features",
-                side_effect=_capture_historical,
-            ),
-        ):
-            result = runner.invoke(
-                main,
-                [
-                    "--env=local",
-                    "feast",
-                    "retrieve",
-                    "--channel=channel_1",
-                    "--mission=ESA-Mission1",
-                    "--mode=historical",
-                    "--start=2000-01-01",
-                    "--end=2000-01-02",
-                ],
-            )
-
-        assert result.exit_code == 0, result.output
-        assert "entity_df" in captured, "get_historical_features was never called"
-        entity_df = captured["entity_df"]
-        assert list(entity_df["channel_id"].unique()) == ["channel_1"]
-        assert list(entity_df["mission_id"].unique()) == ["ESA-Mission1"]
-        assert "event_timestamp" in entity_df.columns
-        # 1-day window at 90s intervals ≈ 960 rows; just assert it's non-trivially large.
-        assert len(entity_df) > 10
-
-
-# ---------------------------------------------------------------------------
 # ray group
 # ---------------------------------------------------------------------------
 
@@ -871,3 +647,115 @@ class TestMlflowCli:
 
         assert result.exit_code != 0
         assert "No promotable versions" in result.output
+
+
+# ---------------------------------------------------------------------------
+# drift group
+# ---------------------------------------------------------------------------
+
+import pyarrow as _pa
+import pyarrow.parquet as _pq
+
+_DRIFT_SERIES_SCHEMA = _pa.schema(
+    [
+        _pa.field("telemetry_timestamp", _pa.timestamp("us", tz="UTC")),
+        _pa.field("value_normalized", _pa.float32()),
+        _pa.field("segment_id", _pa.int32()),
+        _pa.field("is_anomaly", _pa.bool_()),
+    ]
+)
+
+
+def _write_split_parquet(
+    base: Path,
+    mission: str,
+    channel: str,
+    split: str,
+    n: int = 300,
+    seed: int = 0,
+) -> None:
+    """Write a tiny Hive-partitioned series Parquet for one mission/channel/split."""
+    rng = np.random.default_rng(seed)
+    timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
+    table = _pa.table(
+        {
+            "telemetry_timestamp": _pa.array(timestamps.astype("datetime64[us, UTC]")),
+            "value_normalized": _pa.array(rng.standard_normal(n).astype("float32")),
+            "segment_id": _pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": _pa.array(np.zeros(n, dtype=bool)),
+        },
+        schema=_DRIFT_SERIES_SCHEMA,
+    )
+    partition_dir = (
+        base / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
+    )
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    _pq.write_table(table, partition_dir / "part.parquet")
+
+
+class TestDriftCommands:
+    """CLI smoke tests for `drift batch` and `drift batch-mission`."""
+
+    def test_drift_batch_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "drift", "batch", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--channel" in result.output
+
+    def test_drift_batch_mission_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "drift", "batch-mission", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--max-channels" in result.output
+
+    def test_drift_batch_runs_and_prints_channel(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
+        from spacecraft_telemetry.core.config import MonitoringConfig, Settings, SparkConfig
+
+        mission = "TEST-Mission"
+        channel = "ch_1"
+        _write_split_parquet(tmp_path, mission, channel, "train")
+        _write_split_parquet(tmp_path, mission, channel, "test", seed=1)
+
+        mlflow_uri = f"sqlite:///{tmp_path}/mlflow.db"
+        # Use Settings() defaults — test.yaml has feature_windows=[3, 5] which
+        # doesn't match MONITORING_FEATURE_COLS (built from [10, 50, 100]).
+        settings = Settings(
+            spark=SparkConfig(processed_data_dir=tmp_path),
+            mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+            monitoring=MonitoringConfig(reference_profiles_dir=tmp_path / "profiles"),
+        )
+
+        with patch("spacecraft_telemetry.cli.load_settings", return_value=settings):
+            result = runner.invoke(
+                main,
+                ["--env=test", "drift", "batch", f"--mission={mission}", f"--channel={channel}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Channel" in result.output
+        assert channel in result.output
+
+    def test_drift_batch_missing_channel_errors(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """drift batch fails with FileNotFoundError when channel data is absent."""
+        from spacecraft_telemetry.core.config import Settings, SparkConfig
+
+        mission = "TEST-Mission"
+        settings = Settings(
+            spark=SparkConfig(processed_data_dir=tmp_path),
+            mlflow=Settings().mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        )
+
+        with patch("spacecraft_telemetry.cli.load_settings", return_value=settings):
+            result = runner.invoke(
+                main,
+                ["--env=test", "drift", "batch", f"--mission={mission}", "--channel=nonexistent"],
+            )
+
+        assert result.exit_code != 0

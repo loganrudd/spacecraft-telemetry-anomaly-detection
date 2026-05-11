@@ -130,24 +130,3 @@ def write_series(
     """
     log.info("write_series", output_path=str(output_path), mode=mode)
     (df.write.mode(mode).partitionBy("mission_id", "channel_id").parquet(str(output_path)))
-
-
-def write_features(
-    df: DataFrame,
-    output_path: Path,
-    mode: str = "overwrite",
-) -> None:
-    """Write engineered features as partitioned Parquet for Feast ingestion.
-
-    Partition layout: {output_path}/mission_id={M}/channel_id={C}/part-*.parquet
-    Phase 3 (Feast) points its offline store FileSource at this directory for
-    get_historical_features() calls during training.
-
-    Args:
-        df: DataFrame conforming to FEATURE_SCHEMA. Must have mission_id and
-            channel_id columns — they become the partition directory names.
-        output_path: Root output directory (e.g. data/processed/ESA-Mission1/features/).
-        mode: Spark write mode. "overwrite" replaces existing data (default).
-    """
-    log.info("write_features", output_path=str(output_path), mode=mode)
-    (df.write.mode(mode).partitionBy("mission_id", "channel_id").parquet(str(output_path)))

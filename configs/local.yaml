@@ -24,14 +24,6 @@ spark:
   gap_multiplier: 3.0
   feature_windows: [10, 50, 100]
 
-feast:
-  repo_path: feature_repo
-  project: spacecraft_telemetry
-  feature_view_name: telemetry_features
-  source_path: data/processed/ESA-Mission1/features
-  source_root: data/processed
-  ttl_days: 365
-
 model:
   hidden_dim: 80
   num_layers: 2
@@ -78,3 +70,9 @@ mlflow:
   # SQLite file the server process opens.  Clients never touch this directly.
   backend_store_uri: "sqlite:///mlflow.db"
   experiment_prefix: ""
+
+monitoring:
+  drift_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+  report_output_dir: monitoring/reports
+  reference_sample_rows: 5000

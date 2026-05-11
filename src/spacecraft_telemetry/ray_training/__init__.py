@@ -1,4 +1,4 @@
-"""ray_training: Ray Core parallel training + Ray Tune HPO (Phase 5/6).
+"""ray_training: Ray Core parallel training + Ray Tune HPO (Phase 4/5).
 
 Public API
 ----------
@@ -13,9 +13,9 @@ run_all_sweeps       Group channels by subsystem, run all sweeps, write JSON.
 write_tuned_configs  Persist subsystem → best_config mapping as JSON.
 """
 
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.ray_training.runner import (
     discover_channels,
-    load_channel_subsystem_map,
     score_all_channels,
     train_all_channels,
 )

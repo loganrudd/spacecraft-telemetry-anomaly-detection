@@ -1,6 +1,6 @@
 """Telemanom anomaly scoring — pure numpy/pandas, no torch dependency.
 
-Importable in Phase 9 (FastAPI serving) without a PyTorch install.
+Importable in Phase 8 (FastAPI serving) without a PyTorch install.
 The thresholding and evaluation functions are importable without PyTorch —
 only predict() and score_channel() require it.
 
@@ -210,7 +210,7 @@ def score_channel(
     - ``"final_portion"``  — remaining windows; the held-out eval set that was
       NOT used for HPO in ``_prepare_channel_data``.
 
-    ``errors.npy`` is always saved from the full smoothed array so that Phase 6
+    ``errors.npy`` is always saved from the full smoothed array so that Phase 5
     HPO can keep consuming it regardless of which split was evaluated last.
 
     Args:

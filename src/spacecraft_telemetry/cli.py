@@ -9,7 +9,6 @@ Each subcommand follows the same pattern:
 from __future__ import annotations
 
 import contextlib as _contextlib
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -276,214 +275,8 @@ def spark_preprocess(
     click.echo(f"Mission           : {mission}")
     click.echo(f"Channels processed: {summary['channels_processed']}")
     click.echo(f"Rows in           : {summary['rows_in']:,}")
-    click.echo(f"Feature rows out  : {summary['feature_rows_out']:,}")
     click.echo(f"Train rows        : {summary['train_rows']:,}")
     click.echo(f"Test rows         : {summary['test_rows']:,}")
-
-
-# ---------------------------------------------------------------------------
-# feast group
-# ---------------------------------------------------------------------------
-
-
-@main.group()
-def feast() -> None:
-    """Feast feature store commands."""
-
-
-def _resolve_feast_settings(
-    ctx: click.Context,
-    mission: str | None,
-) -> Settings:
-    """Return settings, optionally overriding source_path for the given mission."""
-    settings: Settings = ctx.obj["settings"]
-    if mission is not None:
-        new_source_path = (
-            Path(str(settings.feast.source_root)) / mission / "features"
-        )
-        settings = settings.model_copy(
-            update={"feast": settings.feast.model_copy(update={"source_path": new_source_path})}
-        )
-    return settings
-
-
-@feast.command("apply")
-@click.option(
-    "--mission",
-    default=None,
-    help="Override source_path to spark.processed_data_dir/{mission}/features. "
-         "Default: use settings.feast.source_path from config.",
-)
-@click.pass_context
-def feast_apply(ctx: click.Context, mission: str | None) -> None:
-    """Register feature view definitions to the local Feast registry.
-
-    Examples:
-
-        # Use config default source_path
-        spacecraft-telemetry feast apply
-
-        # Override source path for a specific mission
-        spacecraft-telemetry feast apply --mission ESA-Mission1
-    """
-    from spacecraft_telemetry.feast_client.store import apply_definitions, create_feature_store
-
-    settings = _resolve_feast_settings(ctx, mission)
-    log = get_logger(__name__)
-
-    log.info("feast.apply.start", repo_path=str(settings.feast.repo_path))
-    store = create_feature_store(settings)
-    counts = apply_definitions(store, settings)
-    click.echo(f"Registry      : {settings.feast.repo_path}/data/registry.db")
-    click.echo(f"Entities      : {counts['entities']}")
-    click.echo(f"Feature views : {counts['feature_views']}")
-
-
-@feast.command("materialize")
-@click.option(
-    "--mission",
-    default=None,
-    help="Override source_path to spark.processed_data_dir/{mission}/features.",
-)
-@click.option(
-    "--end-date",
-    type=click.DateTime(),
-    default=None,
-    help="Materialize up to this date (default: now).",
-)
-@click.option(
-    "--start-date",
-    type=click.DateTime(),
-    default=None,
-    help="Explicit backfill start. Omit for incremental (since last materialization).",
-)
-@click.pass_context
-def feast_materialize(
-    ctx: click.Context,
-    mission: str | None,
-    end_date: datetime | None,
-    start_date: datetime | None,
-) -> None:
-    """Materialize offline features into the online (SQLite) store.
-
-    Incremental by default — only processes rows added since the last run.
-    Use --start-date for a full backfill window.
-
-    Examples:
-
-        # Incremental (most common)
-        spacecraft-telemetry feast materialize --mission ESA-Mission1
-
-        # Explicit backfill window
-        spacecraft-telemetry feast materialize --mission ESA-Mission1 \\
-            --start-date 2000-01-01 --end-date 2001-01-01
-    """
-    from datetime import datetime
-
-    from spacecraft_telemetry.feast_client.store import (
-        create_feature_store,
-        ensure_applied,
-        materialize,
-    )
-
-    settings = _resolve_feast_settings(ctx, mission)
-    log = get_logger(__name__)
-
-    end = end_date or datetime.now(tz=UTC)
-    store = create_feature_store(settings)
-    # Auto-register definitions if the registry doesn't exist yet.
-    ensure_applied(store, settings)
-
-    log.info(
-        "feast.materialize.cli.start",
-        end_date=str(end),
-        start_date=str(start_date) if start_date else "incremental",
-    )
-    materialize(store, end_date=end, start_date=start_date)
-    click.echo(f"Materialized up to {end.isoformat()}")
-    click.echo(f"Online store   : {settings.feast.repo_path}/data/online_store.db")
-
-
-@feast.command("retrieve")
-@click.option("--channel", required=True, help="Channel entity key (e.g. channel_1).")
-@click.option("--mission", required=True, help="Mission entity key (e.g. ESA-Mission1).")
-@click.option(
-    "--mode",
-    type=click.Choice(["online", "historical"]),
-    default="online",
-    show_default=True,
-    help="online: latest materialized values; historical: point-in-time window.",
-)
-@click.option(
-    "--start",
-    type=click.DateTime(),
-    default=None,
-    help="Historical window start (required when --mode=historical).",
-)
-@click.option(
-    "--end",
-    type=click.DateTime(),
-    default=None,
-    help="Historical window end (default: now, used when --mode=historical).",
-)
-@click.pass_context
-def feast_retrieve(
-    ctx: click.Context,
-    channel: str,
-    mission: str,
-    mode: str,
-    start: datetime | None,
-    end: datetime | None,
-) -> None:
-    """Retrieve features for a channel/mission pair.
-
-    Examples:
-
-        # Latest values from the online store
-        spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1
-
-        # Point-in-time historical window
-        spacecraft-telemetry feast retrieve --channel channel_1 --mission ESA-Mission1 \\
-            --mode historical --start 2000-01-01 --end 2000-02-01
-    """
-    import json
-    from datetime import datetime
-
-    import pandas as pd
-
-    from spacecraft_telemetry.feast_client.client import (
-        get_historical_features,
-        get_online_features_for_channel,
-    )
-    from spacecraft_telemetry.feast_client.store import create_feature_store, ensure_applied
-
-    settings = _resolve_feast_settings(ctx, mission)
-    store = create_feature_store(settings)
-    ensure_applied(store, settings)
-
-    if mode == "online":
-        result = get_online_features_for_channel(store, channel_id=channel, mission_id=mission)
-        click.echo(json.dumps(result, indent=2, default=str))
-    else:
-        if start is None:
-            raise click.UsageError("--start is required when --mode=historical")
-        end_ts = end or datetime.now(tz=UTC)
-        # NOTE (debug-only): synthesises a regular 90-second grid over the window.
-        # This does NOT honour ESA's irregular sampling — Phase 4 training
-        # supplies real telemetry timestamps instead.  Large windows are slow:
-        # O(N log N) point-in-time join on ~29 k rows per 30-day window.
-        start_utc = start.replace(tzinfo=UTC) if start.tzinfo is None else start
-        end_utc = end_ts.replace(tzinfo=UTC) if end_ts.tzinfo is None else end_ts
-        timestamps = pd.date_range(start=start_utc, end=end_utc, freq="1h", tz="UTC")
-        entity_df = pd.DataFrame(
-            {
-                "channel_id": channel,
-                "mission_id": mission,
-                "event_timestamp": timestamps,
-            }
-        )
-        df = get_historical_features(store, entity_df)
-        click.echo(df.to_string())
 
 
 # ---------------------------------------------------------------------------
@@ -629,9 +422,9 @@ def _ray_session(settings: Settings) -> Any:
     they can find installed packages when launched via `uv run`.
 
     NOTE: The PYTHONPATH injection works correctly for local dev where driver
-    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 11),
+    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 10),
     workers run in the container image, so PYTHONPATH from the driver node is
-    irrelevant. Phase 11 must replace this with runtime_env derived from the
+    irrelevant. Phase 10 must replace this with runtime_env derived from the
     container image (e.g. runtime_env={"pip": requirements_path}) or rely on
     the image having the package pre-installed.
     """
@@ -761,7 +554,7 @@ def ray_train(
     "--tuned-configs",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to JSON file with per-subsystem scoring param overrides (Phase 6 output).",
+    help="Path to JSON file with per-subsystem scoring param overrides (Phase 5 output).",
 )
 @click.pass_context
 def ray_score(
@@ -775,14 +568,14 @@ def ray_score(
 
     Loads trained model artifacts and runs anomaly scoring on test data.
     Scores all channels by default. Optionally applies per-subsystem scoring
-    param overrides from Phase 6 HPO output (--tuned-configs path/to/tuned_configs.json).
+    param overrides from Phase 5 HPO output (--tuned-configs path/to/tuned_configs.json).
 
     Examples:
 
         # Score all channels with Hundman defaults
         spacecraft-telemetry ray score --mission ESA-Mission1
 
-        # With Phase 6 HPO-tuned params
+        # With Phase 5 HPO-tuned params
         spacecraft-telemetry ray score --mission ESA-Mission1 \\
             --tuned-configs outputs/tuned_configs.json
     """
@@ -874,7 +667,7 @@ def ray_tune(
     num_samples: int | None,
     overwrite_existing: bool,
 ) -> None:
-    """Run Ray Tune HPO for scoring parameters (Phase 6).
+    """Run Ray Tune HPO for scoring parameters (Phase 5).
 
     Runs one Tune sweep per subsystem by default, or a single named subsystem
     when --subsystem is provided. Uses channel discovery unless --channels is
@@ -1030,6 +823,7 @@ def mlflow_group() -> None:
 def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
     """Promote a registered model version to Staging, Production, or Archived."""
     import mlflow
+
     from spacecraft_telemetry.mlflow_tracking.registry import promote
 
     settings: Settings = ctx.obj["settings"]
@@ -1105,3 +899,172 @@ def mlflow_ui(ctx: click.Context, port: int) -> None:
 
 
 main.add_command(mlflow_group, name="mlflow")
+
+
+# ---------------------------------------------------------------------------
+# drift group
+# ---------------------------------------------------------------------------
+
+
+@click.group()
+def drift_group() -> None:
+    """Evidently batch drift monitoring commands."""
+
+
+def _run_drift_batch(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> dict[str, object]:
+    """Core logic for a single channel drift check.
+
+    Returns a result dict with keys: channel, drift_detected,
+    share_drifted, n_drifted, n_features, run_id, experiment.
+    """
+    from spacecraft_telemetry.evidently_monitoring import (
+        build_current_profile,
+        build_reference_profile,
+        log_drift_report,
+        reference_profile_path,
+        run_drift_report,
+        save_reference_profile,
+    )
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    # Lock in the tracking URI before Evidently's MLflow integration can
+    # auto-detect the local SQLite file and set a conflicting URI.
+    configure_mlflow(settings)
+
+    # 1) Build + save reference profile from train split.
+    reference = build_reference_profile(settings, mission, channel)
+    ref_path = reference_profile_path(settings, mission, channel)
+    save_reference_profile(reference, ref_path)
+
+    # 2) Load test split → compute feature DataFrame → "current".
+    current = build_current_profile(settings, mission, channel)
+
+    # 3) Run drift report.
+    report, result = run_drift_report(reference, current, settings)
+
+    # Evidently's report.run() auto-detects the local mlflow.db and resets the
+    # global tracking URI.  Re-lock it so log_drift_report logs to the right server.
+    configure_mlflow(settings)
+
+    # 4) Log to MLflow.
+    exp = experiment_name("telemanom", "monitoring", mission)
+    run_id = log_drift_report(report, result, settings, mission, channel)
+
+    return {
+        "channel": channel,
+        "drift_detected": result.drift_detected,
+        "share_drifted": result.share_of_drifted_columns,
+        "n_drifted": result.n_drifted,
+        "n_features": result.n_features,
+        "run_id": run_id,
+        "experiment": exp,
+    }
+
+
+@drift_group.command("batch")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option("--channel", required=True, help="Channel ID (e.g. channel_1).")
+@click.pass_context
+def drift_batch(ctx: click.Context, mission: str, channel: str) -> None:
+    """Run drift monitoring for a single channel.
+
+    Builds the reference profile from the train split, compares it to the test
+    split, and logs the HTML drift report + per-feature metrics to MLflow.
+
+    Examples:
+
+        spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+    """
+    settings: Settings = ctx.obj["settings"]
+    r = _run_drift_batch(settings, mission, channel)
+
+    click.echo(f"Channel       : {r['channel']}")
+    click.echo(f"Drift detected: {r['drift_detected']}")
+    click.echo(f"Share drifted : {r['share_drifted']:.3f}")
+    click.echo(f"N drifted     : {r['n_drifted']} / {r['n_features']}")
+    click.echo(f"Experiment    : {r['experiment']}")
+    click.echo(f"Run ID        : {r['run_id']}")
+
+
+@drift_group.command("batch-mission")
+@click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
+@click.option(
+    "--max-channels",
+    type=int,
+    default=None,
+    help="Cap sweep at this many channels (useful for smoke tests).",
+)
+@click.pass_context
+def drift_batch_mission(
+    ctx: click.Context,
+    mission: str,
+    max_channels: int | None,
+) -> None:
+    """Run drift monitoring for all discovered channels in a mission.
+
+    Iterates over all channels found in the processed-data directory,
+    runs a drift check per channel, and prints a summary table.
+
+    Examples:
+
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1
+
+        # Smoke test: first 3 channels only
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --max-channels 3
+    """
+    from spacecraft_telemetry.ray_training import discover_channels
+
+    log = get_logger(__name__)
+    settings: Settings = ctx.obj["settings"]
+    channels = discover_channels(settings, mission)
+    if not channels:
+        raise click.ClickException(
+            f"No preprocessed channels found for {mission}. "
+            "Run `spacecraft-telemetry spark preprocess` first."
+        )
+    if max_channels is not None:
+        channels = channels[:max_channels]
+
+    # TODO(phase9): parallelize with @ray.remote drift_one_channel — same shape as
+    # ray_train's per-channel tasks.  Serial is fine for portfolio demo (<10 channels),
+    # but a full-mission sweep (~300 channels × 5 s each) takes ~25 min here vs ~3 min
+    # with Ray.  Evidently's MLflow auto-detection inside workers needs validation first.
+    results: list[dict[str, object]] = []
+    errors: list[tuple[str, str]] = []
+    for ch in channels:
+        try:
+            r = _run_drift_batch(settings, mission, ch)
+            results.append(r)
+        except Exception as exc:
+            log.exception("drift.batch.channel.failed", channel=ch)
+            errors.append((ch, str(exc)))
+
+    # Summary table
+    click.echo(f"\nMission : {mission}")
+    click.echo(f"Channels: {len(results) + len(errors)}\n")
+    col_w = max((len(str(r["channel"])) for r in results), default=10)
+    click.echo(f"  {'Channel':<{col_w}}  Drifted  Share   N drifted")
+    click.echo(f"  {'-' * col_w}  -------  ------  ---------")
+    for r in results:
+        flag = "YES" if r["drift_detected"] else "no"
+        click.echo(
+            f"  {r['channel']:<{col_w}}  {flag:<7}  "
+            f"{r['share_drifted']:.3f}   "
+            f"{r['n_drifted']}/{r['n_features']}"
+        )
+    for ch, err in errors:
+        click.echo(f"  {ch:<{col_w}}  ERROR    {err}")
+
+    n_drifted = sum(1 for r in results if r["drift_detected"])
+    click.echo(f"\nChannels with drift: {n_drifted} / {len(results)}")
+
+    if errors:
+        raise SystemExit(1)
+
+
+main.add_command(drift_group, name="drift")

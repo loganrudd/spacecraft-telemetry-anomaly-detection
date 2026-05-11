@@ -6,10 +6,10 @@ import pytest
 
 from spacecraft_telemetry.core.config import (
     DataConfig,
-    FeastConfig,
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
+    MonitoringConfig,
     Settings,
     SparkConfig,
     TuneConfig,
@@ -326,82 +326,83 @@ class TestMlflowConfig:
 
 
 # ---------------------------------------------------------------------------
-# FeastConfig
+# MonitoringConfig
 # ---------------------------------------------------------------------------
 
-_YAML_WITH_FEAST = """\
-feast:
-  repo_path: feature_repo
-  project: spacecraft_telemetry
-  feature_view_name: telemetry_features
-  source_path: data/processed/ESA-Mission1/features
-  source_root: data/processed
-  ttl_days: 365
-"""
 
-
-class TestFeastConfig:
+class TestMonitoringConfig:
     def test_defaults(self) -> None:
-        cfg = FeastConfig()
-        assert cfg.project == "spacecraft_telemetry"
-        assert cfg.feature_view_name == "telemetry_features"
-        assert cfg.ttl_days == 365
-        assert cfg.repo_path == Path("feature_repo")
-        assert cfg.source_path == Path("data/processed/ESA-Mission1/features")
-        assert cfg.source_root == Path("data/processed")
+        cfg = MonitoringConfig()
+        assert cfg.drift_threshold == 0.30
+        assert cfg.reference_profiles_dir == Path("monitoring/reference_profiles")
+        assert cfg.report_output_dir == Path("monitoring/reports")
+        assert cfg.reference_sample_rows == 5000
 
-    def test_ttl_zero_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="ttl_days"):
-            FeastConfig(ttl_days=0)
+    def test_drift_threshold_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="drift_threshold"):
+            MonitoringConfig(drift_threshold=0.0)
 
-    def test_ttl_negative_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="ttl_days"):
-            FeastConfig(ttl_days=-1)
+    def test_drift_threshold_one_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="drift_threshold"):
+            MonitoringConfig(drift_threshold=1.0)
 
-    def test_ttl_one_is_valid(self) -> None:
-        cfg = FeastConfig(ttl_days=1)
-        assert cfg.ttl_days == 1
+    def test_drift_threshold_valid(self) -> None:
+        cfg = MonitoringConfig(drift_threshold=0.5)
+        assert cfg.drift_threshold == 0.5
 
-    def test_project_digits_first_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="project"):
-            FeastConfig(project="123bad")
+    def test_reference_sample_rows_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="reference_sample_rows"):
+            MonitoringConfig(reference_sample_rows=0)
 
-    def test_project_hyphen_is_invalid(self) -> None:
-        with pytest.raises(ValueError, match="project"):
-            FeastConfig(project="my-project")
+    def test_reference_sample_rows_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="reference_sample_rows"):
+            MonitoringConfig(reference_sample_rows=-1)
 
-    def test_project_underscore_start_is_valid(self) -> None:
-        cfg = FeastConfig(project="_my_project")
-        assert cfg.project == "_my_project"
+    def test_reference_sample_rows_custom(self) -> None:
+        cfg = MonitoringConfig(reference_sample_rows=500)
+        assert cfg.reference_sample_rows == 500
 
-    def test_project_alphanumeric_is_valid(self) -> None:
-        cfg = FeastConfig(project="spacecraft_telemetry")
-        assert cfg.project == "spacecraft_telemetry"
+    def test_custom_dirs(self) -> None:
+        cfg = MonitoringConfig(
+            reference_profiles_dir=Path("custom/profiles"),
+            report_output_dir=Path("custom/reports"),
+        )
+        assert cfg.reference_profiles_dir == Path("custom/profiles")
+        assert cfg.report_output_dir == Path("custom/reports")
 
-    def test_load_settings_includes_feast(
+    def test_settings_has_monitoring_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.monitoring, MonitoringConfig)
+        assert settings.monitoring.drift_threshold == 0.30
+
+    def test_monitoring_round_trips_yaml(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
-        (config_dir / "local.yaml").write_text(_YAML_WITH_FEAST)
+        (config_dir / "local.yaml").write_text(
+            "monitoring:\n"
+            "  drift_threshold: 0.25\n"
+            "  reference_sample_rows: 1000\n"
+        )
         monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
         monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
 
         settings = load_settings("local")
 
-        assert settings.feast.project == "spacecraft_telemetry"
-        assert settings.feast.ttl_days == 365
-        assert settings.feast.source_path == Path("data/processed/ESA-Mission1/features")
-        assert settings.feast.source_root == Path("data/processed")
+        assert settings.monitoring.drift_threshold == 0.25
+        assert settings.monitoring.reference_sample_rows == 1000
 
-    def test_feast_env_var_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_monitoring_env_var_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
-        (config_dir / "local.yaml").write_text(_YAML_WITH_FEAST)
+        (config_dir / "local.yaml").write_text("monitoring:\n  drift_threshold: 0.40\n")
         monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
-        monkeypatch.setenv("SPACECRAFT_FEAST__TTL_DAYS", "30")
+        monkeypatch.setenv("SPACECRAFT_MONITORING__DRIFT_THRESHOLD", "0.20")
         monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
 
         settings = load_settings("local")
 
-        assert settings.feast.ttl_days == 30  # env var overrides YAML
+        assert settings.monitoring.drift_threshold == 0.20  # env var wins

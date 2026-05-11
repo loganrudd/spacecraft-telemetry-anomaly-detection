@@ -7,7 +7,7 @@ from 3 ESA missions, ~225 telemetry channels.
 The model ([Telemanom LSTM, Hundman et al. 2018](https://arxiv.org/abs/1802.04431)) is
 intentionally off-the-shelf: one small LSTM per channel trains on nominal data and flags
 when sensor readings diverge from its predictions. The engineering emphasis is the platform
-wrapping it — Spark preprocessing, a Feast feature store, Ray Core for parallelizing
+wrapping it — Spark preprocessing, Ray Core for parallelizing
 hundreds of training jobs, Ray Tune for per-subsystem HPO, MLflow for experiment tracking
 and model registry, Evidently for drift monitoring, FastAPI with SSE for real-time stream
 replay, and Cloud Run for serving.
@@ -16,28 +16,31 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 7 of 12 complete (MLflow integration).**
+**Current phase: 7 of 11 complete (Evidently drift monitoring).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
 - Phase 2: PySpark preprocessing
-- Phase 3: Feast feature store integration
-- Phase 4: Telemanom model drop-in
-- Phase 5: Ray parallel training + scoring
-- Phase 6: Ray Tune scoring-parameter HPO
-- Phase 7: MLflow experiment tracking + model registry
+- Phase 3: Telemanom model drop-in
+- Phase 4: Ray parallel training + scoring
+- Phase 5: Ray Tune scoring-parameter HPO
+- Phase 6: MLflow experiment tracking + model registry
+- Phase 7: Evidently batch drift detection + MLflow artifact logging
 
 ## What Works Today
 
 - End-to-end local workflow on sampled ESA data
 - Spark preprocessing to partitioned Parquet outputs
-- Feast apply/materialize and historical/online retrieval helpers
 - Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
 - Ray Tune HPO over scoring parameters per subsystem
 - MLflow experiment tracking (training, scoring, HPO experiments per mission)
 - MLflow model registry with `telemanom-{mission}-{channel}` naming convention
 - `mlflow promote` CLI for Staging → Production stage transitions
+- Evidently batch drift detection (14 features: `value_normalized` + rolling stats)
+- Drift reports (HTML) logged as MLflow artifacts; per-feature metrics logged per run
+- `drift batch` CLI: build reference profile → run report → log to MLflow
+- `drift batch-mission` CLI: run all channels for a mission, print summary table
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -66,7 +69,7 @@ make test
 
 ## Demo Workflow
 
-Full Phase 7 lifecycle (train → baseline score → HPO tune → tuned score → promote):
+Full Phase 6 lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
 ```bash
 # 1) Train all discovered channels (logged to MLflow training experiment)
@@ -84,10 +87,18 @@ make ray-tune MISSION=ESA-Mission1
 make ray-score MISSION=ESA-Mission1 TUNED_CONFIGS=models/ESA-Mission1/tuned_configs.json
 
 # 5) Inspect experiments and registered models
-make mlflow-ui                      # opens at http://localhost:5001
+make mlflow-server                      # opens at http://localhost:5001
 
 # 6) Promote a model to Production
 make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
+
+# 7) Run drift monitoring for a single channel
+#    Builds reference profile from train split, compares to test split,
+#    logs HTML report + per-feature metrics to telemanom-monitoring-ESA-Mission1 experiment.
+uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+
+# 8) Run drift monitoring for all discovered channels in a mission
+uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
@@ -102,12 +113,11 @@ Expected key artifacts:
 ## Repository Map
 
 Top-level directories:
-- `src/spacecraft_telemetry/`: application modules (ingest, spark, feast, model, ray, api)
+- `src/spacecraft_telemetry/`: application modules (ingest, spark, model, ray, api)
 - `tests/`: unit and integration tests mirroring source structure
 - `configs/`: environment YAML configs (`local`, `test`, `cloud`)
 - `data/`: raw, sampled, and processed telemetry
 - `models/`: per-mission/channel model and scoring artifacts
-- `feature_repo/`: Feast repository and local store config
 - `docs/`: plans, reviews, architecture notes
 
 ## Architecture Overview
@@ -116,12 +126,11 @@ Top-level directories:
 ESA Parquet (Zenodo/GCS)
   -> Download + Sample
   -> Spark preprocessing
-  -> Feast feature store
   -> Telemanom LSTM (per-channel)
   -> Ray parallel train/score
   -> Ray Tune scoring HPO
   -> MLflow experiment tracking + model registry
-  -> Evidently monitoring (next)
+  -> Evidently drift monitoring (batch, per-channel, HTML reports in MLflow)
   -> FastAPI + SSE serving (next)
   -> React dashboard (next)
   -> GCP deployment
@@ -133,16 +142,15 @@ ESA Parquet (Zenodo/GCS)
 |---|---|---|
 | 1 | Repo scaffold + data ingestion | Complete |
 | 2 | PySpark preprocessing pipeline | Complete |
-| 3 | Feast feature store integration | Complete |
-| 4 | Telemanom model drop-in | Complete |
-| 5 | Ray parallel training | Complete |
-| 6 | Ray Tune HPO | Complete |
-| 7 | MLflow integration | Complete |
-| 8 | Evidently monitoring | In progress |
-| 9 | FastAPI serving layer | Planned |
-| 10 | React dashboard | Planned |
-| 11 | GCP deployment | Planned |
-| 12 | Documentation + polish | Planned |
+| 3 | Telemanom model drop-in | Complete |
+| 4 | Ray parallel training | Complete |
+| 5 | Ray Tune HPO | Complete |
+| 6 | MLflow integration | Complete |
+| 7 | Evidently monitoring | Complete |
+| 8 | FastAPI serving layer | Planned |
+| 9 | React dashboard | Planned |
+| 10 | GCP deployment | Planned |
+| 11 | Documentation + polish | Planned |
 
 ## Links
 

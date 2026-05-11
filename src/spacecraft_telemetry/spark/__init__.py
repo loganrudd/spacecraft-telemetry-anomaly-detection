@@ -1,9 +1,8 @@
 # spark: PySpark preprocessing pipeline — Phase 2 / 2.5
-from spacecraft_telemetry.spark.io import read_channel, read_labels, write_features, write_series
+from spacecraft_telemetry.spark.io import read_channel, read_labels, write_series
 from spacecraft_telemetry.spark.pipeline import run_preprocessing
 from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
 from spacecraft_telemetry.spark.transforms import (
-    add_rolling_features,
     detect_gaps,
     handle_nulls,
     label_timesteps,
@@ -12,7 +11,6 @@ from spacecraft_telemetry.spark.transforms import (
 )
 
 __all__ = [
-    "add_rolling_features",
     "create_spark_session",
     "detect_gaps",
     "handle_nulls",
@@ -23,6 +21,5 @@ __all__ = [
     "run_preprocessing",
     "stop_spark_session",
     "temporal_train_test_split",
-    "write_features",
     "write_series",
 ]

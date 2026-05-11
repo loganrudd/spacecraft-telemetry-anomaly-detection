@@ -13,7 +13,6 @@ Priority (highest → lowest):
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -103,29 +102,6 @@ class LoggingConfig(BaseModel):
         return v
 
 
-class FeastConfig(BaseModel):
-    repo_path: Path = Path("feature_repo")
-    project: str = "spacecraft_telemetry"
-    feature_view_name: str = "telemetry_features"
-    source_path: Path = Path("data/processed/ESA-Mission1/features")
-    source_root: Path = Path("data/processed")
-    ttl_days: int = 365
-
-    @field_validator("ttl_days")
-    @classmethod
-    def ttl_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"ttl_days must be >= 1, got {v}")
-        return v
-
-    @field_validator("project")
-    @classmethod
-    def valid_project_name(cls, v: str) -> str:
-        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", v):
-            raise ValueError(
-                f"project must match [a-zA-Z_][a-zA-Z0-9_]*, got {v!r}"
-            )
-        return v
 
 
 class ModelConfig(BaseModel):
@@ -226,7 +202,7 @@ class RayConfig(BaseModel):
 
 
 class TuneConfig(BaseModel):
-    """Ray Tune HPO configuration (Phase 6)."""
+    """Ray Tune HPO configuration (Phase 5)."""
 
     num_samples: int = 50               # trials per subsystem sweep
     max_concurrent_trials: int = 2      # M1 constraint: 2 parallel numpy workers
@@ -253,7 +229,7 @@ class TuneConfig(BaseModel):
 
 
 class MlflowConfig(BaseModel):
-    """MLflow tracking and registry configuration (Phase 7)."""
+    """MLflow tracking and registry configuration (Phase 6)."""
 
     # Default is resolved to an absolute path at import time so Ray workers
     # (which run from a session temp dir) always point to the same database.
@@ -305,6 +281,34 @@ class MlflowConfig(BaseModel):
         return f"sqlite:///{resolved}"
 
 
+class MonitoringConfig(BaseModel):
+    """Evidently drift monitoring configuration (Phase 7)."""
+
+    # Fraction of features that must drift to emit a retraining trigger.
+    drift_threshold: float = 0.30
+    # Where reference profiles (train-split feature DataFrames) are persisted.
+    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+    # Where HTML drift reports are written before upload to MLflow.
+    report_output_dir: Path = Path("monitoring/reports")
+    # Max rows sampled from the train split when building a reference profile.
+    # Keeps memory bounded for long-running channels (full train can be 100K+ rows).
+    reference_sample_rows: int = 5000
+
+    @field_validator("drift_threshold")
+    @classmethod
+    def threshold_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"drift_threshold must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("reference_sample_rows")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"reference_sample_rows must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -341,11 +345,11 @@ class Settings(BaseSettings):
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
     spark: SparkConfig = SparkConfig()
-    feast: FeastConfig = FeastConfig()
     model: ModelConfig = ModelConfig()
     ray: RayConfig = RayConfig()
     tune: TuneConfig = TuneConfig()
     mlflow: MlflowConfig = MlflowConfig()
+    monitoring: MonitoringConfig = MonitoringConfig()
 
     @classmethod
     def settings_customise_sources(

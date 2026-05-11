@@ -1,10 +1,10 @@
-"""Ray remote task definitions for Phase 5 parallel training.
+"""Ray remote task definitions for Phase 4 parallel training.
 
 Wraps model.training.train_channel and model.scoring.score_channel as
-@ray.remote tasks. Phase 4 functions are intentionally untouched — the remote
+@ray.remote tasks. Phase 3 functions are intentionally untouched — the remote
 variants live here exclusively so that:
   - The CLI `model train` / `model score` commands keep working without Ray.
-  - Phase 9 (FastAPI) can import scoring functions without pulling in Ray.
+  - Phase 8 (FastAPI) can import scoring functions without pulling in Ray.
   - GPU resource allocation can be chosen at call time (CPU locally, 0.25 GPU
     on cloud T4s) via the factory pattern.
 

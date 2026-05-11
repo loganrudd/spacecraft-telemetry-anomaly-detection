@@ -98,7 +98,8 @@ def test_train_channel_runs_and_saves_artifacts(
     mlflow_uri: str,
     tmp_path: Path,
 ) -> None:
-    """train_channel returns a TrainingResult and logs model + train_log + norm_params to MLflow."""
+    """train_channel returns a TrainingResult and logs model + train_log + norm_params to MLflow.
+    """
     from spacecraft_telemetry.core.config import load_settings
     from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
 
@@ -122,6 +123,7 @@ def test_train_channel_runs_and_saves_artifacts(
 
     # Verify that the MLflow run contains all expected artifacts.
     from mlflow.tracking import MlflowClient
+
     from spacecraft_telemetry.mlflow_tracking.conventions import (
         registered_model_name as _reg_name,
     )
@@ -341,7 +343,7 @@ def test_train_channel_survives_broken_mlflow_uri(
 ) -> None:
     """train_channel returns a TrainingResult even when the MLflow backend is unreachable.
 
-    Phase 7 promise: "Tracking failures are caught and demoted to warnings —
+    Phase 6 promise: "Tracking failures are caught and demoted to warnings —
     the training run completes with filesystem artifacts intact."
 
     Uses a PostgreSQL URI that nobody is listening on so MLflow's set_experiment

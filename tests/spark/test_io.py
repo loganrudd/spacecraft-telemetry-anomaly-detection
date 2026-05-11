@@ -1,4 +1,4 @@
-"""Tests for spark.io — read_channel, read_labels, write_series, write_features."""
+"""Tests for spark.io — read_channel, read_labels, write_series."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import pytest
 from spacecraft_telemetry.spark.io import (
     read_channel,
     read_labels,
-    write_features,
     write_series,
 )
 
@@ -160,22 +159,3 @@ class TestWriteSeries:
         # Partition columns (mission_id, channel_id) are recovered from path metadata
         assert "telemetry_timestamp" in result.columns
         assert "value" in result.columns
-
-
-# ---------------------------------------------------------------------------
-# write_features
-# ---------------------------------------------------------------------------
-
-
-class TestWriteFeatures:
-    def test_writes_parquet_files(self, spark_session, sample_spark_df, tmp_path: Path) -> None:
-        out = tmp_path / "features"
-        write_features(sample_spark_df, out)
-        result = spark_session.read.parquet(str(out))
-        assert result.count() == 100
-
-    def test_partition_directories_created(self, sample_spark_df, tmp_path: Path) -> None:
-        out = tmp_path / "features"
-        write_features(sample_spark_df, out)
-        assert (out / "mission_id=ESA-Mission1").is_dir()
-        assert (out / "mission_id=ESA-Mission1" / "channel_id=channel_1").is_dir()

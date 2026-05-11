@@ -53,8 +53,11 @@ def configure_mlflow(settings: Settings) -> None:
     uri = settings.mlflow.tracking_uri
     _current = mlflow.get_tracking_uri()
     # Warn when switching away from a previously configured non-default URI.
-    # Default mlruns/ paths start with "file://" — ignore those to suppress
-    # noise on the very first call in a fresh process.
+    # Suppressed only for the "file://" default path — the first call in a
+    # fresh process before any URI has been explicitly set.
+    # If this warning fires, an entry point is missing configure_mlflow(settings)
+    # before its first Evidently or Ray call — fix the calling order rather than
+    # adding suppression here.
     if _current and not _current.startswith("file://") and _current != uri:
         log.warning(
             "mlflow.configure.uri_changed",
