@@ -106,13 +106,20 @@ def _load_channel_series(
     channel: str,
     split: str,
 ) -> pd.DataFrame:
-    """Read raw series Parquet for one channel from the Hive-partitioned layout.
+    """Read the tail of a channel's raw series Parquet for monitoring.
 
     Path: ``{processed_data_dir}/{mission}/{split}/mission_id={M}/channel_id={C}/``
 
-    Only ``telemetry_timestamp`` and ``value_normalized`` are loaded — the two
-    columns needed to compute monitoring features.  Loading the full SERIES_SCHEMA
-    (segment_id, is_anomaly) doubles I/O for no gain.
+    Only ``telemetry_timestamp`` and ``value_normalized`` are loaded (half the
+    I/O vs the full SERIES_SCHEMA).  After sorting, only the last
+    ``reference_sample_rows + max(feature_windows)`` rows are retained before
+    returning — this is the minimum contiguous prefix needed to produce
+    ``reference_sample_rows`` valid rolling-feature rows after warmup.  For a
+    500K-row channel this reduces the downstream rolling-feature compute from
+    O(500K × W) to O(5100 × W).
+
+    The "recent tail" interpretation is intentional: the most recent training
+    rows are the relevant reference distribution when current data arrives today.
 
     Args:
         settings: Runtime settings.
@@ -122,7 +129,8 @@ def _load_channel_series(
 
     Returns:
         DataFrame with ``telemetry_timestamp`` and ``value_normalized``, sorted
-        by timestamp, index reset to 0-based.
+        by timestamp, index reset to 0-based. At most
+        ``reference_sample_rows + max(feature_windows)`` rows.
 
     Raises:
         FileNotFoundError: If the partition directory does not exist.
@@ -143,8 +151,15 @@ def _load_channel_series(
         str(partition_dir),
         columns=["telemetry_timestamp", "value_normalized"],
     )
-    df = table.to_pandas()
-    return df.sort_values("telemetry_timestamp").reset_index(drop=True)
+    df = table.to_pandas().sort_values("telemetry_timestamp")
+
+    # Tail-slice before rolling: only contiguous rows needed for output.
+    max_window = max(settings.spark.feature_windows)
+    rows_needed = settings.monitoring.reference_sample_rows + max_window
+    if len(df) > rows_needed:
+        df = df.tail(rows_needed)
+
+    return df.reset_index(drop=True)
 
 
 def build_reference_profile(
