@@ -43,12 +43,15 @@ def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
 
 
 @pytest.fixture
-def isolated_settings(tmp_path: Path) -> Settings:
-    """Settings pointing to the per-test SQLite MLflow store."""
-    uri = mlflow.get_tracking_uri()
+def isolated_settings(mlflow_uri: str) -> Settings:
+    """Settings pointing to the per-test SQLite MLflow store.
+
+    Declares mlflow_uri as an explicit dependency so pytest resolves it before
+    this fixture runs, regardless of parameter ordering in test signatures.
+    """
     return Settings().model_copy(
         update={
-            "mlflow": Settings().mlflow.model_copy(update={"tracking_uri": uri})
+            "mlflow": Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri})
         }
     )
 
