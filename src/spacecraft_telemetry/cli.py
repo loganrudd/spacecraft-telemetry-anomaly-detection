@@ -947,6 +947,10 @@ def _run_drift_batch(
     # 3) Run drift report.
     report, result = run_drift_report(reference, current, settings)
 
+    # Evidently's report.run() auto-detects the local mlflow.db and resets the
+    # global tracking URI.  Re-lock it so log_drift_report logs to the right server.
+    configure_mlflow(settings)
+
     # 4) Log to MLflow.
     exp = experiment_name("telemanom", "monitoring", mission)
     run_id = log_drift_report(report, result, settings, mission, channel)
