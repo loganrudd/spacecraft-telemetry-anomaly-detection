@@ -19,6 +19,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
         mlflow-server mlflow-ui mlflow-promote \
+        serve \
         clean clean-processed clean-models clean-data clean-all
 
 help:          ## Show this help message
@@ -159,3 +160,13 @@ clean-data:      ## Remove downloaded raw + sample data — requires re-running 
 
 clean-all:       ## Remove everything: caches + processed + models + downloaded data
 	$(MAKE) clean clean-processed clean-models clean-data
+
+# ---------------------------------------------------------------------------
+# FastAPI serving (Phase 8)
+# ---------------------------------------------------------------------------
+
+SUBSYSTEM     ?=
+
+serve:            ## Start the FastAPI serving layer locally (SUBSYSTEM=subsystem_6)
+	$(RUN) spacecraft-telemetry --env local api serve \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)

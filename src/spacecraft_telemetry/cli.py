@@ -1130,3 +1130,73 @@ def drift_batch_mission(
 
 
 main.add_command(drift_group, name="drift")
+
+
+# ---------------------------------------------------------------------------
+# api group (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+@click.group("api")
+def api_group() -> None:
+    """FastAPI serving commands."""
+
+
+@api_group.command("serve")
+@click.option("--host", default=None, help="Bind host (overrides config).")
+@click.option("--port", type=int, default=None, help="Bind port (overrides config).")
+@click.option("--mission", default=None, help="Mission ID to serve (overrides config).")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Subsystem to load channels from (overrides config).",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to load (overrides subsystem).",
+)
+@click.option("--reload", is_flag=True, default=False, help="Enable uvicorn auto-reload.")
+@click.pass_context
+def api_serve(
+    ctx: click.Context,
+    host: str | None,
+    port: int | None,
+    mission: str | None,
+    subsystem: str | None,
+    channels: str | None,
+    reload: bool,
+) -> None:
+    """Start the FastAPI serving layer (SSE stream + /health)."""
+    import uvicorn
+
+    from spacecraft_telemetry.api.app import create_app
+
+    settings: Settings = ctx.obj["settings"]
+    api_overrides: dict[str, Any] = {}
+    if host is not None:
+        api_overrides["host"] = host
+    if port is not None:
+        api_overrides["port"] = port
+    if mission is not None:
+        api_overrides["mission"] = mission
+    if subsystem is not None:
+        api_overrides["subsystem"] = subsystem
+    if channels is not None:
+        api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
+
+    if api_overrides:
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(update=api_overrides)}
+        )
+
+    app = create_app(settings)
+    uvicorn.run(
+        app,
+        host=settings.api.host,
+        port=settings.api.port,
+        reload=reload,
+    )
+
+
+main.add_command(api_group, name="api")
