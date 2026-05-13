@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 import torch
 from fastapi import FastAPI
 
+from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.state import AppState
@@ -143,7 +144,5 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings = settings
     app.add_middleware(CorrelationIdMiddleware)
-    # Router wired in Step 7:
-    #   from spacecraft_telemetry.api import endpoints
-    #   app.include_router(endpoints.router)
+    app.include_router(endpoints.router)
     return app
