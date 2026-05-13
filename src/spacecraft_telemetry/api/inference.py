@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-from pydantic import BaseModel
 
+from spacecraft_telemetry.api.models import TelemetryEvent
 from spacecraft_telemetry.model.io import ScoringParams
 
 if TYPE_CHECKING:
@@ -35,27 +35,6 @@ if TYPE_CHECKING:
 
 # Re-export so callers can ``from spacecraft_telemetry.api.inference import ScoringParams``.
 __all__ = ["ChannelInferenceEngine", "ScoringParams", "TelemetryEvent"]
-
-
-# ---------------------------------------------------------------------------
-# TelemetryEvent — per-tick SSE payload
-# (Step 5 will move this to api/models.py and import it from there)
-# ---------------------------------------------------------------------------
-
-
-class TelemetryEvent(BaseModel):
-    """Per-tick inference result emitted by the SSE telemetry stream."""
-
-    timestamp: datetime
-    mission: str
-    channel: str
-    value_normalized: float
-    prediction: float | None
-    residual: float | None
-    smoothed_error: float | None
-    threshold: float | None  # math.inf rendered as None
-    is_anomaly_predicted: bool
-    is_anomaly_true: bool
 
 
 # ---------------------------------------------------------------------------
