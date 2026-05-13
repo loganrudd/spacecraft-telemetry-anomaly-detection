@@ -309,6 +309,50 @@ class MonitoringConfig(BaseModel):
         return v
 
 
+class ApiConfig(BaseModel):
+    """FastAPI serving configuration (Phase 8)."""
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+    mission: str = "ESA-Mission1"
+    subsystem: str = "subsystem_6"
+    # Explicit channel list; when non-empty, overrides subsystem discovery.
+    channels: list[str] = []
+    replay_speed_default: float = 10.0
+    replay_tick_interval_seconds: float = 1.0
+    stream_buffer_max_events: int = 256
+    request_timeout_seconds: int = 30
+
+    @field_validator("port")
+    @classmethod
+    def port_in_range(cls, v: int) -> int:
+        # Port 0 is valid — the OS assigns an available port at bind time (useful in tests).
+        if not (0 <= v <= 65535):
+            raise ValueError(f"port must be in [0, 65535], got {v}")
+        return v
+
+    @field_validator("replay_speed_default")
+    @classmethod
+    def speed_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"replay_speed_default must be > 0, got {v}")
+        return v
+
+    @field_validator("replay_tick_interval_seconds")
+    @classmethod
+    def tick_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"replay_tick_interval_seconds must be > 0, got {v}")
+        return v
+
+    @field_validator("stream_buffer_max_events", "request_timeout_seconds")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -350,6 +394,7 @@ class Settings(BaseSettings):
     tune: TuneConfig = TuneConfig()
     mlflow: MlflowConfig = MlflowConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
+    api: ApiConfig = ApiConfig()
 
     @classmethod
     def settings_customise_sources(
