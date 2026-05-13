@@ -22,8 +22,7 @@ Parameters (small to keep tests fast)
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -86,9 +85,8 @@ def _make_series(n: int = N) -> np.ndarray:
 
 
 def _make_timestamps(n: int = N) -> list[datetime]:
-    base = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    import datetime as dt
-    return [base + dt.timedelta(seconds=i) for i in range(n)]
+    base = datetime(2000, 1, 1, tzinfo=UTC)
+    return [base + timedelta(seconds=i) for i in range(n)]
 
 
 def _build_engine(model: torch.nn.Module | None = None) -> ChannelInferenceEngine:
@@ -114,7 +112,7 @@ def _run_engine(
         is_anomaly = np.zeros(len(values), dtype=bool)
     return [
         engine.step(float(v), ts, bool(a))
-        for v, ts, a in zip(values, timestamps, is_anomaly)
+        for v, ts, a in zip(values, timestamps, is_anomaly, strict=False)
     ]
 
 
@@ -310,7 +308,7 @@ def test_anomaly_detected_in_spike_region() -> None:
 def test_step_returns_telemetry_event() -> None:
     """step() must return a TelemetryEvent Pydantic model."""
     engine = _build_engine()
-    ts = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
     for _ in range(W + TW):
         event = engine.step(0.0, ts, False)
     assert isinstance(event, TelemetryEvent)
@@ -326,7 +324,7 @@ def test_event_mission_channel_propagated() -> None:
         params=_PARAMS,
         device=torch.device("cpu"),
     )
-    ts = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
     event = engine.step(0.0, ts, False)
     assert event.mission == "ESA-Mission1"
     assert event.channel == "channel_42"
@@ -335,7 +333,7 @@ def test_event_mission_channel_propagated() -> None:
 def test_event_value_normalized_propagated() -> None:
     """value_normalized must equal the input value passed to step()."""
     engine = _build_engine()
-    ts = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
     event = engine.step(3.14, ts, False)
     assert event.value_normalized == pytest.approx(3.14)
 
@@ -343,7 +341,7 @@ def test_event_value_normalized_propagated() -> None:
 def test_event_is_anomaly_true_propagated() -> None:
     """is_anomaly_true must reflect the label passed to step()."""
     engine = _build_engine()
-    ts = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
     assert engine.step(0.0, ts, True).is_anomaly_true is True
     assert engine.step(0.0, ts, False).is_anomaly_true is False
 
@@ -351,7 +349,7 @@ def test_event_is_anomaly_true_propagated() -> None:
 def test_event_serialisable_to_json() -> None:
     """TelemetryEvent must serialise to JSON via Pydantic model_dump_json()."""
     engine = _build_engine()
-    ts = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
     event = engine.step(0.0, ts, False)
     json_str = event.model_dump_json()
     assert "test-mission" in json_str

@@ -528,7 +528,8 @@ def ray_train(
                 if not subsystem_map:
                     raise click.ClickException(
                         "channels.csv not found or empty; cannot resolve --subsystem. "
-                        "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
+                        "Pass --channels explicitly or ensure "
+                        "data/raw/{mission}/channels.csv exists."
                     )
                 channel_list = [
                     ch for ch in channel_list if subsystem_map.get(ch) == subsystem
@@ -650,7 +651,8 @@ def ray_score(
                 if not subsystem_map:
                     raise click.ClickException(
                         "channels.csv not found or empty; cannot resolve --subsystem. "
-                        "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
+                        "Pass --channels explicitly or ensure "
+                        "data/raw/{mission}/channels.csv exists."
                     )
                 channel_list = [
                     ch for ch in channel_list if subsystem_map.get(ch) == subsystem
@@ -1092,7 +1094,7 @@ def drift_batch_mission(
 
     # TODO(phase9): parallelize with @ray.remote drift_one_channel — same shape as
     # ray_train's per-channel tasks.  Serial is fine for portfolio demo (<10 channels),
-    # but a full-mission sweep (~300 channels × 5 s each) takes ~25 min here vs ~3 min
+    # but a full-mission sweep (~300 channels x 5 s each) takes ~25 min here vs ~3 min
     # with Ray.  Evidently's MLflow auto-detection inside workers needs validation first.
     results: list[dict[str, object]] = []
     errors: list[tuple[str, str]] = []

@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import pyarrow as _pa
+import pyarrow.parquet as _pq
 import pytest
 from click.testing import CliRunner
 
@@ -585,7 +587,10 @@ class TestRayTrainCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+                [
+                    "--env=test", "ray", "train",
+                    "--mission=ESA-Mission1", "--subsystem=subsystem_1",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -608,7 +613,10 @@ class TestRayTrainCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=nonexistent"],
+                [
+                    "--env=test", "ray", "train",
+                    "--mission=ESA-Mission1", "--subsystem=nonexistent",
+                ],
             )
 
         assert result.exit_code != 0
@@ -630,7 +638,10 @@ class TestRayTrainCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+                [
+                    "--env=test", "ray", "train",
+                    "--mission=ESA-Mission1", "--subsystem=subsystem_1",
+                ],
             )
 
         assert result.exit_code != 0
@@ -721,7 +732,10 @@ class TestRayScoreCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+                [
+                    "--env=test", "ray", "score",
+                    "--mission=ESA-Mission1", "--subsystem=subsystem_1",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -744,7 +758,10 @@ class TestRayScoreCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=nonexistent"],
+                [
+                    "--env=test", "ray", "score",
+                    "--mission=ESA-Mission1", "--subsystem=nonexistent",
+                ],
             )
 
         assert result.exit_code != 0
@@ -766,7 +783,10 @@ class TestRayScoreCommand:
         ):
             result = runner.invoke(
                 main,
-                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+                [
+                    "--env=test", "ray", "score",
+                    "--mission=ESA-Mission1", "--subsystem=subsystem_1",
+                ],
             )
 
         assert result.exit_code != 0
@@ -924,9 +944,6 @@ class TestMlflowCli:
 # ---------------------------------------------------------------------------
 # drift group
 # ---------------------------------------------------------------------------
-
-import pyarrow as _pa
-import pyarrow.parquet as _pq
 
 _DRIFT_SERIES_SCHEMA = _pa.schema(
     [
