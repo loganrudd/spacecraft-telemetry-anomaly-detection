@@ -551,6 +551,278 @@ class TestRayTuneCommand:
 
 
 # ---------------------------------------------------------------------------
+# ray train command
+# ---------------------------------------------------------------------------
+
+
+class TestRayTrainCommand:
+    def _mock_cm(self) -> MagicMock:
+        cm = MagicMock()
+        cm.__enter__.return_value = None
+        cm.__exit__.return_value = None
+        return cm
+
+    def test_subsystem_filters_channels(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b", "ch_c"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_6", "ch_c": "subsystem_1"},
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.train_all_channels",
+                return_value=[
+                    {"status": "ok", "channel": "ch_a", "best_epoch": 5, "best_val_loss": 0.01},
+                    {"status": "ok", "channel": "ch_c", "best_epoch": 5, "best_val_loss": 0.01},
+                ],
+            ) as mock_train,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+            )
+
+        assert result.exit_code == 0, result.output
+        called_channels = mock_train.call_args.args[2]
+        assert set(called_channels) == {"ch_a", "ch_c"}
+
+    def test_subsystem_nonexistent_raises_error(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_1"},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=nonexistent"],
+            )
+
+        assert result.exit_code != 0
+        assert "No channels found for subsystem" in result.output
+
+    def test_subsystem_map_empty_raises_error(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "train", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+            )
+
+        assert result.exit_code != 0
+        assert "cannot resolve --subsystem" in result.output
+
+    def test_explicit_channels_ignores_subsystem(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.train_all_channels",
+                return_value=[
+                    {"status": "ok", "channel": "ch_a", "best_epoch": 5, "best_val_loss": 0.01},
+                    {"status": "ok", "channel": "ch_b", "best_epoch": 5, "best_val_loss": 0.01},
+                ],
+            ) as mock_train,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "train",
+                    "--mission=ESA-Mission1",
+                    "--channels=ch_a,ch_b",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        called_channels = mock_train.call_args.args[2]
+        # subsystem is ignored when --channels is given; both channels passed through
+        assert set(called_channels) == {"ch_a", "ch_b"}
+
+    def test_help_shows_subsystem_option(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "train", "--help"])
+        assert result.exit_code == 0
+        assert "--subsystem" in result.output
+
+
+# ---------------------------------------------------------------------------
+# ray score command
+# ---------------------------------------------------------------------------
+
+
+class TestRayScoreCommand:
+    def _mock_cm(self) -> MagicMock:
+        cm = MagicMock()
+        cm.__enter__.return_value = None
+        cm.__exit__.return_value = None
+        return cm
+
+    def test_subsystem_filters_channels(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b", "ch_c"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_6", "ch_c": "subsystem_1"},
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.score_all_channels",
+                return_value=[
+                    {
+                        "status": "ok",
+                        "channel": "ch_a",
+                        "precision": 0.9,
+                        "recall": 0.8,
+                        "f1": 0.85,
+                        "f0_5": 0.87,
+                    },
+                    {
+                        "status": "ok",
+                        "channel": "ch_c",
+                        "precision": 0.9,
+                        "recall": 0.8,
+                        "f1": 0.85,
+                        "f0_5": 0.87,
+                    },
+                ],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+            )
+
+        assert result.exit_code == 0, result.output
+        called_channels = mock_score.call_args.args[2]
+        assert set(called_channels) == {"ch_a", "ch_c"}
+
+    def test_subsystem_nonexistent_raises_error(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_1"},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=nonexistent"],
+            )
+
+        assert result.exit_code != 0
+        assert "No channels found for subsystem" in result.output
+
+    def test_subsystem_map_empty_raises_error(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.discover_channels",
+                return_value=["ch_a", "ch_b"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                return_value={},
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ESA-Mission1", "--subsystem=subsystem_1"],
+            )
+
+        assert result.exit_code != 0
+        assert "cannot resolve --subsystem" in result.output
+
+    def test_explicit_channels_ignores_subsystem(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_training.score_all_channels",
+                return_value=[
+                    {
+                        "status": "ok",
+                        "channel": "ch_a",
+                        "precision": 0.9,
+                        "recall": 0.8,
+                        "f1": 0.85,
+                        "f0_5": 0.87,
+                    },
+                    {
+                        "status": "ok",
+                        "channel": "ch_b",
+                        "precision": 0.9,
+                        "recall": 0.8,
+                        "f1": 0.85,
+                        "f0_5": 0.87,
+                    },
+                ],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test",
+                    "ray",
+                    "score",
+                    "--mission=ESA-Mission1",
+                    "--channels=ch_a,ch_b",
+                    "--subsystem=subsystem_1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        called_channels = mock_score.call_args.args[2]
+        # subsystem is ignored when --channels is given; both channels passed through
+        assert set(called_channels) == {"ch_a", "ch_b"}
+
+    def test_help_shows_subsystem_option(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--subsystem" in result.output
+
+
+# ---------------------------------------------------------------------------
 # mlflow group
 # ---------------------------------------------------------------------------
 

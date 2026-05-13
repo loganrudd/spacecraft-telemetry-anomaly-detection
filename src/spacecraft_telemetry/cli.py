@@ -464,6 +464,11 @@ def ray_group() -> None:
     help="Comma-separated channel IDs to train. Defaults to all discovered channels.",
 )
 @click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to filter channels (e.g. subsystem_1).",
+)
+@click.option(
     "--max-channels",
     type=int,
     default=None,
@@ -474,6 +479,7 @@ def ray_train(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    subsystem: str | None,
     max_channels: int | None,
 ) -> None:
     """Train channels in parallel using Ray Core.
@@ -495,7 +501,11 @@ def ray_train(
             --mission ESA-Mission1 \\
             --channels channel_1,channel_2,channel_3
     """
-    from spacecraft_telemetry.ray_training import discover_channels, train_all_channels
+    from spacecraft_telemetry.ray_training import (
+        discover_channels,
+        load_channel_subsystem_map,
+        train_all_channels,
+    )
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -513,7 +523,27 @@ def ray_train(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.train.start", mission=mission, n_channels=len(channel_list))
+            if subsystem is not None:
+                subsystem_map = load_channel_subsystem_map(settings, mission)
+                if not subsystem_map:
+                    raise click.ClickException(
+                        "channels.csv not found or empty; cannot resolve --subsystem. "
+                        "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
+                    )
+                channel_list = [
+                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
+                ]
+                if not channel_list:
+                    raise click.ClickException(
+                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
+                    )
+
+        log.info(
+            "ray.train.start",
+            mission=mission,
+            n_channels=len(channel_list),
+            subsystem=subsystem,
+        )
         results = train_all_channels(
             settings, mission, channel_list, max_channels=max_channels
         )
@@ -545,6 +575,11 @@ def ray_train(
     help="Comma-separated channel IDs to score. Defaults to all discovered channels.",
 )
 @click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to filter channels (e.g. subsystem_1).",
+)
+@click.option(
     "--max-channels",
     type=int,
     default=None,
@@ -561,6 +596,7 @@ def ray_score(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    subsystem: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
 ) -> None:
@@ -581,7 +617,11 @@ def ray_score(
     """
     import json
 
-    from spacecraft_telemetry.ray_training import discover_channels, score_all_channels
+    from spacecraft_telemetry.ray_training import (
+        discover_channels,
+        load_channel_subsystem_map,
+        score_all_channels,
+    )
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -605,7 +645,27 @@ def ray_score(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.score.start", mission=mission, n_channels=len(channel_list))
+            if subsystem is not None:
+                subsystem_map = load_channel_subsystem_map(settings, mission)
+                if not subsystem_map:
+                    raise click.ClickException(
+                        "channels.csv not found or empty; cannot resolve --subsystem. "
+                        "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
+                    )
+                channel_list = [
+                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
+                ]
+                if not channel_list:
+                    raise click.ClickException(
+                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
+                    )
+
+        log.info(
+            "ray.score.start",
+            mission=mission,
+            n_channels=len(channel_list),
+            subsystem=subsystem,
+        )
         results = score_all_channels(
             settings,
             mission,
