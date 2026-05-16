@@ -118,10 +118,10 @@ curl -s http://127.0.0.1:8000/health | jq
 # → 200, {"status": "ok", "channels_loaded": [...], "uptime_seconds": ..., ...}
 
 # SSE stream — observe events with channel values, anomaly scores, and flags
-curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=50" | head -60
+curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=50" 2>/dev/null | head -60
 
 # Filter to a single channel
-curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_1" | head -30
+curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_1" 2>/dev/null | head -30
 
 # Look for a labeled anomaly event
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
@@ -178,7 +178,6 @@ ESA Parquet (Zenodo/GCS)
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | In Progress |
-| 10 | GCP deployment | Planned |
 | 10 | GCP deployment | Planned |
 | 11 | Documentation + polish | Planned |
 

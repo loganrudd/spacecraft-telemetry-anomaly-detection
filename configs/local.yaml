@@ -81,7 +81,7 @@ api:
   host: "127.0.0.1"
   port: 8000
   mission: "ESA-Mission1"
-  subsystem: "subsystem_6"
+  subsystem: "subsystem_1"
   channels: []
   replay_speed_default: 10.0
   replay_tick_interval_seconds: 1.0
