@@ -90,6 +90,12 @@ class ChannelInferenceEngine:
         # Rolling input buffer — accumulates window_size ticks before inference.
         self._window_buf: deque[float] = deque(maxlen=window_size)
 
+        # Pre-allocated input tensor — reused every tick to avoid per-tick
+        # allocation + reshape. Filled in-place from _window_buf each step.
+        self._input_buf: torch.Tensor = torch.zeros(
+            1, window_size, 1, dtype=torch.float32, device=device
+        )
+
         # EWMA smoothing state (scalar, updated each step post-warmup).
         self._alpha: float = 2.0 / (params.error_smoothing_window + 1)
         self._s_prev: float | None = None
@@ -138,10 +144,10 @@ class ChannelInferenceEngine:
             )
 
         # 3. Predict (model is already in eval() mode; @torch.no_grad() wraps step).
-        x = torch.tensor(
-            list(self._window_buf), dtype=torch.float32, device=self._device
-        ).view(1, self._window_size, 1)
-        prediction: float = self._model(x).item()
+        self._input_buf[0, :, 0] = torch.tensor(
+            list(self._window_buf), dtype=torch.float32
+        )
+        prediction: float = self._model(self._input_buf).item()
 
         residual = value - prediction
         e_abs = abs(residual)
