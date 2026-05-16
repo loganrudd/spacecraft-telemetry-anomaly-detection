@@ -53,10 +53,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     channel_subsystem_map = load_channel_subsystem_map(settings, settings.api.mission)
 
+    # TODO: add mission-wide fallback (discover all channels) when Mission2/Mission3
+    # support is needed — currently an absent channels.csv produces resolved=[] which
+    # hits the RuntimeError below with a clear message.
     if settings.api.channels:
         resolved = list(settings.api.channels)
         log.info("api.lifespan.channels.explicit", count=len(resolved))
-    elif channel_subsystem_map:
+    else:
         resolved = [
             ch for ch, sub in channel_subsystem_map.items()
             if sub == settings.api.subsystem
@@ -66,12 +69,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             subsystem=settings.api.subsystem,
             count=len(resolved),
         )
-    else:
-        log.warning(
-            "api.lifespan.no_subsystem_metadata",
-            mission=settings.api.mission,
-        )
-        resolved = []
 
     engines: dict[str, ChannelInferenceEngine] = {}
     for ch in resolved:
