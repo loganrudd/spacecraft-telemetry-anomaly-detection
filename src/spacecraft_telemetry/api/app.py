@@ -23,6 +23,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import MappingProxyType
 
 import torch
 from fastapi import FastAPI
@@ -124,9 +125,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         mission=settings.api.mission,
         subsystem=settings.api.subsystem,
         device=device,
-        engines=engines,
-        channel_subsystem_map=channel_subsystem_map,
-        replay_data=replay_data,
+        engines=MappingProxyType(engines),
+        channel_subsystem_map=MappingProxyType(channel_subsystem_map),
+        replay_data=MappingProxyType(replay_data),
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
     )

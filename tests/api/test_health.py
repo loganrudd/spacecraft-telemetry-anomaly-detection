@@ -34,15 +34,13 @@ class TestHealthOk:
 
 
 class TestHealthDegraded:
-    def test_returns_503_when_no_engines(self, running_app: FastAPI) -> None:
-        """Clear all engines — health should return 503."""
-        running_app.state.app_state.engines.clear()
-        resp = TestClient(running_app).get("/health")
+    def test_returns_503_when_no_engines(self, running_app_empty: FastAPI) -> None:
+        """App with no loaded engines — health should return 503."""
+        resp = TestClient(running_app_empty).get("/health")
         assert resp.status_code == 503
 
-    def test_503_body_has_degraded_status(self, running_app: FastAPI) -> None:
-        running_app.state.app_state.engines.clear()
-        body = TestClient(running_app).get("/health").json()
+    def test_503_body_has_degraded_status(self, running_app_empty: FastAPI) -> None:
+        body = TestClient(running_app_empty).get("/health").json()
         assert body["status"] == "degraded"
 
 

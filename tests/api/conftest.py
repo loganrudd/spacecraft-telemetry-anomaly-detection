@@ -12,6 +12,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from types import MappingProxyType  # noqa: E402
+
 from fastapi import FastAPI  # noqa: E402
 
 from spacecraft_telemetry.api.endpoints import router  # noqa: E402
@@ -150,11 +152,37 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
         mission=_MISSION,
         subsystem=_SUBSYSTEM,
         device=torch.device("cpu"),
-        engines={_CHANNEL: engine},
-        channel_subsystem_map={_CHANNEL: _SUBSYSTEM},
-        replay_data={_CHANNEL: (values, anom, timestamps)},
+        engines=MappingProxyType({_CHANNEL: engine}),
+        channel_subsystem_map=MappingProxyType({_CHANNEL: _SUBSYSTEM}),
+        replay_data=MappingProxyType({_CHANNEL: (values, anom, timestamps)}),
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
+    )
+    app.add_middleware(CorrelationIdMiddleware)
+    app.include_router(router)
+    return app
+
+
+@pytest.fixture()
+def running_app_empty(test_settings: Settings) -> FastAPI:
+    """FastAPI app with an empty engines map — triggers 503 on /health.
+
+    Constructs AppState directly with no loaded engines, which is the condition
+    the degraded-health path requires. Uses a fixed startup timestamp so uptime
+    is deterministic.
+    """
+    app = FastAPI()
+    app.state.settings = test_settings
+    app.state.app_state = AppState(
+        settings=test_settings,
+        mission=_MISSION,
+        subsystem=_SUBSYSTEM,
+        device=torch.device("cpu"),
+        engines=MappingProxyType({}),
+        channel_subsystem_map=MappingProxyType({}),
+        replay_data=MappingProxyType({}),
+        startup_monotonic_ns=time.monotonic_ns(),
+        mlflow_tracking_uri=test_settings.mlflow.tracking_uri,
     )
     app.add_middleware(CorrelationIdMiddleware)
     app.include_router(router)
