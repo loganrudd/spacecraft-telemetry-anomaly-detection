@@ -23,6 +23,9 @@ from starlette.requests import Request
 
 from spacecraft_telemetry.api.replay import replay_channel
 from spacecraft_telemetry.api.state import AppState
+from spacecraft_telemetry.core.logging import get_logger
+
+_log = get_logger("api.streaming")
 
 
 async def telemetry_stream(
@@ -93,4 +96,9 @@ async def telemetry_stream(
     finally:
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for ch, result in zip(selected_channels, results, strict=False):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                _log.error("api.pump.error", channel=ch, error=str(result))

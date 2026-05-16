@@ -170,7 +170,13 @@ class TestStreamChannelValidation:
 
 
 class TestStreamDisconnect:
-    def test_partial_read_no_exception(self, running_app: FastAPI) -> None:
-        """Reading only a few events and closing should not raise."""
+    def test_partial_read_no_exception(self, running_app: FastAPI, mocker) -> None:
+        """Client disconnect should not surface as a server-side error.
+
+        Pump cancellation raises CancelledError, which the cleanup path must
+        NOT forward to the error logger (issue 2.3 regression guard).
+        """
+        mock_log = mocker.patch("spacecraft_telemetry.api.streaming._log")
         events = _collect_events(TestClient(running_app), max_events=3)
         assert len(events) == 3
+        mock_log.error.assert_not_called()
