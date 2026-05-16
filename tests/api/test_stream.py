@@ -69,9 +69,9 @@ class TestStreamBasic:
             assert "text/event-stream" in resp.headers["content-type"]
 
     def test_emits_events(self, running_app: FastAPI) -> None:
-        """Stream should emit at least 30 events for a 100-row Parquet."""
+        """Stream should emit exactly 100 events for a 100-row Parquet."""
         events = _collect_events(TestClient(running_app))
-        assert len(events) >= 30
+        assert len(events) == 100
 
     def test_events_have_required_fields(self, running_app: FastAPI) -> None:
         events = _collect_events(TestClient(running_app), max_events=5)
@@ -122,7 +122,7 @@ class TestStreamContent:
         """Last 20 rows of the fixture Parquet are labeled anomalies."""
         # Parquet has 100 rows; last 20 have is_anomaly=True
         anomaly_events = [ev for ev in all_events[80:] if ev["is_anomaly_true"]]
-        assert len(anomaly_events) >= 1
+        assert len(anomaly_events) == 20
 
     def test_is_anomaly_predicted_is_bool(
         self, all_events: list[dict[str, object]]
