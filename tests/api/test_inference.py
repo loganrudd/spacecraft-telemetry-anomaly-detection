@@ -338,12 +338,12 @@ def test_event_value_normalized_propagated() -> None:
     assert event.value_normalized == pytest.approx(3.14)
 
 
-def test_event_is_anomaly_true_propagated() -> None:
-    """is_anomaly_true must reflect the label passed to step()."""
+def test_event_is_anomaly_propagated() -> None:
+    """is_anomaly must reflect the label passed to step()."""
     engine = _build_engine()
     ts = datetime(2000, 1, 1, tzinfo=UTC)
-    assert engine.step(0.0, ts, True).is_anomaly_true is True
-    assert engine.step(0.0, ts, False).is_anomaly_true is False
+    assert engine.step(0.0, ts, True).is_anomaly is True
+    assert engine.step(0.0, ts, False).is_anomaly is False
 
 
 def test_event_serialisable_to_json() -> None:

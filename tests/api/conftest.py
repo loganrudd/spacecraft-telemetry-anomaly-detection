@@ -93,7 +93,7 @@ def api_parquet(tmp_path: Path) -> Path:
     """Write a tiny Parquet test-split and return the processed-data directory.
 
     100 rows total; last 20 are labeled as anomalies so that streaming tests
-    can assert ``is_anomaly_true=True`` appears in the event stream.
+    can assert ``is_anomaly=True`` appears in the event stream.
     """
     _write_series_parquet(
         tmp_path,

@@ -125,7 +125,7 @@ curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_
 
 # Look for a labeled anomaly event
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
-    | grep -m1 '"is_anomaly_true": true'
+    | grep -m1 '"is_anomaly":true'
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search

@@ -34,7 +34,7 @@ class TestTelemetryEvent:
             "smoothed_error": 0.08,
             "threshold": 0.2,
             "is_anomaly_predicted": False,
-            "is_anomaly_true": False,
+            "is_anomaly": False,
         }
         data.update(overrides)
         return data
@@ -62,9 +62,9 @@ class TestTelemetryEvent:
         assert reloaded.timestamp == event.timestamp
 
     def test_bool_fields(self) -> None:
-        event = TelemetryEvent(**self._base(is_anomaly_predicted=True, is_anomaly_true=True))  # type: ignore[arg-type]
+        event = TelemetryEvent(**self._base(is_anomaly_predicted=True, is_anomaly=True))  # type: ignore[arg-type]
         assert event.is_anomaly_predicted is True
-        assert event.is_anomaly_true is True
+        assert event.is_anomaly is True
 
 
 # ---------------------------------------------------------------------------

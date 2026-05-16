@@ -1,7 +1,7 @@
 """Async replay generator for the SSE telemetry stream.
 
 Reads the test-split Parquet for one channel and yields (timestamp, value,
-is_anomaly_true) tuples at a speed-multiplied wall-clock rate.
+is_anomaly) tuples at a speed-multiplied wall-clock rate.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ async def replay_channel(
     tick_interval_seconds: float,
     cached_data: ReplayData | None = None,
 ) -> AsyncGenerator[tuple[datetime, float, bool], None]:
-    """Async generator yielding ``(timestamp, value, is_anomaly_true)`` per tick.
+    """Async generator yielding ``(timestamp, value, is_anomaly)`` per tick.
 
     Reads all rows from the test-split Parquet for ``channel`` and emits them
     one at a time, sleeping ``tick_interval_seconds / speed`` between ticks to

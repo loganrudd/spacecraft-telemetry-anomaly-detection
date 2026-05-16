@@ -20,7 +20,7 @@ class TelemetryEvent(BaseModel):
     smoothed_error: float | None
     threshold: float | None  # math.inf rendered as None
     is_anomaly_predicted: bool
-    is_anomaly_true: bool
+    is_anomaly: bool
 
 
 class HealthResponse(BaseModel):

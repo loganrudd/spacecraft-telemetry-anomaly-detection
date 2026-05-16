@@ -121,14 +121,14 @@ class ChannelInferenceEngine:
 
     @torch.no_grad()
     def step(
-        self, value: float, timestamp: datetime, is_anomaly_true: bool
+        self, value: float, timestamp: datetime, is_anomaly: bool
     ) -> TelemetryEvent:
         """Process one tick and return a TelemetryEvent.
 
         Args:
             value:          Normalised channel value for this tick.
             timestamp:      Timestamp of this tick (used verbatim in the event).
-            is_anomaly_true: Ground-truth anomaly label from the Parquet file.
+            is_anomaly: Ground-truth anomaly label from the Parquet file.
 
         Returns:
             TelemetryEvent with all fields populated.  Fields that cannot yet be
@@ -150,7 +150,7 @@ class ChannelInferenceEngine:
                 smoothed_error=None,
                 threshold=None,
                 is_anomaly_predicted=False,
-                is_anomaly_true=is_anomaly_true,
+                is_anomaly=is_anomaly,
             )
 
         # 3. Predict (model is already in eval() mode; @torch.no_grad() wraps step).
@@ -214,5 +214,5 @@ class ChannelInferenceEngine:
             smoothed_error=float(s_t),
             threshold=None if math.isinf(threshold_val) else float(threshold_val),
             is_anomaly_predicted=is_anomaly_predicted,
-            is_anomaly_true=is_anomaly_true,
+            is_anomaly=is_anomaly,
         )

@@ -35,7 +35,7 @@ _REQUIRED_FIELDS = {
     "smoothed_error",
     "threshold",
     "is_anomaly_predicted",
-    "is_anomaly_true",
+    "is_anomaly",
 }
 
 
@@ -121,7 +121,7 @@ class TestStreamContent:
     ) -> None:
         """Last 20 rows of the fixture Parquet are labeled anomalies."""
         # Parquet has 100 rows; last 20 have is_anomaly=True
-        anomaly_events = [ev for ev in all_events[80:] if ev["is_anomaly_true"]]
+        anomaly_events = [ev for ev in all_events[80:] if ev["is_anomaly"]]
         assert len(anomaly_events) == 20
 
     def test_is_anomaly_predicted_is_bool(
@@ -130,11 +130,11 @@ class TestStreamContent:
         for ev in all_events:
             assert isinstance(ev["is_anomaly_predicted"], bool)
 
-    def test_is_anomaly_true_is_bool(
+    def test_is_anomaly_is_bool(
         self, all_events: list[dict[str, object]]
     ) -> None:
         for ev in all_events:
-            assert isinstance(ev["is_anomaly_true"], bool)
+            assert isinstance(ev["is_anomaly"], bool)
 
 
 # ---------------------------------------------------------------------------
