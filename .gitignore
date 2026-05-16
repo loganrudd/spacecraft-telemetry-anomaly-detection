@@ -77,3 +77,4 @@ docs/PLANNING_MODE_GUIDE.md
 *.json
 !package.json
 !tsconfig.json
+!pyrightconfig.json
