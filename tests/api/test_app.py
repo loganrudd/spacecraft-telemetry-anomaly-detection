@@ -108,3 +108,125 @@ class TestLifespanFailure:
         # there are no trained + scored channels in the test MLflow registry.
         with pytest.raises(RuntimeError), TestClient(app, raise_server_exceptions=True):
             pass  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# Lifespan branch coverage via stubs
+# ---------------------------------------------------------------------------
+
+_STUB_MAP = {"ch-a": "sub1", "ch-b": "sub2", "ch-c": "sub1"}
+
+
+@pytest.fixture()
+def _lifespan_patches(mocker):
+    """Patch all external I/O in the lifespan to boot with no real deps."""
+    import numpy as np
+    import torch
+
+    from spacecraft_telemetry.model.io import ScoringParams
+
+    class _Zero(torch.nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(x.shape[0], 1)
+
+    stub_model = _Zero()
+    stub_model.eval()
+    stub_params = ScoringParams(
+        threshold_window=5,
+        threshold_z=2.0,
+        error_smoothing_window=5,
+        threshold_min_anomaly_len=2,
+    )
+    N = 20
+    stub_replay = (
+        np.zeros(N, dtype=np.float32),   # values
+        np.zeros(N, dtype=np.int32),     # segment_ids
+        np.zeros(N, dtype=bool),         # is_anomaly
+        np.empty(N, dtype=object),       # timestamps
+    )
+
+    mocker.patch("spacecraft_telemetry.api.app.configure_mlflow")
+    mocker.patch(
+        "spacecraft_telemetry.api.app.load_model_for_scoring",
+        return_value=(stub_model, 10),
+    )
+    mocker.patch(
+        "spacecraft_telemetry.api.app.load_scoring_params",
+        return_value=stub_params,
+    )
+    mocker.patch(
+        "spacecraft_telemetry.api.app.load_series_parquet",
+        return_value=stub_replay,
+    )
+
+
+class TestLifespanBranchCoverage:
+    def test_explicit_channels_override_subsystem(self, mocker, _lifespan_patches) -> None:
+        """When api.channels is set, only those channels are loaded."""
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value=_STUB_MAP,
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": ["ch-a", "ch-b"], "subsystem": "sub1"}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-b"}
+
+    def test_subsystem_filter_selects_matching_channels(self, mocker, _lifespan_patches) -> None:
+        """With no explicit channels, lifespan filters by configured subsystem."""
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value=_STUB_MAP,
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": [], "subsystem": "sub1"}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-c"}
+
+    def test_per_channel_error_is_skipped(self, mocker, _lifespan_patches) -> None:
+        """A channel that fails to load is warned+skipped; others still boot."""
+        import torch
+
+
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value={"ch-good": "sub1", "ch-bad": "sub1"},
+        )
+
+        class _Zero(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(x.shape[0], 1)
+
+        good_model = _Zero()
+        good_model.eval()
+
+        def _raise_on_bad(name: str, device: object, tracking_uri: str) -> object:
+            if "ch-bad" in name:
+                raise RuntimeError("simulated load failure")
+            return (good_model, 10)
+
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_model_for_scoring",
+            side_effect=_raise_on_bad,
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": [], "subsystem": "sub1"}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            loaded = set(app.state.app_state.engines.keys())
+        assert "ch-good" in loaded
+        assert "ch-bad" not in loaded

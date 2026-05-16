@@ -164,6 +164,99 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
 
 
 @pytest.fixture()
+def running_app_with_spike(test_settings: Settings, tmp_path: Path) -> FastAPI:
+    """FastAPI app wired to a Parquet containing a spike region.
+
+    Layout (60 rows):
+    - Rows 0-30 (31 rows): value = 0.0  -- warmup / nominal
+    - Rows 31-59 (29 rows): value = 10.0 -- spike
+
+    With _ZeroModel (always predicts 0), error_smoothing_window=5 (alpha=1/3),
+    threshold_window=20, threshold_min_anomaly_len=2 (test.yaml defaults):
+    - Threshold warmup ends after tick 30 (tick=window_size+threshold_window=30).
+    - First spike tick (row 31): EWMA ≈ 3.33, threshold ≈ 0 → raw_flag=True.
+    - Second spike tick (row 32): raw_flag=True → is_anomaly_predicted=True.
+
+    The stream test uses this fixture to assert that the flag is ever True.
+    """
+    import pandas as pd
+
+    n_zero, n_spike = 31, 29
+    n_rows = n_zero + n_spike
+    spike_values = np.concatenate(
+        [np.zeros(n_zero, dtype=np.float32), np.full(n_spike, 10.0, dtype=np.float32)]
+    )
+    timestamps = pd.date_range("2000-01-01", periods=n_rows, freq="s", tz="UTC")
+    is_anomaly = [False] * n_rows
+
+    partition_dir = (
+        tmp_path
+        / _MISSION
+        / "test"
+        / f"mission_id={_MISSION}"
+        / f"channel_id={_CHANNEL}"
+    )
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.table(
+        {
+            "telemetry_timestamp": pa.array(timestamps.astype("datetime64[us, UTC]")),
+            "value_normalized": pa.array(spike_values),
+            "segment_id": pa.array([0] * n_rows, type=pa.int32()),
+            "is_anomaly": pa.array(is_anomaly),
+        },
+        schema=_SERIES_SCHEMA,
+    )
+    pq.write_table(table, partition_dir / "part.parquet")
+
+    spike_parquet = tmp_path
+    settings = test_settings.model_copy(
+        update={
+            "spark": test_settings.spark.model_copy(
+                update={"processed_data_dir": spike_parquet}
+            )
+        }
+    )
+    params = ScoringParams(
+        threshold_window=settings.model.threshold_window,
+        threshold_z=settings.model.threshold_z,
+        error_smoothing_window=settings.model.error_smoothing_window,
+        threshold_min_anomaly_len=settings.model.threshold_min_anomaly_len,
+    )
+    model: torch.nn.Module = _ZeroModel()
+    model.eval()
+    engine = ChannelInferenceEngine(
+        mission=_MISSION,
+        channel=_CHANNEL,
+        model=model,  # type: ignore[arg-type]
+        window_size=settings.model.window_size,
+        params=params,
+        device=torch.device("cpu"),
+    )
+    values_arr, _seg, anom_arr, ts_arr = load_series_parquet(
+        spike_parquet, _MISSION, _CHANNEL, "test"
+    )
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.app_state = AppState(
+        settings=settings,
+        mission=_MISSION,
+        subsystem=_SUBSYSTEM,
+        device=torch.device("cpu"),
+        engines=MappingProxyType({_CHANNEL: engine}),
+        channel_subsystem_map=MappingProxyType({_CHANNEL: _SUBSYSTEM}),
+        replay_data=MappingProxyType({_CHANNEL: (values_arr, anom_arr, ts_arr)}),
+        startup_monotonic_ns=time.monotonic_ns(),
+        mlflow_tracking_uri=settings.mlflow.tracking_uri,
+    )
+    app.add_middleware(CorrelationIdMiddleware)
+    app.include_router(router)
+    return app
+
+
+@pytest.fixture()
 def running_app_empty(test_settings: Settings) -> FastAPI:
     """FastAPI app with an empty engines map — triggers 503 on /health.
 

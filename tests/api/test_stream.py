@@ -169,6 +169,36 @@ class TestStreamChannelValidation:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Predicted anomaly flag reaches True end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestStreamPredictedAnomaly:
+    def test_is_anomaly_predicted_true_in_spike_region(
+        self, running_app_with_spike: FastAPI
+    ) -> None:
+        """Engine produces is_anomaly_predicted=True for a spike series.
+
+        Verifies the end-to-end chain: Parquet row → engine.step() →
+        TelemetryEvent.is_anomaly_predicted → JSON → SSE → client parse.
+        Fixture uses _ZeroModel + test.yaml params; spike at rows 31-59
+        triggers the flag from tick 32 onwards (K=2 trailing True flags).
+        """
+        events = _collect_events(
+            TestClient(running_app_with_spike),
+            url=_STREAM_URL,
+        )
+        assert any(ev["is_anomaly_predicted"] for ev in events), (
+            "Expected at least one is_anomaly_predicted=True event in the spike stream"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mid-stream disconnect does not raise
+# ---------------------------------------------------------------------------
+
+
 class TestStreamDisconnect:
     def test_partial_read_no_exception(self, running_app: FastAPI, mocker) -> None:
         """Client disconnect should not surface as a server-side error.
