@@ -19,6 +19,7 @@ it without modifying this file.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -29,12 +30,14 @@ from fastapi import FastAPI
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
+from spacecraft_telemetry.api.replay import ReplayData
 from spacecraft_telemetry.api.state import AppState
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+from spacecraft_telemetry.model.dataset import load_series_parquet
 from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import load_model_for_scoring, load_scoring_params
 
@@ -95,6 +98,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
 
+    replay_data: dict[str, ReplayData] = {}
+    for ch in engines:
+        try:
+            values, _seg, anom, timestamps = await asyncio.to_thread(
+                load_series_parquet,
+                settings.spark.processed_data_dir,
+                settings.api.mission,
+                ch,
+                "test",
+            )
+            replay_data[ch] = (values, anom, timestamps)
+        except Exception as exc:
+            log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
+
     if not engines:
         raise RuntimeError(
             f"No channels loaded for mission={settings.api.mission!r} "
@@ -109,6 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         device=device,
         engines=engines,
         channel_subsystem_map=channel_subsystem_map,
+        replay_data=replay_data,
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
     )

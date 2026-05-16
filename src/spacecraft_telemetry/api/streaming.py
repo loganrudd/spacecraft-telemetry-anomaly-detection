@@ -68,6 +68,7 @@ async def telemetry_stream(
             channel,
             speed=speed,
             tick_interval_seconds=state.settings.api.replay_tick_interval_seconds,
+            cached_data=state.replay_data.get(channel),
         ):
             event = engine.step(val, ts, anom_true)
             payload = (

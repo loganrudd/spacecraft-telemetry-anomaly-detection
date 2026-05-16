@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
+from spacecraft_telemetry.api.replay import ReplayData
 from spacecraft_telemetry.core.config import Settings
 
 
@@ -30,6 +31,7 @@ class AppState:
     device: torch.device
     engines: dict[str, ChannelInferenceEngine]
     channel_subsystem_map: dict[str, str]
+    replay_data: dict[str, ReplayData]
     startup_monotonic_ns: int
     mlflow_tracking_uri: str
 

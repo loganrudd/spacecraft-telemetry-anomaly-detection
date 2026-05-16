@@ -19,6 +19,7 @@ from spacecraft_telemetry.api.inference import ChannelInferenceEngine  # noqa: E
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware  # noqa: E402
 from spacecraft_telemetry.api.state import AppState  # noqa: E402
 from spacecraft_telemetry.core.config import Settings, load_settings  # noqa: E402
+from spacecraft_telemetry.model.dataset import load_series_parquet  # noqa: E402
 from spacecraft_telemetry.model.io import ScoringParams  # noqa: E402
 
 _MISSION = "test-mission"
@@ -138,6 +139,10 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
         device=torch.device("cpu"),
     )
 
+    values, _seg, anom, timestamps = load_series_parquet(
+        api_parquet, _MISSION, _CHANNEL, "test"
+    )
+
     app = FastAPI()
     app.state.settings = settings
     app.state.app_state = AppState(
@@ -147,6 +152,7 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
         device=torch.device("cpu"),
         engines={_CHANNEL: engine},
         channel_subsystem_map={_CHANNEL: _SUBSYSTEM},
+        replay_data={_CHANNEL: (values, anom, timestamps)},
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
     )

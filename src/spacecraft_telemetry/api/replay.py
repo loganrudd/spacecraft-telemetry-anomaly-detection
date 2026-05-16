@@ -10,8 +10,13 @@ import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+import numpy as np
 
 from spacecraft_telemetry.model.dataset import load_series_parquet
+
+ReplayData = tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]
 
 
 async def replay_channel(
@@ -20,6 +25,7 @@ async def replay_channel(
     channel: str,
     speed: float,
     tick_interval_seconds: float,
+    cached_data: ReplayData | None = None,
 ) -> AsyncGenerator[tuple[datetime, float, bool], None]:
     """Async generator yielding ``(timestamp, value, is_anomaly_true)`` per tick.
 
@@ -35,9 +41,12 @@ async def replay_channel(
         tick_interval_seconds: Nominal wall-clock interval between ticks in the
                                source data (e.g. ``1.0`` for 1 Hz telemetry).
     """
-    values, _seg, anom, timestamps = await asyncio.to_thread(
-        load_series_parquet, processed_dir, mission, channel, "test"
-    )
+    if cached_data is not None:
+        values, anom, timestamps = cached_data
+    else:
+        values, _seg, anom, timestamps = await asyncio.to_thread(
+            load_series_parquet, processed_dir, mission, channel, "test"
+        )
     delay = tick_interval_seconds / speed
     for ts, v, a in zip(timestamps, values, anom, strict=False):
         yield ts.to_pydatetime(), float(v), bool(a)
