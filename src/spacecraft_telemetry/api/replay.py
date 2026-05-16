@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from spacecraft_telemetry.model.dataset import load_series_parquet
 
@@ -49,5 +50,5 @@ async def replay_channel(
         )
     delay = tick_interval_seconds / speed
     for ts, v, a in zip(timestamps, values, anom, strict=False):
-        yield ts.to_pydatetime(), float(v), bool(a)
+        yield pd.Timestamp(ts).to_pydatetime(), float(v), bool(a)
         await asyncio.sleep(delay)
