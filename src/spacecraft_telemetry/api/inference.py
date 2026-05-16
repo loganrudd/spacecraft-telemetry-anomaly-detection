@@ -100,9 +100,19 @@ class ChannelInferenceEngine:
         self._alpha: float = 2.0 / (params.error_smoothing_window + 1)
         self._s_prev: float | None = None
 
-        # Smoothed error buffer for threshold.  maxlen = Tw + 1 so that
-        # list(buf)[:-1] (the "prior") can hold exactly Tw values when full.
-        self._smoothed_buf: deque[float] = deque(maxlen=params.threshold_window + 1)
+        # Smoothed error ring buffer for threshold computation.
+        # Size = Tw + 1 so "prior" (all entries except the current tick) holds
+        # exactly Tw values when the buffer is full.  Pre-allocated to avoid
+        # O(Tw) list-copy + numpy allocation per tick.
+        _tw = params.threshold_window
+        self._smoothed_np: np.ndarray[np.float64, np.dtype[np.float64]] = (
+            np.empty(_tw + 1, dtype=np.float64)
+        )
+        self._smoothed_pos: int = 0   # next write position
+        self._smoothed_count: int = 0  # total values written
+        self._prior_buf: np.ndarray[np.float64, np.dtype[np.float64]] = (
+            np.empty(_tw, dtype=np.float64)
+        )
 
         # K-trailing anomaly flag buffer.
         self._raw_flag_buf: deque[bool] = deque(
@@ -161,16 +171,29 @@ class ChannelInferenceEngine:
         self._s_prev = s_t
 
         # 5. Threshold: prior = last Tw smoothed values *before* this tick.
-        #    Append AFTER extracting prior so current s_t is excluded.
-        self._smoothed_buf.append(s_t)
-        prior = list(self._smoothed_buf)[:-1]
+        #    Write s_t to ring buffer; prior = all slots except the one just written.
+        _tw1 = self._params.threshold_window + 1
+        _tw = self._params.threshold_window
+        self._smoothed_np[self._smoothed_pos] = s_t
+        self._smoothed_pos = (self._smoothed_pos + 1) % _tw1
+        self._smoothed_count += 1
 
-        if len(prior) < self._params.threshold_window:
+        if self._smoothed_count <= _tw:
             threshold_val: float = math.inf
         else:
-            arr = np.asarray(prior, dtype=np.float64)
+            # Buffer is full: prior = Tw elements starting from _smoothed_pos
+            # (the oldest element, which wraps around to the current write head).
+            start = self._smoothed_pos
+            end = (start + _tw) % _tw1
+            if start < end:
+                self._prior_buf[:] = self._smoothed_np[start:end]
+            else:
+                first = _tw1 - start
+                self._prior_buf[:first] = self._smoothed_np[start:]
+                self._prior_buf[first:] = self._smoothed_np[:end]
             threshold_val = float(
-                arr.mean() + self._params.threshold_z * arr.std(ddof=0)
+                self._prior_buf.mean()
+                + self._params.threshold_z * self._prior_buf.std(ddof=0)
             )
 
         # 6. K-trailing anomaly flag.
