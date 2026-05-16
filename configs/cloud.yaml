@@ -67,3 +67,21 @@ mlflow:
   #   SPACECRAFT_MLFLOW__REGISTRY_URI=postgresql+psycopg2://...
   tracking_uri: "sqlite:///mlflow.db"
   experiment_prefix: ""
+
+monitoring:
+  drift_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+  report_output_dir: monitoring/reports
+  reference_sample_rows: 5000
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+  mission: "ESA-Mission1"
+  subsystem: "subsystem_6"
+  channels: []
+  replay_speed_default: 10.0
+  replay_tick_interval_seconds: 1.0
+  stream_buffer_max_events: 256
+  request_timeout_seconds: 30
+

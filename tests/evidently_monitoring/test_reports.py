@@ -138,7 +138,7 @@ class TestRunDriftReportDrifted:
     """Current raw signal mean-shifted 5-sigma → mean/min/max features drift.
 
     Rolling std and rate_of_change are shift-invariant and may not drift.
-    At least 10 of 14 features (value_normalized + 3×mean + 3×min + 3×max)
+    At least 10 of 14 features (value_normalized + 3xmean + 3xmin + 3xmax)
     should drift reliably with a 5-sigma shift and 300 samples.
     """
 

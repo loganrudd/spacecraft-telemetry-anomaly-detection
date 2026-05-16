@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from spacecraft_telemetry.core.config import (
+    ApiConfig,
     DataConfig,
     LoggingConfig,
     MlflowConfig,
@@ -406,3 +407,106 @@ class TestMonitoringConfig:
         settings = load_settings("local")
 
         assert settings.monitoring.drift_threshold == 0.20  # env var wins
+
+
+# ---------------------------------------------------------------------------
+# ApiConfig
+# ---------------------------------------------------------------------------
+
+
+class TestApiConfig:
+    def test_defaults(self) -> None:
+        cfg = ApiConfig()
+        assert cfg.host == "127.0.0.1"
+        assert cfg.port == 8000
+        assert cfg.mission == "ESA-Mission1"
+        assert cfg.subsystem == "subsystem_6"
+        assert cfg.channels == []
+        assert cfg.replay_speed_default == 10.0
+        assert cfg.replay_tick_interval_seconds == 1.0
+        assert cfg.stream_buffer_max_events == 256
+        assert cfg.request_timeout_seconds == 30
+
+    def test_port_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="port"):
+            ApiConfig(port=-1)
+
+    def test_port_above_65535_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="port"):
+            ApiConfig(port=65536)
+
+    def test_port_boundary_values_valid(self) -> None:
+        assert ApiConfig(port=0).port == 0  # OS-assigned (useful in tests)
+        assert ApiConfig(port=1).port == 1
+        assert ApiConfig(port=65535).port == 65535
+
+    def test_replay_speed_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="replay_speed_default"):
+            ApiConfig(replay_speed_default=0.0)
+
+    def test_replay_speed_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="replay_speed_default"):
+            ApiConfig(replay_speed_default=-1.0)
+
+    def test_tick_interval_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="replay_tick_interval_seconds"):
+            ApiConfig(replay_tick_interval_seconds=0.0)
+
+    def test_stream_buffer_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            ApiConfig(stream_buffer_max_events=0)
+
+    def test_request_timeout_zero_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            ApiConfig(request_timeout_seconds=0)
+
+    def test_settings_has_api_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.api, ApiConfig)
+        assert settings.api.port == 8000
+
+    def test_api_round_trips_yaml(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text(
+            "api:\n"
+            "  host: \"0.0.0.0\"\n"
+            "  port: 9000\n"
+            "  subsystem: \"subsystem_1\"\n"
+        )
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.api.host == "0.0.0.0"
+        assert settings.api.port == 9000
+        assert settings.api.subsystem == "subsystem_1"
+
+    def test_api_env_var_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text("api:\n  subsystem: \"subsystem_6\"\n")
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("SPACECRAFT_API__SUBSYSTEM", "subsystem_1")
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.api.subsystem == "subsystem_1"  # env var wins
+
+    def test_test_env_loads_correct_api_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify test.yaml's api overrides are applied correctly."""
+        monkeypatch.delenv("SPACECRAFT_API__SUBSYSTEM", raising=False)
+        settings = load_settings("test")
+        assert settings.api.port == 0
+        assert settings.api.replay_speed_default == 1000.0
+        assert settings.api.replay_tick_interval_seconds == 0.001
+        assert settings.api.stream_buffer_max_events == 32
+

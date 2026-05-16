@@ -16,7 +16,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 7 of 11 complete (Evidently drift monitoring).**
+**Current phase: 8 of 11 complete (FastAPI serving layer).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -26,6 +26,7 @@ Completed:
 - Phase 5: Ray Tune scoring-parameter HPO
 - Phase 6: MLflow experiment tracking + model registry
 - Phase 7: Evidently batch drift detection + MLflow artifact logging
+- Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
 
 ## What Works Today
 
@@ -41,6 +42,12 @@ Completed:
 - Drift reports (HTML) logged as MLflow artifacts; per-feature metrics logged per run
 - `drift batch` CLI: build reference profile → run report → log to MLflow
 - `drift batch-mission` CLI: run all channels for a mission, print summary table
+- **FastAPI serving layer** (`make serve`):
+  - `GET /health` — model version, uptime, loaded channels, MLflow URI
+  - `GET /api/stream/telemetry` — SSE stream replaying preprocessed Parquet with
+    real-time LSTM inference; per-tick anomaly scores and predicted/labeled anomaly flags
+  - `?speed=N` replay speed multiplier; `?channels=ch1,ch2` channel filter
+  - Structured logging with correlation IDs on every request
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -99,6 +106,26 @@ uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel
 
 # 8) Run drift monitoring for all discovered channels in a mission
 uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
+
+# 9) Start the FastAPI serving layer (separate terminal)
+#    Loads all scored models for the configured subsystem (default: subsystem_6)
+make serve
+# or with overrides:
+uv run spacecraft-telemetry --env local api serve --subsystem subsystem_6 --reload
+
+# Health check
+curl -s http://127.0.0.1:8000/health | jq
+# → 200, {"status": "ok", "channels_loaded": [...], "uptime_seconds": ..., ...}
+
+# SSE stream — observe events with channel values, anomaly scores, and flags
+curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=50" 2>/dev/null | head -60
+
+# Filter to a single channel
+curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_1" 2>/dev/null | head -30
+
+# Look for a labeled anomaly event
+curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
+    | grep -m1 '"is_anomaly_true": true'
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
@@ -131,7 +158,9 @@ ESA Parquet (Zenodo/GCS)
   -> Ray Tune scoring HPO
   -> MLflow experiment tracking + model registry
   -> Evidently drift monitoring (batch, per-channel, HTML reports in MLflow)
-  -> FastAPI + SSE serving (next)
+  -> FastAPI + SSE serving  [Phase 8 - complete]
+       GET /health
+       GET /api/stream/telemetry  (SSE, real-time LSTM inference)
   -> React dashboard (next)
   -> GCP deployment
 ```
@@ -147,8 +176,8 @@ ESA Parquet (Zenodo/GCS)
 | 5 | Ray Tune HPO | Complete |
 | 6 | MLflow integration | Complete |
 | 7 | Evidently monitoring | Complete |
-| 8 | FastAPI serving layer | In Progress |
-| 9 | React dashboard | Planned |
+| 8 | FastAPI serving layer | Complete |
+| 9 | React dashboard | In Progress |
 | 10 | GCP deployment | Planned |
 | 11 | Documentation + polish | Planned |
 

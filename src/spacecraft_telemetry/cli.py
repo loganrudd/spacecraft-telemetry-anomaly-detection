@@ -464,6 +464,11 @@ def ray_group() -> None:
     help="Comma-separated channel IDs to train. Defaults to all discovered channels.",
 )
 @click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to filter channels (e.g. subsystem_1).",
+)
+@click.option(
     "--max-channels",
     type=int,
     default=None,
@@ -474,6 +479,7 @@ def ray_train(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    subsystem: str | None,
     max_channels: int | None,
 ) -> None:
     """Train channels in parallel using Ray Core.
@@ -495,7 +501,11 @@ def ray_train(
             --mission ESA-Mission1 \\
             --channels channel_1,channel_2,channel_3
     """
-    from spacecraft_telemetry.ray_training import discover_channels, train_all_channels
+    from spacecraft_telemetry.ray_training import (
+        discover_channels,
+        load_channel_subsystem_map,
+        train_all_channels,
+    )
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -513,7 +523,28 @@ def ray_train(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.train.start", mission=mission, n_channels=len(channel_list))
+            if subsystem is not None:
+                subsystem_map = load_channel_subsystem_map(settings, mission)
+                if not subsystem_map:
+                    raise click.ClickException(
+                        "channels.csv not found or empty; cannot resolve --subsystem. "
+                        "Pass --channels explicitly or ensure "
+                        "data/raw/{mission}/channels.csv exists."
+                    )
+                channel_list = [
+                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
+                ]
+                if not channel_list:
+                    raise click.ClickException(
+                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
+                    )
+
+        log.info(
+            "ray.train.start",
+            mission=mission,
+            n_channels=len(channel_list),
+            subsystem=subsystem,
+        )
         results = train_all_channels(
             settings, mission, channel_list, max_channels=max_channels
         )
@@ -545,6 +576,11 @@ def ray_train(
     help="Comma-separated channel IDs to score. Defaults to all discovered channels.",
 )
 @click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to filter channels (e.g. subsystem_1).",
+)
+@click.option(
     "--max-channels",
     type=int,
     default=None,
@@ -561,6 +597,7 @@ def ray_score(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    subsystem: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
 ) -> None:
@@ -581,7 +618,11 @@ def ray_score(
     """
     import json
 
-    from spacecraft_telemetry.ray_training import discover_channels, score_all_channels
+    from spacecraft_telemetry.ray_training import (
+        discover_channels,
+        load_channel_subsystem_map,
+        score_all_channels,
+    )
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -605,7 +646,28 @@ def ray_score(
                     "or pass --channels explicitly."
                 )
 
-        log.info("ray.score.start", mission=mission, n_channels=len(channel_list))
+            if subsystem is not None:
+                subsystem_map = load_channel_subsystem_map(settings, mission)
+                if not subsystem_map:
+                    raise click.ClickException(
+                        "channels.csv not found or empty; cannot resolve --subsystem. "
+                        "Pass --channels explicitly or ensure "
+                        "data/raw/{mission}/channels.csv exists."
+                    )
+                channel_list = [
+                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
+                ]
+                if not channel_list:
+                    raise click.ClickException(
+                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
+                    )
+
+        log.info(
+            "ray.score.start",
+            mission=mission,
+            n_channels=len(channel_list),
+            subsystem=subsystem,
+        )
         results = score_all_channels(
             settings,
             mission,
@@ -1032,7 +1094,7 @@ def drift_batch_mission(
 
     # TODO(phase9): parallelize with @ray.remote drift_one_channel — same shape as
     # ray_train's per-channel tasks.  Serial is fine for portfolio demo (<10 channels),
-    # but a full-mission sweep (~300 channels × 5 s each) takes ~25 min here vs ~3 min
+    # but a full-mission sweep (~300 channels x 5 s each) takes ~25 min here vs ~3 min
     # with Ray.  Evidently's MLflow auto-detection inside workers needs validation first.
     results: list[dict[str, object]] = []
     errors: list[tuple[str, str]] = []
@@ -1068,3 +1130,73 @@ def drift_batch_mission(
 
 
 main.add_command(drift_group, name="drift")
+
+
+# ---------------------------------------------------------------------------
+# api group (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+@click.group("api")
+def api_group() -> None:
+    """FastAPI serving commands."""
+
+
+@api_group.command("serve")
+@click.option("--host", default=None, help="Bind host (overrides config).")
+@click.option("--port", type=int, default=None, help="Bind port (overrides config).")
+@click.option("--mission", default=None, help="Mission ID to serve (overrides config).")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Subsystem to load channels from (overrides config).",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to load (overrides subsystem).",
+)
+@click.option("--reload", is_flag=True, default=False, help="Enable uvicorn auto-reload.")
+@click.pass_context
+def api_serve(
+    ctx: click.Context,
+    host: str | None,
+    port: int | None,
+    mission: str | None,
+    subsystem: str | None,
+    channels: str | None,
+    reload: bool,
+) -> None:
+    """Start the FastAPI serving layer (SSE stream + /health)."""
+    import uvicorn
+
+    from spacecraft_telemetry.api.app import create_app
+
+    settings: Settings = ctx.obj["settings"]
+    api_overrides: dict[str, Any] = {}
+    if host is not None:
+        api_overrides["host"] = host
+    if port is not None:
+        api_overrides["port"] = port
+    if mission is not None:
+        api_overrides["mission"] = mission
+    if subsystem is not None:
+        api_overrides["subsystem"] = subsystem
+    if channels is not None:
+        api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
+
+    if api_overrides:
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(update=api_overrides)}
+        )
+
+    app = create_app(settings)
+    uvicorn.run(
+        app,
+        host=settings.api.host,
+        port=settings.api.port,
+        reload=reload,
+    )
+
+
+main.add_command(api_group, name="api")

@@ -1,4 +1,4 @@
-"""Tests for model.dataset — _load_series_parquet, _build_window_index,
+"""Tests for model.dataset — load_series_parquet, _build_window_index,
 WindowedSequenceDataset, make_dataloaders, make_test_dataloader."""
 
 from __future__ import annotations
@@ -14,14 +14,14 @@ torch = pytest.importorskip("torch")
 from spacecraft_telemetry.model.dataset import (  # noqa: E402
     WindowedSequenceDataset,
     _build_window_index,
-    _load_series_parquet,
+    load_series_parquet,
     make_dataloaders,
     make_test_dataloader,
 )
 from tests.model.conftest import SeriesParquetFixture  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# _load_series_parquet
+# load_series_parquet
 # ---------------------------------------------------------------------------
 
 
@@ -29,7 +29,7 @@ def test_load_series_returns_expected_shapes(
     tiny_series_parquet: SeriesParquetFixture,
 ) -> None:
     fx = tiny_series_parquet
-    values, seg_ids, is_anomaly, timestamps = _load_series_parquet(
+    values, seg_ids, is_anomaly, timestamps = load_series_parquet(
         fx.processed_dir, fx.mission, fx.channel, "train"
     )
     n_rows = sum((60, 30, 10))  # _SEG_SIZES_TRAIN
@@ -41,7 +41,7 @@ def test_load_series_returns_expected_shapes(
 
 def test_load_series_dtypes(tiny_series_parquet: SeriesParquetFixture) -> None:
     fx = tiny_series_parquet
-    values, seg_ids, is_anomaly, _ = _load_series_parquet(
+    values, seg_ids, is_anomaly, _ = load_series_parquet(
         fx.processed_dir, fx.mission, fx.channel, "train"
     )
     assert values.dtype == np.float32
@@ -54,7 +54,7 @@ def test_load_series_sorted_by_timestamp(
 ) -> None:
     """Rows must be in ascending timestamp order after loading."""
     fx = tiny_series_parquet
-    _, _, _, timestamps = _load_series_parquet(
+    _, _, _, timestamps = load_series_parquet(
         fx.processed_dir, fx.mission, fx.channel, "train"
     )
     diffs = np.diff(pd.DatetimeIndex(timestamps).asi8)
@@ -66,7 +66,7 @@ def test_load_series_missing_channel_raises(
 ) -> None:
     fx = tiny_series_parquet
     with pytest.raises(FileNotFoundError, match="channel_id=nonexistent"):
-        _load_series_parquet(fx.processed_dir, fx.mission, "nonexistent", "train")
+        load_series_parquet(fx.processed_dir, fx.mission, "nonexistent", "train")
 
 
 def test_load_series_empty_dir_raises(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_load_series_empty_dir_raises(tmp_path: Path) -> None:
     )
     empty_dir.mkdir(parents=True)
     with pytest.raises(FileNotFoundError, match=r"no \.parquet files"):
-        _load_series_parquet(
+        load_series_parquet(
             tmp_path / "processed", "ESA-Mission1", "channel_1", "train"
         )
 

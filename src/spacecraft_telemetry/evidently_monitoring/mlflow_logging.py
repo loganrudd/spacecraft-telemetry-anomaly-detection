@@ -11,6 +11,8 @@ separate from training and HPO runs while sharing the same tracking server.
 
 from __future__ import annotations
 
+from evidently.legacy.report import Report
+
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.evidently_monitoring.reports import DriftResult, report_to_bytes
 from spacecraft_telemetry.mlflow_tracking.conventions import common_tags, experiment_name
@@ -20,8 +22,6 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
     log_metrics_final,
     open_run,
 )
-
-from evidently.legacy.report import Report
 
 
 def log_drift_report(
