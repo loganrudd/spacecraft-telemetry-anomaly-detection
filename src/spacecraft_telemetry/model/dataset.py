@@ -26,7 +26,7 @@ from torch.utils.data import Dataset as _TorchDataset
 from spacecraft_telemetry.core.config import Settings
 
 
-def _load_series_parquet(
+def load_series_parquet(
     processed_dir: Path,
     mission: str,
     channel: str,
@@ -198,7 +198,7 @@ def make_dataloaders(
         channel:  Channel ID, e.g. ``"channel_1"``.
     """
     cfg = settings.model
-    values, segment_ids, is_anomaly, _ = _load_series_parquet(
+    values, segment_ids, is_anomaly, _ = load_series_parquet(
         settings.spark.processed_data_dir, mission, channel, "train"
     )
     all_indices = _build_window_index(
@@ -269,7 +269,7 @@ def make_test_dataloader(
         channel:  Channel ID, e.g. ``"channel_1"``.
     """
     cfg = settings.model
-    values, segment_ids, is_anomaly, timestamps = _load_series_parquet(
+    values, segment_ids, is_anomaly, timestamps = load_series_parquet(
         settings.spark.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(
@@ -319,7 +319,7 @@ def load_window_labels(
         channel:  Channel ID, e.g. ``"channel_1"``.
     """
     cfg = settings.model
-    _, segment_ids, is_anomaly, _ = _load_series_parquet(
+    _, segment_ids, is_anomaly, _ = load_series_parquet(
         settings.spark.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(

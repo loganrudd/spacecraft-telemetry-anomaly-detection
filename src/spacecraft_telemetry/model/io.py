@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -179,5 +180,74 @@ def load_model_for_scoring(
     window_size = int(run.data.params["window_size"])
     return model, window_size
 
+
+# ---------------------------------------------------------------------------
+# Scoring params (used by Phase 8 FastAPI inference engine)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScoringParams:
+    """Threshold hyperparameters for online anomaly scoring.
+
+    Loaded from the latest scoring MLflow run for a channel.  Written by
+    score_channel() via log_params (see model/scoring.py).
+    """
+
+    threshold_window: int
+    threshold_z: float
+    error_smoothing_window: int
+    threshold_min_anomaly_len: int
+
+
+def load_scoring_params(
+    channel: str,
+    mission: str,
+    tracking_uri: str,
+    model_type: str = "telemanom",
+) -> ScoringParams:
+    """Fetch the four threshold hyperparameters from the latest scoring run.
+
+    These params are written by score_channel() via log_params (see
+    src/spacecraft_telemetry/model/scoring.py).
+
+    Args:
+        channel:      Channel ID to look up (e.g. "channel_1").
+        mission:      Mission ID (e.g. "ESA-Mission1").
+        tracking_uri: MLflow tracking server URI.
+        model_type:   Model type prefix used in experiment naming (default "telemanom").
+
+    Returns:
+        ScoringParams dataclass with the four threshold hyperparameters.
+
+    Raises:
+        RuntimeError: If no scoring run exists for the channel, or required
+            params are missing (model trained but never scored).
+    """
+    from spacecraft_telemetry.mlflow_tracking.conventions import (
+        experiment_name as _exp_name,
+    )
+
+    scoring_exp = _exp_name(model_type, "scoring", mission)
+    run = find_latest_run_for_channel(scoring_exp, channel, tracking_uri)
+    if run is None:
+        raise RuntimeError(
+            f"No scoring run found for channel {channel!r} in mission {mission!r}. "
+            "Run `spacecraft-telemetry ray score` for this channel first."
+        )
+    p = run.data.params
+    try:
+        return ScoringParams(
+            threshold_window=int(p["threshold_window"]),
+            threshold_z=float(p["threshold_z"]),
+            error_smoothing_window=int(p["error_smoothing_window"]),
+            threshold_min_anomaly_len=int(p["threshold_min_anomaly_len"]),
+        )
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Scoring run {run.info.run_id!r} for channel {channel!r} is missing "
+            f"param {exc.args[0]!r}. "
+            "Re-run `spacecraft-telemetry ray score` for this channel."
+        ) from exc
 
 

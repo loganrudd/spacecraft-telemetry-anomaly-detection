@@ -7,6 +7,7 @@ Tests cover:
 - download_artifact_bytes — fetches a run artifact via MlflowClient.
 - find_latest_run_for_channel — returns the most recent run for a channel.
 - load_model_for_scoring — loads a registered model + window_size from registry.
+- load_scoring_params — reads the four threshold params from the scoring run.
 - Discipline check: training.py and scoring.py must not call raw filesystem IO.
 """
 
@@ -23,11 +24,13 @@ torch = pytest.importorskip("torch")
 import mlflow  # noqa: E402
 
 from spacecraft_telemetry.model.io import (  # noqa: E402
+    ScoringParams,
     bytes_to_errors,
     download_artifact_bytes,
     errors_to_bytes,
     find_latest_run_for_channel,
     load_model_for_scoring,
+    load_scoring_params,
     threshold_to_bytes,
 )
 
@@ -163,6 +166,59 @@ def test_load_model_for_scoring_raises_when_no_version(_mlflow_uri: str) -> None
     mlflow.set_tracking_uri(_mlflow_uri)
     with pytest.raises(RuntimeError, match="No registered versions found"):
         load_model_for_scoring("nonexistent-model", torch.device("cpu"), _mlflow_uri)
+
+
+# ---------------------------------------------------------------------------
+# load_scoring_params — reads threshold hyperparams from the scoring run
+# ---------------------------------------------------------------------------
+
+_SCORING_PARAMS = {
+    "error_smoothing_window": "12",
+    "threshold_window": "50",
+    "threshold_z": "2.5",
+    "threshold_min_anomaly_len": "4",
+}
+
+
+def _log_scoring_run(
+    tracking_uri: str,
+    channel: str,
+    mission: str,
+    params: dict[str, str] | None = None,
+) -> None:
+    """Log a minimal scoring run tagged with channel_id and the threshold params."""
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(f"telemanom-scoring-{mission}")
+    with mlflow.start_run(tags={"channel_id": channel}):
+        mlflow.log_params(params or _SCORING_PARAMS)
+
+
+def test_load_scoring_params_returns_params_from_run(_mlflow_uri: str) -> None:
+    """load_scoring_params returns a ScoringParams with values from the scoring run."""
+    _log_scoring_run(_mlflow_uri, "channel_1", "ESA-Mission1")
+
+    result = load_scoring_params("channel_1", "ESA-Mission1", _mlflow_uri)
+
+    assert isinstance(result, ScoringParams)
+    assert result.error_smoothing_window == 12
+    assert result.threshold_window == 50
+    assert result.threshold_z == pytest.approx(2.5)
+    assert result.threshold_min_anomaly_len == 4
+
+
+def test_load_scoring_params_raises_when_no_run(_mlflow_uri: str) -> None:
+    """load_scoring_params raises RuntimeError when no scoring run exists."""
+    with pytest.raises(RuntimeError, match="No scoring run found"):
+        load_scoring_params("channel_99", "ESA-Mission1", _mlflow_uri)
+
+
+def test_load_scoring_params_raises_when_param_missing(_mlflow_uri: str) -> None:
+    """RuntimeError when a required scoring param is absent from the run."""
+    incomplete = {k: v for k, v in _SCORING_PARAMS.items() if k != "threshold_z"}
+    _log_scoring_run(_mlflow_uri, "channel_2", "ESA-Mission1", params=incomplete)
+
+    with pytest.raises(RuntimeError, match="threshold_z"):
+        load_scoring_params("channel_2", "ESA-Mission1", _mlflow_uri)
 
 
 # ---------------------------------------------------------------------------

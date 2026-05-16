@@ -26,7 +26,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.features.definitions import FEATURE_DEFINITIONS, _DEFAULT_WINDOWS
+from spacecraft_telemetry.features.definitions import _DEFAULT_WINDOWS, FEATURE_DEFINITIONS
 
 # ---------------------------------------------------------------------------
 # Monitoring column set
@@ -116,7 +116,7 @@ def _load_channel_series(
     returning — this is the minimum contiguous prefix needed to produce
     ``reference_sample_rows`` valid rolling-feature rows after warmup.  For a
     500K-row channel this reduces the downstream rolling-feature compute from
-    O(500K × W) to O(5100 × W).
+    O(500K x W) to O(5100 x W).
 
     The "recent tail" interpretation is intentional: the most recent training
     rows are the relevant reference distribution when current data arrives today.

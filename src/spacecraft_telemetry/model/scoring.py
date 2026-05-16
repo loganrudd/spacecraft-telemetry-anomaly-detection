@@ -150,7 +150,7 @@ def flag_anomalies(
 
 
 def evaluate(
-    is_anomaly_true: np.ndarray[Any, Any],
+    is_anomaly: np.ndarray[Any, Any],
     is_anomaly_pred: np.ndarray[Any, Any],
 ) -> dict[str, float]:
     """Precision, recall, F1, and F0.5 from binary anomaly label arrays.
@@ -158,11 +158,11 @@ def evaluate(
     F0.5 weights precision twice as much as recall — appropriate for spacecraft
     telemetry where false alarms are more costly than missed detections.
     """
-    tp = int(np.sum(is_anomaly_true & is_anomaly_pred))
-    fp = int(np.sum(~is_anomaly_true & is_anomaly_pred))
-    fn = int(np.sum(is_anomaly_true & ~is_anomaly_pred))
+    tp = int(np.sum(is_anomaly & is_anomaly_pred))
+    fp = int(np.sum(~is_anomaly & is_anomaly_pred))
+    fn = int(np.sum(is_anomaly & ~is_anomaly_pred))
 
-    n_true_positive_labels = int(np.sum(is_anomaly_true))
+    n_true_positive_labels = int(np.sum(is_anomaly))
     n_predicted_positive_labels = int(np.sum(is_anomaly_pred))
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -253,7 +253,7 @@ def score_channel(
             "Re-train with consistent settings."
         )
 
-    loader, _target_timestamps, is_anomaly_true = make_test_dataloader(
+    loader, _target_timestamps, is_anomaly = make_test_dataloader(
         settings, mission, channel
     )
     preds, targets = predict(model, loader, device)
@@ -264,16 +264,16 @@ def score_channel(
 
     # Slice true/pred labels for the reported metrics.
     # errors.npy is saved from the full smoothed array below, unaffected.
-    n = len(is_anomaly_true)
+    n = len(is_anomaly)
     n_hpo = int(n * settings.tune.hpo_eval_fraction)
     if eval_split == "hpo_portion":
-        eval_true = is_anomaly_true[:n_hpo]
+        eval_true = is_anomaly[:n_hpo]
         eval_pred = is_anomaly_pred[:n_hpo]
     elif eval_split == "final_portion":
-        eval_true = is_anomaly_true[n_hpo:]
+        eval_true = is_anomaly[n_hpo:]
         eval_pred = is_anomaly_pred[n_hpo:]
     else:  # "full_test"
-        eval_true = is_anomaly_true
+        eval_true = is_anomaly
         eval_pred = is_anomaly_pred
 
     metrics = evaluate(eval_true, eval_pred)
