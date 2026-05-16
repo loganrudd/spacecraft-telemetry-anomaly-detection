@@ -451,6 +451,34 @@ def _ray_session(settings: Settings) -> Any:
         ray.shutdown()
 
 
+def _filter_channels_by_subsystem(
+    settings: Settings,
+    mission: str,
+    channel_list: list[str],
+    subsystem: str,
+) -> list[str]:
+    """Return the subset of ``channel_list`` whose subsystem matches ``subsystem``.
+
+    Raises ``click.ClickException`` if the subsystem metadata file is missing
+    or no channels survive the filter.
+    """
+    from spacecraft_telemetry.ray_training import load_channel_subsystem_map
+
+    subsystem_map = load_channel_subsystem_map(settings, mission)
+    if not subsystem_map:
+        raise click.ClickException(
+            "channels.csv not found or empty; cannot resolve --subsystem. "
+            "Pass --channels explicitly or ensure "
+            "data/raw/{mission}/channels.csv exists."
+        )
+    filtered = [ch for ch in channel_list if subsystem_map.get(ch) == subsystem]
+    if not filtered:
+        raise click.ClickException(
+            f"No channels found for subsystem {subsystem!r} in mission {mission}."
+        )
+    return filtered
+
+
 @click.group()
 def ray_group() -> None:
     """Ray Core parallel training, scoring, and tuning commands."""
@@ -503,7 +531,6 @@ def ray_train(
     """
     from spacecraft_telemetry.ray_training import (
         discover_channels,
-        load_channel_subsystem_map,
         train_all_channels,
     )
 
@@ -524,20 +551,9 @@ def ray_train(
                 )
 
             if subsystem is not None:
-                subsystem_map = load_channel_subsystem_map(settings, mission)
-                if not subsystem_map:
-                    raise click.ClickException(
-                        "channels.csv not found or empty; cannot resolve --subsystem. "
-                        "Pass --channels explicitly or ensure "
-                        "data/raw/{mission}/channels.csv exists."
-                    )
-                channel_list = [
-                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
-                ]
-                if not channel_list:
-                    raise click.ClickException(
-                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
-                    )
+                channel_list = _filter_channels_by_subsystem(
+                    settings, mission, channel_list, subsystem
+                )
 
         log.info(
             "ray.train.start",
@@ -620,7 +636,6 @@ def ray_score(
 
     from spacecraft_telemetry.ray_training import (
         discover_channels,
-        load_channel_subsystem_map,
         score_all_channels,
     )
 
@@ -647,20 +662,9 @@ def ray_score(
                 )
 
             if subsystem is not None:
-                subsystem_map = load_channel_subsystem_map(settings, mission)
-                if not subsystem_map:
-                    raise click.ClickException(
-                        "channels.csv not found or empty; cannot resolve --subsystem. "
-                        "Pass --channels explicitly or ensure "
-                        "data/raw/{mission}/channels.csv exists."
-                    )
-                channel_list = [
-                    ch for ch in channel_list if subsystem_map.get(ch) == subsystem
-                ]
-                if not channel_list:
-                    raise click.ClickException(
-                        f"No channels found for subsystem {subsystem!r} in mission {mission}."
-                    )
+                channel_list = _filter_channels_by_subsystem(
+                    settings, mission, channel_list, subsystem
+                )
 
         log.info(
             "ray.score.start",
@@ -750,7 +754,6 @@ def ray_tune(
 
     from spacecraft_telemetry.ray_training import (
         discover_channels,
-        load_channel_subsystem_map,
         run_all_sweeps,
         run_hpo_sweep,
         write_tuned_configs,
@@ -797,20 +800,9 @@ def ray_tune(
             click.echo(f"Output        : {output_path}")
             return
 
-        subsystem_map = load_channel_subsystem_map(tune_settings, mission)
-        if not subsystem_map:
-            raise click.ClickException(
-                "channels.csv not found or empty; cannot resolve --subsystem. "
-                "Pass --channels explicitly or ensure data/raw/{mission}/channels.csv exists."
-            )
-
-        subsystem_channels = [
-            ch for ch in channel_list if subsystem_map.get(ch) == subsystem
-        ]
-        if not subsystem_channels:
-            raise click.ClickException(
-                f"No channels found for subsystem {subsystem!r} in mission {mission}."
-            )
+        subsystem_channels = _filter_channels_by_subsystem(
+            tune_settings, mission, channel_list, subsystem
+        )
 
         best = run_hpo_sweep(subsystem, subsystem_channels, tune_settings, mission)
         output_path = Path(tune_settings.model.artifacts_dir) / mission / "tuned_configs.json"
