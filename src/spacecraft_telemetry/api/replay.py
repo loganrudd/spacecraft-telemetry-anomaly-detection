@@ -35,10 +35,10 @@ async def replay_channel(
         tick_interval_seconds: Nominal wall-clock interval between ticks in the
                                source data (e.g. ``1.0`` for 1 Hz telemetry).
     """
-    values, _seg, anom, timestamps = load_series_parquet(
-        processed_dir, mission, channel, "test"
+    values, _seg, anom, timestamps = await asyncio.to_thread(
+        load_series_parquet, processed_dir, mission, channel, "test"
     )
     delay = tick_interval_seconds / speed
     for ts, v, a in zip(timestamps, values, anom, strict=False):
-        yield datetime.fromisoformat(str(ts)), float(v), bool(a)
+        yield ts.to_pydatetime(), float(v), bool(a)
         await asyncio.sleep(delay)
