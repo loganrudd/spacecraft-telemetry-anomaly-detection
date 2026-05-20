@@ -199,6 +199,49 @@ class TestStreamPredictedAnomaly:
 # ---------------------------------------------------------------------------
 
 
+class TestStreamMultiChannel:
+    """Multi-channel stream regression guard for the per-channel queue design.
+
+    The old single-queue design would head-of-line-block all pumps when any
+    one channel's consumer stalled.  These tests verify that events from all
+    requested channels arrive, which would fail if the merger drained only
+    one channel's queue.
+    """
+
+    _TWO_CH_URL = "/api/stream/telemetry?speed=1000&channels=test-ch,test-ch-b"
+
+    def test_both_channels_emit_events(self, running_app_multi_ch: FastAPI) -> None:
+        events = _collect_events(TestClient(running_app_multi_ch), url=self._TWO_CH_URL)
+        channels_seen = {ev["channel"] for ev in events}
+        assert "test-ch" in channels_seen
+        assert "test-ch-b" in channels_seen
+
+    def test_total_event_count_matches_two_channels(
+        self, running_app_multi_ch: FastAPI
+    ) -> None:
+        """50 rows x 2 channels = 100 total events."""
+        events = _collect_events(TestClient(running_app_multi_ch), url=self._TWO_CH_URL)
+        assert len(events) == 100
+
+    def test_events_interleaved_not_sequential(
+        self, running_app_multi_ch: FastAPI
+    ) -> None:
+        """Channel values in the stream should alternate rather than run
+        all-ch-a then all-ch-b, confirming the merger races both queues.
+
+        Checks that neither channel dominates the first half of the stream.
+        """
+        events = _collect_events(TestClient(running_app_multi_ch), url=self._TWO_CH_URL)
+        first_half = events[:50]
+        ch_a = sum(1 for e in first_half if e["channel"] == "test-ch")
+        ch_b = sum(1 for e in first_half if e["channel"] == "test-ch-b")
+        # Both channels should contribute to the first half of events.
+        # Allow some skew (each contributes at least 5 of 50) but reject
+        # the 50/0 split that a sequential (non-merged) design would produce.
+        assert ch_a >= 5, f"test-ch underrepresented in first half: {ch_a}/50"
+        assert ch_b >= 5, f"test-ch-b underrepresented in first half: {ch_b}/50"
+
+
 class TestStreamDisconnect:
     def test_partial_read_no_exception(self, running_app: FastAPI, mocker) -> None:
         """Client disconnect should not surface as a server-side error.

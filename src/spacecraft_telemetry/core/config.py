@@ -322,6 +322,9 @@ class ApiConfig(BaseModel):
     replay_tick_interval_seconds: float = 1.0
     stream_buffer_max_events: int = 256
     request_timeout_seconds: int = 30
+    # CORS allowed origins — empty list disables CORS middleware entirely.
+    # Populate in local.yaml for Vite dev server; set prod origin in cloud.yaml.
+    cors_allowed_origins: list[str] = []
 
     @field_validator("port")
     @classmethod
