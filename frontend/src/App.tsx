@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import AnomalyAlerts from "./components/AnomalyAlerts";
 import ChannelPicker from "./components/ChannelPicker";
+import DriftPanel from "./components/DriftPanel";
 import StatusBar from "./components/StatusBar";
 import TelemetryChart from "./components/TelemetryChart";
 import { openTelemetryStream } from "./api/telemetryStream";
+import { openDriftStream } from "./api/driftStream";
 import { telemetryStore } from "./state/telemetryStore";
+import { driftStore } from "./state/driftStore";
 import type { StreamHandle } from "./api/telemetryStream";
+import type { DriftStreamHandle } from "./api/driftStream";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
@@ -18,6 +22,8 @@ export default function App() {
   const [speed, setSpeed] = useState<Speed>(100);
   const [evPerSec, setEvPerSec] = useState(0);
   const streamRef = useRef<StreamHandle | null>(null);
+  const driftStreamRef = useRef<DriftStreamHandle | null>(null);
+  const [driftDisabled, setDriftDisabled] = useState(false);
   // P2: count events in the current 1s bucket; a setInterval drains it at 1Hz.
   const tickCountRef = useRef(0);
 
@@ -65,6 +71,36 @@ export default function App() {
     };
   }, [selected, speed]);
 
+  // Drift SSE — same deps as telemetry so both pumps restart together.
+  useEffect(() => {
+    if (driftStreamRef.current) {
+      driftStreamRef.current.close();
+      driftStreamRef.current = null;
+    }
+
+    if (selected.length === 0) return;
+
+    driftStore.clear();
+    const handle = openDriftStream({
+      channels: selected,
+      onEvent: (e) => driftStore.push(e),
+      onError: (err) => {
+        // 503 → drift disabled or no reference profiles; suppress panel.
+        const es = err.target as EventSource;
+        if (es.readyState === EventSource.CLOSED) {
+          setDriftDisabled(true);
+        }
+      },
+    });
+    setDriftDisabled(false);
+    driftStreamRef.current = handle;
+
+    return () => {
+      handle.close();
+      driftStreamRef.current = null;
+    };
+  }, [selected, speed]);
+
   return (
     <div className="app">
       <StatusBar
@@ -91,7 +127,10 @@ export default function App() {
           )}
         </main>
 
-        <AnomalyAlerts channels={selected} />
+        <div className="app__right">
+          <AnomalyAlerts channels={selected} />
+          <DriftPanel channels={selected} disabled={driftDisabled} />
+        </div>
       </div>
     </div>
   );

@@ -20,4 +20,21 @@ export type HealthResponse = {
   mlflow_tracking_uri: string;
 };
 
+export type DriftFeature = {
+  feature: string;
+  score: number;
+  drifted: boolean;
+};
+
+export type DriftEvent = {
+  timestamp: string;
+  mission: string;
+  channel: string;
+  features: DriftFeature[];
+  percent_drifted: number;
+  drifted: boolean;
+  subsystem_percent_drifted: number | null;
+  subsystem_alert: boolean;
+};
+
 export const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "";
