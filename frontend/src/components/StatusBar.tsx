@@ -3,9 +3,13 @@ import { fetchHealth } from "../api/health";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
+type Speed = 10 | 100 | 1000;
+
 type Props = {
   connectionState: ConnectionState;
   eventsPerSecond: number;
+  speed: Speed;
+  onSpeedChange: (speed: Speed) => void;
 };
 
 const STATE_LABELS: Record<ConnectionState, string> = {
@@ -22,15 +26,24 @@ const STATE_COLORS: Record<ConnectionState, string> = {
   error: "var(--danger)",
 };
 
-export default function StatusBar({ connectionState, eventsPerSecond }: Props) {
+export default function StatusBar({
+  connectionState,
+  eventsPerSecond,
+  speed,
+  onSpeedChange,
+}: Props) {
   const [uptime, setUptime] = useState<number | null>(null);
+  const [apiOnline, setApiOnline] = useState(true);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     function refresh() {
       fetchHealth()
-        .then((h) => setUptime(h.uptime_s))
-        .catch(() => {});
+        .then((h) => {
+          setUptime(h.uptime_s);
+          setApiOnline(true);
+        })
+        .catch(() => setApiOnline(false));
     }
     refresh();
     timerRef.current = setInterval(refresh, 30_000);
@@ -48,12 +61,27 @@ export default function StatusBar({ connectionState, eventsPerSecond }: Props) {
       >
         ● {STATE_LABELS[connectionState]}
       </span>
-      <span className="status-bar__rate">
-        {eventsPerSecond.toFixed(1)} ev/s
-      </span>
-      {uptime !== null && (
-        <span className="status-bar__uptime">
-          API uptime: {uptime.toFixed(0)}s
+      <span className="status-bar__rate">{eventsPerSecond} ev/s</span>
+      <label className="status-bar__speed">
+        Speed:&nbsp;
+        <select
+          value={speed}
+          onChange={(e) => onSpeedChange(Number(e.target.value) as Speed)}
+        >
+          <option value={10}>10×</option>
+          <option value={100}>100×</option>
+          <option value={1000}>1000×</option>
+        </select>
+      </label>
+      {apiOnline ? (
+        uptime !== null && (
+          <span className="status-bar__uptime">
+            API uptime: {uptime.toFixed(0)}s
+          </span>
+        )
+      ) : (
+        <span className="status-bar__uptime" style={{ color: "var(--danger)" }}>
+          API offline
         </span>
       )}
     </header>

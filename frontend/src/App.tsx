@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import AnomalyAlerts from "./components/AnomalyAlerts";
 import ChannelPicker from "./components/ChannelPicker";
 import StatusBar from "./components/StatusBar";
@@ -9,26 +9,30 @@ import type { StreamHandle } from "./api/telemetryStream";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
+const SPEED_OPTIONS = [10, 100, 1000] as const;
+type Speed = (typeof SPEED_OPTIONS)[number];
+
 export default function App() {
   const [selected, setSelected] = useState<string[]>([]);
   const [connState, setConnState] = useState<ConnectionState>("closed");
+  const [speed, setSpeed] = useState<Speed>(100);
   const [evPerSec, setEvPerSec] = useState(0);
   const streamRef = useRef<StreamHandle | null>(null);
-  const recentEventsRef = useRef<number[]>([]);
+  // P2: count events in the current 1s bucket; a setInterval drains it at 1Hz.
+  const tickCountRef = useRef(0);
 
-  // Track tick rate over a 5s rolling window
-  const recordTick = useCallback(() => {
-    const now = Date.now();
-    recentEventsRef.current.push(now);
-    // Keep only the last 5 seconds
-    const cutoff = now - 5_000;
-    recentEventsRef.current = recentEventsRef.current.filter((t) => t >= cutoff);
-    setEvPerSec(recentEventsRef.current.length / 5);
+  // Publish tick rate at 1Hz instead of on every event to avoid cascading
+  // re-renders in AnomalyAlerts and ChannelPicker on every SSE message.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setEvPerSec(tickCountRef.current);
+      tickCountRef.current = 0;
+    }, 1_000);
+    return () => clearInterval(id);
   }, []);
 
-  // Open/reconnect SSE whenever the selected channel set changes
+  // Open/reconnect SSE whenever channels or speed changes.
   useEffect(() => {
-    // Close the previous connection
     if (streamRef.current) {
       streamRef.current.close();
       streamRef.current = null;
@@ -44,10 +48,10 @@ export default function App() {
 
     const handle = openTelemetryStream({
       channels: selected,
-      speed: 100,
+      speed,
       onEvent: (e) => {
         telemetryStore.push(e);
-        recordTick();
+        tickCountRef.current += 1;
       },
       onOpen: () => setConnState("open"),
       onError: () => setConnState("error"),
@@ -59,11 +63,16 @@ export default function App() {
       handle.close();
       streamRef.current = null;
     };
-  }, [selected, recordTick]);
+  }, [selected, speed]);
 
   return (
     <div className="app">
-      <StatusBar connectionState={connState} eventsPerSecond={evPerSec} />
+      <StatusBar
+        connectionState={connState}
+        eventsPerSecond={evPerSec}
+        speed={speed}
+        onSpeedChange={setSpeed}
+      />
 
       <div className="app__body">
         <ChannelPicker selected={selected} onChange={setSelected} />
