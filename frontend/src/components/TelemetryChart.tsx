@@ -9,23 +9,16 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
+import type { TooltipProps } from "recharts";
 import { useTelemetryChannel } from "../state/telemetryStore";
 import { collapseFlags } from "../utils/anomalyIntervals";
 import type { TelemetryEvent } from "../api/types";
 
 type Props = { channel: string };
 
-type TooltipPayload = {
-  payload?: {
-    payload?: TelemetryEvent;
-  }[];
-  active?: boolean;
-  label?: string;
-};
-
-function CustomTooltip({ active, payload }: TooltipPayload) {
+function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
   if (!active || !payload?.length) return null;
-  const ev = payload[0]?.payload;
+  const ev = payload[0]?.payload as TelemetryEvent | undefined;
   if (!ev) return null;
   return (
     <div className="chart-tooltip">

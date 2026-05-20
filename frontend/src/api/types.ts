@@ -20,6 +20,4 @@ export type HealthResponse = {
   mlflow_tracking_uri: string;
 };
 
-export const API_BASE: string =
-  (import.meta as ImportMeta & { env: Record<string, string> }).env
-    .VITE_API_BASE_URL ?? "";
+export const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "";

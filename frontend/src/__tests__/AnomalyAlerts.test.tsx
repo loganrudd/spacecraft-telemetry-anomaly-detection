@@ -90,4 +90,38 @@ describe("AnomalyAlerts", () => {
     const rows = screen.getAllByRole("row");
     expect(rows).toHaveLength(3); // header + 2 alerts
   });
+
+  it("caps alerts at MAX_ALERTS=50, dropping the oldest (T3)", () => {
+    render(<AnomalyAlerts channels={["ch-a"]} />);
+
+    // Generate 60 rising edges: false → true, true → false, ...
+    push(makeEvent("ch-a", false, false, "seed"));
+    for (let i = 0; i < 60; i++) {
+      push(makeEvent("ch-a", true, false, `alert-${i}`));
+      push(makeEvent("ch-a", false, false, `gap-${i}`));
+    }
+
+    // 1 header + 50 alerts (oldest 10 dropped)
+    const rows = screen.getAllByRole("row");
+    expect(rows).toHaveLength(51);
+    // Newest alert is first (alerts are prepended); its timestamp is alert-59
+    const firstCell = rows[1].querySelector("td");
+    expect(firstCell?.textContent).toContain("alert-59");
+  });
+
+  it("clears alerts when the channel set changes (T3)", () => {
+    const { rerender } = render(<AnomalyAlerts channels={["ch-a"]} />);
+
+    push(makeEvent("ch-a", false, false, "t1"));
+    push(makeEvent("ch-a", true, false, "t2")); // rising edge → 1 alert
+
+    expect(screen.getAllByRole("row")).toHaveLength(2); // header + 1
+
+    // Switch to a different channel set
+    act(() => {
+      rerender(<AnomalyAlerts channels={["ch-b"]} />);
+    });
+
+    expect(screen.getByText(/no alerts/i)).toBeInTheDocument();
+  });
 });

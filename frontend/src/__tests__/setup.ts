@@ -53,3 +53,15 @@ Object.defineProperty(globalThis, "EventSource", {
   value: MockEventSource,
   writable: true,
 });
+
+// Recharts' ResponsiveContainer uses ResizeObserver which jsdom does not
+// provide. Stub it so chart tests don't throw on mount.
+class MockResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+Object.defineProperty(globalThis, "ResizeObserver", {
+  value: MockResizeObserver,
+  writable: true,
+});
