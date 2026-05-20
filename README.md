@@ -186,6 +186,24 @@ ESA Parquet (Zenodo/GCS)
   -> GCP deployment  [Phase 10 - planned]
 ```
 
+## Known Limitations
+
+**Channel toggle restarts replay from row 0.**  
+The SSE endpoint is stateless: each request opens a new replay from the
+beginning. Adding or removing a channel tears down the current stream and
+reopens it with the updated channel list, resetting all charts. This is
+intentional for the demo — it keeps the server simple — but means you cannot
+add a channel mid-session without losing the existing view. A future design
+could key the stream by a replay cursor and support live channel subscription
+changes without restart.
+
+**Replay speed does not persist across channel changes.**  
+The speed selector is wired to the same `useEffect` that controls the stream.
+Changing channels restarts at the currently selected speed, which is the
+expected behaviour.
+
+---
+
 ## Roadmap
 
 | Phase | Description | Status |
