@@ -256,6 +256,79 @@ def running_app_with_spike(test_settings: Settings, tmp_path: Path) -> FastAPI:
     return app
 
 
+_CHANNEL_B = "test-ch-b"
+
+
+@pytest.fixture()
+def running_app_multi_ch(test_settings: Settings, tmp_path: Path) -> FastAPI:
+    """FastAPI app with two channels for multi-channel streaming tests.
+
+    Each channel has 50 rows so the combined stream is 100 events total.
+    Used to verify that the per-channel queue merger emits events from
+    both channels (regression guard for head-of-line blocking).
+    """
+    for channel in (_CHANNEL, _CHANNEL_B):
+        _write_series_parquet(
+            tmp_path,
+            mission=_MISSION,
+            channel=channel,
+            split="test",
+            n_rows=50,
+            n_anomaly_tail=0,
+        )
+
+    settings = test_settings.model_copy(
+        update={
+            "spark": test_settings.spark.model_copy(
+                update={"processed_data_dir": tmp_path}
+            )
+        }
+    )
+    params = ScoringParams(
+        threshold_window=settings.model.threshold_window,
+        threshold_z=settings.model.threshold_z,
+        error_smoothing_window=settings.model.error_smoothing_window,
+        threshold_min_anomaly_len=settings.model.threshold_min_anomaly_len,
+    )
+
+    engines = {}
+    replay_data = {}
+    for channel in (_CHANNEL, _CHANNEL_B):
+        model: torch.nn.Module = _ZeroModel()
+        model.eval()
+        engines[channel] = ChannelInferenceEngine(
+            mission=_MISSION,
+            channel=channel,
+            model=model,  # type: ignore[arg-type]
+            window_size=settings.model.window_size,
+            params=params,
+            device=torch.device("cpu"),
+        )
+        values, _seg, anom, timestamps = load_series_parquet(
+            tmp_path, _MISSION, channel, "test"
+        )
+        replay_data[channel] = (values, anom, timestamps)
+
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.app_state = AppState(
+        settings=settings,
+        mission=_MISSION,
+        subsystem=_SUBSYSTEM,
+        device=torch.device("cpu"),
+        engines=MappingProxyType(engines),
+        channel_subsystem_map=MappingProxyType(
+            {ch: _SUBSYSTEM for ch in (_CHANNEL, _CHANNEL_B)}
+        ),
+        replay_data=MappingProxyType(replay_data),
+        startup_monotonic_ns=time.monotonic_ns(),
+        mlflow_tracking_uri=settings.mlflow.tracking_uri,
+    )
+    app.add_middleware(CorrelationIdMiddleware)
+    app.include_router(router)
+    return app
+
+
 @pytest.fixture()
 def running_app_empty(test_settings: Settings) -> FastAPI:
     """FastAPI app with an empty engines map — triggers 503 on /health.
