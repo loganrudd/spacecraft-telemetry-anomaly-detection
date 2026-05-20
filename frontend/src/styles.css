@@ -1,0 +1,44 @@
+/* Mission-control dark theme */
+:root {
+  --bg: #0d1117;
+  --bg-surface: #161b22;
+  --bg-elevated: #21262d;
+  --fg: #e6edf3;
+  --fg-muted: #8b949e;
+  --border: #30363d;
+  --accent: #388bfd;
+  --prediction: #3fb950;
+  --anomaly-true: rgba(248, 81, 73, 0.25);
+  --anomaly-predicted: rgba(210, 153, 34, 0.3);
+  --alert: #d29922;
+  --danger: #f85149;
+  --success: #3fb950;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+a {
+  color: var(--accent);
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}

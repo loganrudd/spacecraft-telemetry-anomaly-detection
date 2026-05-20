@@ -78,3 +78,7 @@ docs/PLANNING_MODE_GUIDE.md
 !package.json
 !tsconfig.json
 !pyrightconfig.json
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
