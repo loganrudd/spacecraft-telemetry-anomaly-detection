@@ -48,6 +48,35 @@ class StreamQueryParams(BaseModel):
         return v
 
 
+class DriftFeature(BaseModel):
+    """Drift score for a single monitored feature column."""
+
+    feature: str
+    score: float    # Wasserstein distance reported by Evidently
+    drifted: bool
+
+
+class DriftEvent(BaseModel):
+    """Per-channel drift result emitted by the SSE drift stream."""
+
+    timestamp: datetime
+    mission: str
+    channel: str
+    features: list[DriftFeature]
+    percent_drifted: float      # fraction of features drifted, in [0, 1]
+    drifted: bool               # True if percent_drifted >= channel drift threshold
+    # Populated only on periodic subsystem-summary ticks; None on per-channel events.
+    subsystem_percent_drifted: float | None = None
+    subsystem_alert: bool = False
+
+    @field_validator("percent_drifted")
+    @classmethod
+    def percent_drifted_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"percent_drifted must be in [0, 1], got {v}")
+        return v
+
+
 class ErrorResponse(BaseModel):
     """RFC 7807 Problem Details error response."""
 
