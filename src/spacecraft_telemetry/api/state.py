@@ -8,7 +8,8 @@ to the FastAPI app instance (``app.state``).  Request handlers access it via
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
@@ -25,6 +26,13 @@ class AppState:
     ``frozen=True`` prevents attribute reassignment; ``MappingProxyType``
     wrappers on dict fields prevent content mutation. Request handlers
     must treat this as read-only.
+
+    Drift-related fields (``drift_monitors``, ``tick_buses``) hold mutable
+    containers — the field references are frozen but the container interiors
+    are intentionally mutable (drift monitors accumulate ticks; tick buses
+    deque-append new rows).  This is a deliberate exception to the
+    immutability convention: drift state is ephemeral per-session data, not
+    configuration.
     """
 
     settings: Settings
@@ -36,6 +44,13 @@ class AppState:
     replay_data: MappingProxyType[str, Any]  # values: ReplayData
     startup_monotonic_ns: int
     mlflow_tracking_uri: str
+    # Drift monitoring — populated only when drift.enabled is True in settings.
+    # drift_monitors: channel_id → RollingDriftMonitor (typed as Any to avoid
+    # importing drift.py from state.py and creating a circular dependency).
+    drift_monitors: dict[str, Any] = field(default_factory=dict)
+    # tick_buses: channel_id → deque of telemetry tick dicts for drift consumers.
+    # deque maxlen == drift.window_size; non-blocking append (drops oldest on overflow).
+    tick_buses: dict[str, deque[dict[str, float]]] = field(default_factory=dict)
 
     @property
     def channels_loaded(self) -> list[str]:

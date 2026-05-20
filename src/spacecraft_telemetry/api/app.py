@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import MappingProxyType
@@ -29,6 +30,7 @@ import torch
 from fastapi import FastAPI
 
 from spacecraft_telemetry.api import endpoints
+from spacecraft_telemetry.api.drift import RollingDriftMonitor
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.replay import ReplayData
@@ -36,6 +38,10 @@ from spacecraft_telemetry.api.state import AppState
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.evidently_monitoring.reference import (
+    load_reference_profile,
+    reference_profile_path,
+)
 from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 from spacecraft_telemetry.model.dataset import load_series_parquet
@@ -120,6 +126,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "Train and score at least one channel first."
         )
 
+    # Drift monitors — best-effort: missing reference profile logs a warning but
+    # does not prevent startup.  Drift stream returns 503 if no monitors are loaded.
+    drift_monitors: dict[str, RollingDriftMonitor] = {}
+    tick_buses: dict[str, deque[dict[str, float]]] = {}
+    if settings.drift.enabled:
+        for ch in engines:
+            prof_path = reference_profile_path(settings, settings.api.mission, ch)
+            try:
+                ref = await asyncio.to_thread(load_reference_profile, prof_path)
+                drift_monitors[ch] = RollingDriftMonitor(
+                    channel=ch,
+                    reference=ref,
+                    window_size=settings.drift.window_size,
+                    tick_interval=settings.drift.tick_interval,
+                    feature_drift_threshold=settings.drift.feature_drift_threshold,
+                    channel_drift_threshold=settings.drift.subsystem_alert_threshold,
+                )
+                tick_buses[ch] = deque(maxlen=settings.drift.window_size)
+                log.info("api.lifespan.drift_monitor.loaded", channel=ch)
+            except FileNotFoundError:
+                log.warning("api.lifespan.drift_monitor.missing_reference", channel=ch)
+    else:
+        log.info("api.lifespan.drift.disabled")
+
     app.state.app_state = AppState(
         settings=settings,
         mission=settings.api.mission,
@@ -130,6 +160,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         replay_data=MappingProxyType(replay_data),
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
+        drift_monitors=drift_monitors,
+        tick_buses=tick_buses,
     )
     log.info(
         "api.lifespan.startup.complete",
