@@ -186,6 +186,13 @@ button {
   font-weight: 500;
 }
 
+.telemetry-chart__waiting {
+  font-size: 12px;
+  color: var(--fg-muted);
+  padding: 2rem 0;
+  text-align: center;
+}
+
 .chart-tooltip {
   background: var(--bg-elevated);
   border: 1px solid var(--border);

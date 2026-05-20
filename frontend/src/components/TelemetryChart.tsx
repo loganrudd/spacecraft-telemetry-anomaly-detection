@@ -50,6 +50,15 @@ function TelemetryChart({ channel }: Props) {
   const trueIntervals = collapseFlags(events, "is_anomaly");
   const predIntervals = collapseFlags(events, "is_anomaly_predicted");
 
+  if (events.length === 0) {
+    return (
+      <section className="telemetry-chart">
+        <h2 className="telemetry-chart__title">{channel}</h2>
+        <p className="telemetry-chart__waiting">Waiting for data…</p>
+      </section>
+    );
+  }
+
   return (
     <section className="telemetry-chart">
       <h2 className="telemetry-chart__title">{channel}</h2>

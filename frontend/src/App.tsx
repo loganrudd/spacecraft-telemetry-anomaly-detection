@@ -44,6 +44,7 @@ export default function App() {
 
     const handle = openTelemetryStream({
       channels: selected,
+      speed: 100,
       onEvent: (e) => {
         telemetryStore.push(e);
         recordTick();
