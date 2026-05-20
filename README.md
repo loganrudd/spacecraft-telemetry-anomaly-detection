@@ -16,7 +16,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 8 of 11 complete (FastAPI serving layer).**
+**Current phase: 9 of 11 complete (React dashboard).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -27,6 +27,7 @@ Completed:
 - Phase 6: MLflow experiment tracking + model registry
 - Phase 7: Evidently batch drift detection + MLflow artifact logging
 - Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
+- Phase 9: React dashboard — live telemetry charts, anomaly alerts, dark mission-control UI
 
 ## What Works Today
 
@@ -48,6 +49,13 @@ Completed:
     real-time LSTM inference; per-tick anomaly scores and predicted/labeled anomaly flags
   - `?speed=N` replay speed multiplier; `?channels=ch1,ch2` channel filter
   - Structured logging with correlation IDs on every request
+- **React dashboard** (`make frontend-dev`):
+  - Vite + TypeScript + React 18, served at `http://localhost:5173`
+  - Live per-channel time-series charts (Recharts) — value + prediction overlay
+  - Ground-truth anomaly bands (red) and model-predicted bands (yellow) on each chart
+  - Rising-edge anomaly alert panel with TP/FP indicator
+  - Channel picker with performance warning above 5 simultaneous charts
+  - Mission-control dark theme; single SSE connection multiplexed across channels
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -126,6 +134,15 @@ curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_
 # Look for a labeled anomaly event
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
     | grep -m1 '"is_anomaly":true'
+
+# 10) Run the React dashboard (second separate terminal)
+#     Requires: make serve running in another terminal
+#     First time only:
+make frontend-install
+#     Start dev server:
+make frontend-dev
+# Open http://localhost:5173 in a browser.
+# Select a channel from the left panel — live telemetry charts and anomaly alerts appear.
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
@@ -141,6 +158,7 @@ Expected key artifacts:
 
 Top-level directories:
 - `src/spacecraft_telemetry/`: application modules (ingest, spark, model, ray, api)
+- `frontend/`: React dashboard (Vite + TypeScript, `npm run dev` / `make frontend-dev`)
 - `tests/`: unit and integration tests mirroring source structure
 - `configs/`: environment YAML configs (`local`, `test`, `cloud`)
 - `data/`: raw, sampled, and processed telemetry
@@ -161,8 +179,11 @@ ESA Parquet (Zenodo/GCS)
   -> FastAPI + SSE serving  [Phase 8 - complete]
        GET /health
        GET /api/stream/telemetry  (SSE, real-time LSTM inference)
-  -> React dashboard (next)
-  -> GCP deployment
+  -> React dashboard (Vite/TS, Recharts)  [Phase 9 - complete]
+       Live telemetry charts + anomaly bands
+       Rising-edge anomaly alert panel
+  -> Real-time drift panel  [Phase 9.5 - planned]
+  -> GCP deployment  [Phase 10 - planned]
 ```
 
 ## Roadmap
@@ -177,7 +198,8 @@ ESA Parquet (Zenodo/GCS)
 | 6 | MLflow integration | Complete |
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
-| 9 | React dashboard | In Progress |
+| 9 | React dashboard | Complete |
+| 9.5 | Real-time drift panel | Planned |
 | 10 | GCP deployment | Planned |
 | 11 | Documentation + polish | Planned |
 
