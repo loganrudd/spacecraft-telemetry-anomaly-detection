@@ -74,6 +74,14 @@ monitoring:
   report_output_dir: monitoring/reports
   reference_sample_rows: 5000
 
+drift:
+  enabled: true
+  window_size: 256
+  tick_interval: 60
+  feature_drift_threshold: 0.05
+  subsystem_alert_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+
 api:
   host: "0.0.0.0"
   port: 8080

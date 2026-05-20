@@ -7,6 +7,7 @@ import pytest
 from spacecraft_telemetry.core.config import (
     ApiConfig,
     DataConfig,
+    DriftConfig,
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
@@ -509,4 +510,56 @@ class TestApiConfig:
         assert settings.api.replay_speed_default == 1000.0
         assert settings.api.replay_tick_interval_seconds == 0.001
         assert settings.api.stream_buffer_max_events == 32
+
+
+# ---------------------------------------------------------------------------
+# DriftConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDriftConfig:
+    def test_defaults(self) -> None:
+        cfg = DriftConfig()
+        assert cfg.enabled is True
+        assert cfg.window_size == 256
+        assert cfg.tick_interval == 60
+        assert cfg.feature_drift_threshold == pytest.approx(0.05)
+        assert cfg.subsystem_alert_threshold == pytest.approx(0.30)
+
+    def test_window_size_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            DriftConfig(window_size=0)
+
+    def test_tick_interval_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            DriftConfig(tick_interval=0)
+
+    def test_feature_drift_threshold_bounds(self) -> None:
+        with pytest.raises(ValueError, match="must be in"):
+            DriftConfig(feature_drift_threshold=0.0)
+        with pytest.raises(ValueError, match="must be in"):
+            DriftConfig(feature_drift_threshold=1.0)
+
+    def test_subsystem_alert_threshold_bounds(self) -> None:
+        with pytest.raises(ValueError, match="must be in"):
+            DriftConfig(subsystem_alert_threshold=0.0)
+        with pytest.raises(ValueError, match="must be in"):
+            DriftConfig(subsystem_alert_threshold=1.0)
+
+    def test_test_yaml_disables_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SPACECRAFT_DRIFT__ENABLED", raising=False)
+        settings = load_settings("test")
+        assert settings.drift.enabled is False
+        assert settings.drift.window_size == 32
+        assert settings.drift.tick_interval == 5
+
+    def test_local_yaml_enables_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SPACECRAFT_DRIFT__ENABLED", raising=False)
+        settings = load_settings("local")
+        assert settings.drift.enabled is True
+        assert settings.drift.tick_interval == 60
+
+    def test_settings_has_drift_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.drift, DriftConfig)
 

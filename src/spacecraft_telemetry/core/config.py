@@ -309,6 +309,35 @@ class MonitoringConfig(BaseModel):
         return v
 
 
+class DriftConfig(BaseModel):
+    """Real-time drift monitoring configuration (Phase 9.5)."""
+
+    enabled: bool = True
+    window_size: int = 256
+    # Run Evidently every N telemetry ticks per channel.
+    # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
+    tick_interval: int = 60
+    # Fraction of a channel's features that must drift to flag the channel as drifted.
+    feature_drift_threshold: float = 0.05
+    # Fraction of drifted channels at which a subsystem-level alert fires.
+    subsystem_alert_threshold: float = 0.30
+    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+
+    @field_validator("window_size", "tick_interval")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("feature_drift_threshold", "subsystem_alert_threshold")
+    @classmethod
+    def threshold_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"must be in (0, 1), got {v}")
+        return v
+
+
 class ApiConfig(BaseModel):
     """FastAPI serving configuration (Phase 8)."""
 
@@ -397,6 +426,7 @@ class Settings(BaseSettings):
     tune: TuneConfig = TuneConfig()
     mlflow: MlflowConfig = MlflowConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
+    drift: DriftConfig = DriftConfig()
     api: ApiConfig = ApiConfig()
 
     @classmethod

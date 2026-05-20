@@ -133,8 +133,8 @@ async def telemetry_stream(
                 yield t.result()
 
     finally:
-        for t in tasks.values():
-            t.cancel()
+        for pump_task in tasks.values():
+            pump_task.cancel()
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         for ch, result in zip(selected_channels, results, strict=False):
             if isinstance(result, Exception) and not isinstance(
