@@ -1,4 +1,4 @@
-"""FastAPI router — health check and SSE telemetry stream endpoints.
+"""FastAPI router — health check and SSE stream endpoints.
 
 Routes
 ------
@@ -16,6 +16,16 @@ GET /api/stream/telemetry
     Query params (all optional):
         speed    - override replay speed multiplier (default from settings).
         channels - comma-separated channel IDs (default: all loaded channels).
+
+GET /api/stream/drift
+    SSE drift-monitoring stream.  Requires drift.enabled=true and at least one
+    reference profile loaded.  Emits ``drift`` events at the configured cadence
+    (every N telemetry ticks per channel, after the window is full).
+    503 Service Unavailable → drift disabled or no reference profiles loaded.
+    400 Bad Request → unknown channel name(s).
+
+    Query params (all optional):
+        channels - comma-separated channel IDs (default: all monitored channels).
 """
 
 from __future__ import annotations
@@ -27,7 +37,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from spacecraft_telemetry.api.models import HealthResponse, StreamQueryParams
 from spacecraft_telemetry.api.state import AppState
-from spacecraft_telemetry.api.streaming import telemetry_stream
+from spacecraft_telemetry.api.streaming import drift_stream, telemetry_stream
 
 router = APIRouter()
 
@@ -111,6 +121,56 @@ async def stream(
             speed=effective_speed,
             selected_channels=selected,
         ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/stream/drift
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/stream/drift")
+async def stream_drift(
+    request: Request,
+    params: Annotated[StreamQueryParams, Depends()],
+) -> StreamingResponse:
+    """SSE drift-monitoring stream.
+
+    Emits ``drift`` SSE events driven by the ``RollingDriftMonitor`` instances
+    loaded at startup.  Each event carries per-feature drift scores computed by
+    Evidently against the Phase 7 reference profile.
+
+    Returns 503 when drift monitoring is disabled or no reference profiles were
+    loaded at startup.  Returns 400 for unknown channel names.
+    """
+    state: AppState = request.app.state.app_state
+
+    if not state.drift_monitors:
+        raise HTTPException(
+            status_code=503,
+            detail="drift monitoring disabled or no reference profiles loaded",
+        )
+
+    selected = (
+        [c.strip() for c in params.channels.split(",") if c.strip()]
+        if params.channels
+        else sorted(state.drift_monitors.keys())
+    )
+
+    unknown = sorted(set(selected) - set(state.drift_monitors.keys()))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown channels: {unknown}",
+        )
+
+    return StreamingResponse(
+        drift_stream(state, request, selected_channels=selected),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
