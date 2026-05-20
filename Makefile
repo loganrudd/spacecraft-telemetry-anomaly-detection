@@ -20,6 +20,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
         mlflow-server mlflow-ui mlflow-promote \
         serve \
+        frontend-install frontend-dev frontend-build frontend-test \
         clean clean-processed clean-models clean-data clean-all
 
 help:          ## Show this help message
@@ -170,3 +171,19 @@ SUBSYSTEM     ?=
 serve:            ## Start the FastAPI serving layer locally (SUBSYSTEM=subsystem_6)
 	$(RUN) spacecraft-telemetry --env local api serve \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
+
+# ---------------------------------------------------------------------------
+# React dashboard (Phase 9)
+# ---------------------------------------------------------------------------
+
+frontend-install: ## Install dashboard npm dependencies
+	cd frontend && npm install
+
+frontend-dev:     ## Run the Vite dev server on :5173 (requires `make serve` in another terminal)
+	cd frontend && npm run dev
+
+frontend-build:   ## Build the dashboard static bundle to frontend/dist/
+	cd frontend && npm run build
+
+frontend-test:    ## Run dashboard unit tests (Vitest)
+	cd frontend && npm run test
