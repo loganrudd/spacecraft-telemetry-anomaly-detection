@@ -72,9 +72,14 @@ describe("TelemetryStore", () => {
   });
 });
 
-describe("openTelemetryStream", () => {
-  it("is a callable function", async () => {
-    const mod = await import("../api/telemetryStream");
-    expect(typeof mod.openTelemetryStream).toBe("function");
+describe("TelemetryStore — EMPTY sentinel", () => {
+  it("snapshot returns the same reference for unknown channels", () => {
+    // useSyncExternalStore compares snapshots by reference equality.
+    // If snapshot() returns a new [] literal each call, React enters an
+    // infinite re-render loop for channels with no data. This test pins
+    // that invariant so a well-meaning `?? []` simplification is caught.
+    expect(telemetryStore.snapshot("no-such-channel")).toBe(
+      telemetryStore.snapshot("no-such-channel"),
+    );
   });
 });
