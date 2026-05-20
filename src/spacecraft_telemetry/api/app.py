@@ -160,5 +160,16 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings = settings
     app.add_middleware(CorrelationIdMiddleware)
+    if settings.api.cors_allowed_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.api.cors_allowed_origins,
+            allow_credentials=False,
+            allow_methods=["GET"],
+            allow_headers=["*"],
+            expose_headers=["X-Correlation-Id"],
+        )
     app.include_router(endpoints.router)
     return app
