@@ -9,11 +9,14 @@ const EMPTY: TelemetryEvent[] = [];
 
 export class TelemetryStore {
   private buffers = new Map<string, TelemetryEvent[]>();
-  // Snapshots hold a fresh slice after each push so useSyncExternalStore can
-  // detect changes via reference equality (the mutable buffer itself never
-  // changes identity, so comparing buffer refs would miss every update).
+  // Snapshots hold a fresh slice minted by the rAF flush so useSyncExternalStore
+  // can detect changes via reference equality.  The mutable buffer itself never
+  // changes identity, so comparing buffer refs would miss every update.
   private snapshots = new Map<string, TelemetryEvent[]>();
   private listeners = new Set<() => void>();
+  // rAF throttle state — tracks which channels need a new snapshot minted.
+  private dirty = new Set<string>();
+  private rafScheduled = false;
 
   push(event: TelemetryEvent): void {
     let buf = this.buffers.get(event.channel);
@@ -23,8 +26,20 @@ export class TelemetryStore {
     }
     buf.push(event);
     if (buf.length > BUFFER_SIZE) buf.shift();
-    this.snapshots.set(event.channel, buf.slice());
-    this.notify();
+    this.dirty.add(event.channel);
+
+    if (!this.rafScheduled) {
+      this.rafScheduled = true;
+      requestAnimationFrame(() => {
+        this.rafScheduled = false;
+        for (const ch of this.dirty) {
+          const b = this.buffers.get(ch);
+          if (b) this.snapshots.set(ch, b.slice());
+        }
+        this.dirty.clear();
+        this.notify();
+      });
+    }
   }
 
   snapshot(channel: string): TelemetryEvent[] {
@@ -38,6 +53,18 @@ export class TelemetryStore {
   clear(): void {
     this.buffers.clear();
     this.snapshots.clear();
+    this.dirty.clear();
+    this.notify();
+  }
+
+  /** Force a synchronous snapshot mint. For use in tests only. */
+  flushForTest(): void {
+    this.rafScheduled = false;
+    for (const ch of this.dirty) {
+      const b = this.buffers.get(ch);
+      if (b) this.snapshots.set(ch, b.slice());
+    }
+    this.dirty.clear();
     this.notify();
   }
 

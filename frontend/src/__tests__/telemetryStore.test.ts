@@ -26,6 +26,7 @@ describe("TelemetryStore", () => {
     for (let i = 0; i < 700; i++) {
       telemetryStore.push(makeEvent("ch-a", i));
     }
+    telemetryStore.flushForTest();
     const buf = telemetryStore.snapshot("ch-a");
     expect(buf).toHaveLength(600);
     // Oldest 100 evicted — first remaining event is index 100
@@ -35,6 +36,7 @@ describe("TelemetryStore", () => {
   it("keeps per-channel buffers isolated", () => {
     for (let i = 0; i < 5; i++) telemetryStore.push(makeEvent("ch-a", i));
     for (let i = 0; i < 3; i++) telemetryStore.push(makeEvent("ch-b", i));
+    telemetryStore.flushForTest();
 
     expect(telemetryStore.snapshot("ch-a")).toHaveLength(5);
     expect(telemetryStore.snapshot("ch-b")).toHaveLength(3);
@@ -44,19 +46,21 @@ describe("TelemetryStore", () => {
     expect(telemetryStore.snapshot("no-such-channel")).toEqual([]);
   });
 
-  it("notifies subscribers on every push", () => {
+  it("notifies subscribers once per rAF flush, not once per push", () => {
     const listener = vi.fn();
     const unsub = telemetryStore.subscribe(listener);
 
     telemetryStore.push(makeEvent("ch-a", 0));
     telemetryStore.push(makeEvent("ch-a", 1));
+    // Both pushes batched into one rAF — one notify call.
+    telemetryStore.flushForTest();
+    expect(listener).toHaveBeenCalledTimes(1);
 
-    expect(listener).toHaveBeenCalledTimes(2);
     unsub();
-
     telemetryStore.push(makeEvent("ch-a", 2));
+    telemetryStore.flushForTest();
     // After unsubscribe, listener should not be called again
-    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("clear empties all buffers and notifies", () => {

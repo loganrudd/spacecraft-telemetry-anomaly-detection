@@ -27,6 +27,7 @@ function makeEvent(
 function push(event: TelemetryEvent) {
   act(() => {
     telemetryStore.push(event);
+    telemetryStore.flushForTest();
   });
 }
 
