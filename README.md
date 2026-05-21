@@ -16,7 +16,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 ## Status
 
-**Current phase: 9 of 11 complete (React dashboard).**
+**Current phase: 9.5 of 11 complete (real-time drift panel).**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -28,6 +28,7 @@ Completed:
 - Phase 7: Evidently batch drift detection + MLflow artifact logging
 - Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
 - Phase 9: React dashboard — live telemetry charts, anomaly alerts, dark mission-control UI
+- Phase 9.5: Real-time drift panel — per-channel Evidently KS drift via SSE, subsystem gauge
 
 ## What Works Today
 
@@ -56,6 +57,8 @@ Completed:
   - Rising-edge anomaly alert panel with TP/FP indicator
   - Channel picker with performance warning above 5 simultaneous charts
   - Mission-control dark theme; single SSE connection multiplexed across channels
+  - Real-time drift panel: per-channel Evidently KS drift scores + subsystem gauge
+    (automatically hidden when no reference profiles are available)
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -72,11 +75,14 @@ make setup
 # 2) (Optional) set Java for Spark
 export JAVA_HOME=$(brew --prefix openjdk@21)
 
-# 3) Download sampled ESA data
+# 3) Download and sample and entire ESA mission's data
 make download-sample MISSION=ESA-Mission1
 
+# you can also specify a specific subsystem and/or channel you want to sample/preprocess/train/score/tune
+make download-sample MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6
+
 # 4) Preprocess data with Spark
-make spark-preprocess MISSION=ESA-Mission1
+make spark-preprocess MISSION=ESA-Mission1 CHANNEL=channel_22
 
 # 5) Run test suite (fast + slow mix per project config)
 make test
@@ -110,7 +116,7 @@ make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
 # 7) Run drift monitoring for a single channel
 #    Builds reference profile from train split, compares to test split,
 #    logs HTML report + per-feature metrics to telemanom-monitoring-ESA-Mission1 experiment.
-uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_22
 
 # 8) Run drift monitoring for all discovered channels in a mission
 uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
@@ -135,14 +141,18 @@ curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
     | grep -m1 '"is_anomaly":true'
 
-# 10) Run the React dashboard (second separate terminal)
+# 10) Drift stream — per-channel KS drift scores (requires reference profiles built in step 8)
+curl -N 'http://127.0.0.1:8000/api/stream/drift?channels=channel_1'
+
+# 12) Run the React dashboard (second separate terminal)
 #     Requires: make serve running in another terminal
 #     First time only:
 make frontend-install
 #     Start dev server:
 make frontend-dev
 # Open http://localhost:5173 in a browser.
-# Select a channel from the left panel — live telemetry charts and anomaly alerts appear.
+# Select a channel from the left panel — live telemetry charts, anomaly alerts,
+# and the real-time drift panel appear on the right.
 ```
 
 **Temporal split rationale:** The test set is split at 60% / 40%. HPO trials search
@@ -179,10 +189,13 @@ ESA Parquet (Zenodo/GCS)
   -> FastAPI + SSE serving  [Phase 8 - complete]
        GET /health
        GET /api/stream/telemetry  (SSE, real-time LSTM inference)
+       GET /api/stream/drift      (SSE, rolling Evidently KS drift per channel)
   -> React dashboard (Vite/TS, Recharts)  [Phase 9 - complete]
        Live telemetry charts + anomaly bands
        Rising-edge anomaly alert panel
-  -> Real-time drift panel  [Phase 9.5 - planned]
+  -> Real-time drift panel  [Phase 9.5 - complete]
+       Per-channel KS drift scores (value_normalized feature)
+       Subsystem-level gauge: % channels drifting, alert at ≥30%
   -> GCP deployment  [Phase 10 - planned]
 ```
 
@@ -217,7 +230,7 @@ expected behaviour.
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
-| 9.5 | Real-time drift panel | Planned |
+| 9.5 | Real-time drift panel | Complete |
 | 10 | GCP deployment | Planned |
 | 11 | Documentation + polish | Planned |
 

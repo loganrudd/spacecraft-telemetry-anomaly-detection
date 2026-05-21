@@ -73,12 +73,24 @@ def version() -> None:
     show_default=True,
     help="Fraction of rows to keep in the sample (overrides config).",
 )
+@click.option(
+    "--subsystem",
+    default=None,
+    help="When sampling, restrict to channels from this subsystem (e.g. subsystem_6).",
+)
+@click.option(
+    "--channel",
+    default=None,
+    help="When sampling, restrict to a single channel (overrides --subsystem).",
+)
 @click.pass_context
 def download(
     ctx: click.Context,
     mission: str,
     create_sample: bool,
     sample_fraction: float | None,
+    subsystem: str | None,
+    channel: str | None,
 ) -> None:
     """Download an ESA mission from Zenodo and optionally create a local sample.
 
@@ -92,6 +104,12 @@ def download(
 
         # Download and create a 1% sample with 5 channels
         spacecraft-telemetry download --mission ESA-Mission1 --sample
+
+        # Download and sample only subsystem_6 channels (anomaly-rich)
+        spacecraft-telemetry download --mission ESA-Mission1 --sample --subsystem subsystem_6
+
+        # Download and sample a single channel
+        spacecraft-telemetry download --mission ESA-Mission1 --sample --channel channel_22
 
         # Download and create a 5% sample
         spacecraft-telemetry download --mission ESA-Mission1 --sample --sample-fraction 0.05
@@ -116,14 +134,31 @@ def download(
         fraction = (
             sample_fraction if sample_fraction is not None else settings.data.sample_fraction
         )
-        log.info("creating sample", mission=mission, fraction=fraction)
+        channel_filter: list[str] | None = None
+        if channel is not None:
+            channel_filter = [channel]
+        elif subsystem is not None:
+            all_channels = sorted(
+                p.stem
+                for p in (raw_dir / mission / "channels").glob("*.zip")
+            )
+            channel_filter = _filter_channels_by_subsystem(
+                settings, mission, all_channels, subsystem
+            )
+        log.info(
+            "creating sample",
+            mission=mission,
+            fraction=fraction,
+            channel=channel,
+            subsystem=subsystem,
+        )
         creator = SampleCreator(
             raw_dir=raw_dir,
             sample_dir=Path(str(settings.data.sample_data_dir)),
             sample_fraction=fraction,
             sample_channels=settings.data.sample_channels,
         )
-        manifest = creator.create_sample(mission)
+        manifest = creator.create_sample(mission, channel_filter=channel_filter)
         click.echo(f"Sample written to {manifest.sample_dir}")
         click.echo(f"  Channels : {', '.join(manifest.channels)}")
         click.echo(f"  Rows     : { {ch: n for ch, n in manifest.row_counts.items()} }")
@@ -227,12 +262,24 @@ def spark() -> None:
     show_default=True,
     help="Temporal train split fraction (overrides config, default 0.8).",
 )
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to preprocess only those channels (e.g. subsystem_6).",
+)
+@click.option(
+    "--channel",
+    default=None,
+    help="Optional single channel to preprocess (overrides --subsystem).",
+)
 @click.pass_context
 def spark_preprocess(
     ctx: click.Context,
     mission: str,
     sample_fraction: float | None,
     train_fraction: float | None,
+    subsystem: str | None,
+    channel: str | None,
 ) -> None:
     """Run the Spark preprocessing pipeline for one mission.
 
@@ -244,7 +291,15 @@ def spark_preprocess(
 
         # Default settings (train_fraction=0.8)
         spacecraft-telemetry spark preprocess --mission ESA-Mission1
+
+        # Only preprocess channels belonging to subsystem_6
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --subsystem subsystem_6
+
+        # Only preprocess a single channel
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --channel channel_22
     """
+    from pathlib import Path
+
     from spacecraft_telemetry.spark.pipeline import run_preprocessing
     from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
 
@@ -260,15 +315,28 @@ def spark_preprocess(
             update={"spark": settings.spark.model_copy(update=spark_overrides)}
         )
 
+    # Resolve channel filter: explicit channel > subsystem > all.
+    channels: list[str] | None = None
+    if channel is not None:
+        channels = [channel]
+    elif subsystem is not None:
+        data_dir = Path(str(settings.data.sample_data_dir))
+        channel_dir = data_dir / mission / "channels"
+        all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
+        channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+
     log.info(
         "spark.preprocess.start",
         mission=mission,
         train_fraction=settings.spark.train_fraction,
+        channel=channel,
+        subsystem=subsystem,
+        channels=channels,
     )
 
     session = create_spark_session(settings.spark)
     try:
-        summary = run_preprocessing(session, settings, mission)
+        summary = run_preprocessing(session, settings, mission, channels=channels)
     finally:
         stop_spark_session(session)
 
@@ -479,6 +547,37 @@ def _filter_channels_by_subsystem(
     return filtered
 
 
+def _resolve_ray_channels(
+    settings: Settings,
+    mission: str,
+    channels: str | None,
+    subsystem: str | None = None,
+) -> list[str]:
+    """Resolve the channel list for a Ray command from CLI flags.
+
+    Precedence: explicit ``--channels`` CSV > ``discover_channels()`` filtered
+    by optional ``--subsystem``.  Raises ``click.ClickException`` when
+    ``discover_channels`` returns nothing (pipeline not yet run).
+    """
+    from spacecraft_telemetry.ray_training import discover_channels
+
+    if channels is not None:
+        return [c.strip() for c in channels.split(",") if c.strip()]
+
+    channel_list = discover_channels(settings, mission)
+    if not channel_list:
+        raise click.ClickException(
+            f"No preprocessed channels found for {mission}. "
+            "Run `spacecraft-telemetry spark preprocess` first, "
+            "or pass --channels explicitly."
+        )
+    if subsystem is not None:
+        channel_list = _filter_channels_by_subsystem(
+            settings, mission, channel_list, subsystem
+        )
+    return channel_list
+
+
 @click.group()
 def ray_group() -> None:
     """Ray Core parallel training, scoring, and tuning commands."""
@@ -529,31 +628,13 @@ def ray_train(
             --mission ESA-Mission1 \\
             --channels channel_1,channel_2,channel_3
     """
-    from spacecraft_telemetry.ray_training import (
-        discover_channels,
-        train_all_channels,
-    )
+    from spacecraft_telemetry.ray_training import train_all_channels
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
 
     with _ray_session(settings):
-        channel_list: list[str]
-        if channels is not None:
-            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
-        else:
-            channel_list = discover_channels(settings, mission)
-            if not channel_list:
-                raise click.ClickException(
-                    f"No preprocessed channels found for {mission}. "
-                    "Run `spacecraft-telemetry spark preprocess` first, "
-                    "or pass --channels explicitly."
-                )
-
-            if subsystem is not None:
-                channel_list = _filter_channels_by_subsystem(
-                    settings, mission, channel_list, subsystem
-                )
+        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
 
         log.info(
             "ray.train.start",
@@ -634,10 +715,7 @@ def ray_score(
     """
     import json
 
-    from spacecraft_telemetry.ray_training import (
-        discover_channels,
-        score_all_channels,
-    )
+    from spacecraft_telemetry.ray_training import score_all_channels
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -649,22 +727,7 @@ def ray_score(
         log.info("ray.score.tuned_configs_loaded", path=str(tuned_configs))
 
     with _ray_session(settings):
-        channel_list: list[str]
-        if channels is not None:
-            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
-        else:
-            channel_list = discover_channels(settings, mission)
-            if not channel_list:
-                raise click.ClickException(
-                    f"No preprocessed channels found for {mission}. "
-                    "Run `spacecraft-telemetry spark preprocess` first, "
-                    "or pass --channels explicitly."
-                )
-
-            if subsystem is not None:
-                channel_list = _filter_channels_by_subsystem(
-                    settings, mission, channel_list, subsystem
-                )
+        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
 
         log.info(
             "ray.score.start",
@@ -753,7 +816,6 @@ def ray_tune(
     import json
 
     from spacecraft_telemetry.ray_training import (
-        discover_channels,
         run_all_sweeps,
         run_hpo_sweep,
         write_tuned_configs,
@@ -771,17 +833,10 @@ def ray_tune(
         )
 
     with _ray_session(tune_settings):
-        channel_list: list[str]
-        if channels is not None:
-            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
-        else:
-            channel_list = discover_channels(tune_settings, mission)
-            if not channel_list:
-                raise click.ClickException(
-                    f"No preprocessed channels found for {mission}. "
-                    "Run `spacecraft-telemetry spark preprocess` first, "
-                    "or pass --channels explicitly."
-                )
+        # For tune, don't apply the subsystem filter at discovery time —
+        # run_all_sweeps groups by subsystem internally; run_hpo_sweep
+        # applies _filter_channels_by_subsystem below when subsystem is given.
+        channel_list = _resolve_ray_channels(tune_settings, mission, channels)
 
         log.info(
             "ray.tune.start",

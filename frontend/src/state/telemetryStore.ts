@@ -17,6 +17,12 @@ export class TelemetryStore {
   // rAF throttle state — tracks which channels need a new snapshot minted.
   private dirty = new Set<string>();
   private rafScheduled = false;
+  // Epoch-ms of the most recent anomaly tick per channel. Used by useSubsystemRollup
+  // to implement the 60-second rolling anomaly badge without re-reading history.
+  lastAnomalyAtMs: Record<string, number> = {};
+  // Epoch-ms of the most recent tick per channel. Used by useSubsystemRollup to
+  // determine whether a channel is actively streaming without reading the full buffer.
+  lastTickAtMs: Record<string, number> = {};
 
   push(event: TelemetryEvent): void {
     let buf = this.buffers.get(event.channel);
@@ -26,6 +32,10 @@ export class TelemetryStore {
     }
     buf.push(event);
     if (buf.length > BUFFER_SIZE) buf.shift();
+    this.lastTickAtMs[event.channel] = Date.now();
+    if (event.is_anomaly_predicted) {
+      this.lastAnomalyAtMs[event.channel] = Date.now();
+    }
     this.dirty.add(event.channel);
 
     if (!this.rafScheduled) {
@@ -54,6 +64,8 @@ export class TelemetryStore {
     this.buffers.clear();
     this.snapshots.clear();
     this.dirty.clear();
+    this.lastAnomalyAtMs = {};
+    this.lastTickAtMs = {};
     this.notify();
   }
 

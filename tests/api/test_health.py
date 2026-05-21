@@ -32,6 +32,21 @@ class TestHealthOk:
         body = TestClient(running_app).get("/health").json()
         assert "mlflow_tracking_uri" in body
 
+    def test_channel_subsystems_present(self, running_app: FastAPI) -> None:
+        body = TestClient(running_app).get("/health").json()
+        assert "channel_subsystems" in body
+
+    def test_channel_subsystems_maps_loaded_channels(self, running_app: FastAPI) -> None:
+        body = TestClient(running_app).get("/health").json()
+        # Every loaded channel must appear in channel_subsystems.
+        for ch in body["channels_loaded"]:
+            assert ch in body["channel_subsystems"]
+
+    def test_subsystem_field_present(self, running_app: FastAPI) -> None:
+        body = TestClient(running_app).get("/health").json()
+        # subsystem may be a string or null (whole-mission mode).
+        assert "subsystem" in body
+
 
 class TestHealthDegraded:
     def test_returns_503_when_no_engines(self, running_app_empty: FastAPI) -> None:
@@ -45,12 +60,21 @@ class TestHealthDegraded:
 
 
 class TestHealthLifespanFailure:
-    def test_lifespan_raises_when_registry_empty(self) -> None:
+    def test_lifespan_raises_when_registry_empty(self, tmp_path) -> None:
         """create_app lifespan raises RuntimeError when no channels load from registry."""
         from spacecraft_telemetry.api.app import create_app
         from spacecraft_telemetry.core.config import load_settings
 
         settings = load_settings("test")
+        # Use a fresh empty database — mlflow.test.db may have accumulated
+        # models from previous training runs and is not hermetic for this test.
+        settings = settings.model_copy(
+            update={
+                "mlflow": settings.mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/empty.db"}
+                )
+            }
+        )
         app = create_app(settings)
         with pytest.raises(RuntimeError), TestClient(app, raise_server_exceptions=True):
             pass  # pragma: no cover

@@ -41,6 +41,13 @@ MONITORING_FEATURE_COLS: list[str] = ["value_normalized"] + [
     fd.name for fd in FEATURE_DEFINITIONS
 ]
 
+# Subset of MONITORING_FEATURE_COLS used by the real-time drift monitor.
+# Rolling stats (rolling_mean_10, …, rolling_max_100) are NOT included because
+# their distributions are only reliable when computed over long time-series windows
+# (≥ rolling period), which the short real-time buffer cannot guarantee.  The two
+# features below are computable from consecutive ticks and are always comparable.
+REALTIME_FEATURE_COLS: list[str] = ["value_normalized", "rate_of_change"]
+
 # Rolling windows that MONITORING_FEATURE_COLS was built from.  Sourced directly
 # from _DEFAULT_WINDOWS in features/definitions.py — the two share one definition.
 # compute_feature_dataframe validates settings.spark.feature_windows against this.

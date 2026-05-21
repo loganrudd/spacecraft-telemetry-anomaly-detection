@@ -1,0 +1,107 @@
+import DriftFeatureBar from "./DriftFeatureBar";
+import { useChannelDrift, useDriftedSince, useSubsystemDrift } from "../state/driftStore";
+
+type Props = {
+  channels: string[];
+  disabled?: boolean;
+};
+
+function SubsystemGauge() {
+  const { percent, alert } = useSubsystemDrift();
+  const pct = percent !== null ? Math.round(percent * 100) : null;
+
+  return (
+    <div
+      className={`drift-panel__gauge${alert ? " drift-panel__gauge--alert" : ""}`}
+      aria-label="Subsystem drift gauge"
+    >
+      {pct !== null ? (
+        <>
+          <span className="drift-panel__gauge-label">
+            {pct}% channels drifting
+          </span>
+          <div className="drift-panel__gauge-bar">
+            <div
+              className={`drift-panel__gauge-fill${alert ? " drift-panel__gauge-fill--alert" : ""}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </>
+      ) : (
+        <span className="drift-panel__gauge-label drift-panel__gauge-label--waiting">
+          Waiting for subsystem summary…
+        </span>
+      )}
+    </div>
+  );
+}
+
+function fmtTs(iso: string): string {
+  return iso.replace("T", " ").slice(0, 19);
+}
+
+function ChannelDriftRow({ channel }: { channel: string }) {
+  const event = useChannelDrift(channel);
+  const driftedSince = useDriftedSince(channel);
+
+  if (!event) {
+    return (
+      <div className="drift-panel__channel drift-panel__channel--waiting">
+        <span className="drift-panel__channel-name">{channel}</span>
+        <span className="drift-panel__channel-status">waiting…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={`drift-panel__channel${event.drifted ? " drift-panel__channel--drifted" : ""}`}
+    >
+      <div className="drift-panel__channel-header">
+        <span className="drift-panel__channel-name">{channel}</span>
+        <span
+          className={`drift-panel__channel-badge${event.drifted ? " drift-panel__channel-badge--alert" : ""}`}
+        >
+          {event.drifted ? "DRIFT" : "nominal"}
+        </span>
+        <span className="drift-panel__channel-ts">
+          {event.drifted && driftedSince
+            ? `since ${fmtTs(driftedSince)}`
+            : fmtTs(event.timestamp)}
+        </span>
+      </div>
+      <DriftFeatureBar features={event.features} />
+    </div>
+  );
+}
+
+export default function DriftPanel({ channels, disabled = false }: Props) {
+  if (disabled) {
+    return (
+      <aside className="drift-panel drift-panel--disabled">
+        <header className="drift-panel__header">
+          <span className="drift-panel__title">Drift Monitoring</span>
+        </header>
+        <p className="drift-panel__empty">Drift monitoring disabled.</p>
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="drift-panel">
+      <header className="drift-panel__header">
+        <span className="drift-panel__title">Drift Monitoring</span>
+      </header>
+
+      <SubsystemGauge />
+
+      <div className="drift-panel__channels">
+        {channels.length === 0 ? (
+          <p className="drift-panel__empty">No channels selected.</p>
+        ) : (
+          channels.map((ch) => <ChannelDriftRow key={ch} channel={ch} />)
+        )}
+      </div>
+    </aside>
+  );
+}

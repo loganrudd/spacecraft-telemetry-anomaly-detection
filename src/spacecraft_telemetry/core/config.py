@@ -309,14 +309,48 @@ class MonitoringConfig(BaseModel):
         return v
 
 
+class DriftConfig(BaseModel):
+    """Real-time drift monitoring configuration (Phase 9.5)."""
+
+    enabled: bool = True
+    window_size: int = 256
+    # Run Evidently every N telemetry ticks per channel.
+    # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
+    tick_interval: int = 60
+    # KS test p-value threshold passed to Evidently DataDriftPreset for per-feature
+    # drift detection. Consistent between batch (reports.py) and real-time (drift.py).
+    feature_drift_threshold: float = 0.05
+    # Shared alert threshold used at two levels:
+    #   1. Channel level: fraction of features drifted → channel flagged as drifted.
+    #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.
+    # One knob keeps both levels consistent; tune it to change overall sensitivity.
+    drift_alert_threshold: float = 0.30
+    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+
+    @field_validator("window_size", "tick_interval")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("feature_drift_threshold", "drift_alert_threshold")
+    @classmethod
+    def threshold_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"must be in (0, 1), got {v}")
+        return v
+
+
 class ApiConfig(BaseModel):
     """FastAPI serving configuration (Phase 8)."""
 
     host: str = "127.0.0.1"
     port: int = 8000
     mission: str = "ESA-Mission1"
-    subsystem: str = "subsystem_6"
-    # Explicit channel list; when non-empty, overrides subsystem discovery.
+    # None → load every channel for the mission; a subsystem name restricts to that subsystem.
+    subsystem: str | None = None
+    # Explicit channel list; when non-empty, overrides subsystem/mission discovery.
     channels: list[str] = []
     replay_speed_default: float = 10.0
     replay_tick_interval_seconds: float = 1.0
@@ -397,6 +431,7 @@ class Settings(BaseSettings):
     tune: TuneConfig = TuneConfig()
     mlflow: MlflowConfig = MlflowConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
+    drift: DriftConfig = DriftConfig()
     api: ApiConfig = ApiConfig()
 
     @classmethod

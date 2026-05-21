@@ -9,7 +9,7 @@ data:
     - ESA-Mission2
     - ESA-Mission3
   sample_fraction: .01
-  sample_channels: 4 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
+  sample_channels: 22 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
   level: DEBUG
@@ -77,11 +77,19 @@ monitoring:
   report_output_dir: monitoring/reports
   reference_sample_rows: 5000
 
+drift:
+  enabled: true
+  window_size: 256
+  tick_interval: 60  # Tier 2: p95=61.9ms from Step 0 benchmark
+  feature_drift_threshold: 0.05
+  drift_alert_threshold: 0.30
+  reference_profiles_dir: monitoring/reference_profiles
+
 api:
   host: "127.0.0.1"
   port: 8000
   mission: "ESA-Mission1"
-  subsystem: "subsystem_1"
+  subsystem: null   # null = load all trained channels for the mission
   channels: []
   replay_speed_default: 10.0
   replay_tick_interval_seconds: 1.0

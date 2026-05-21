@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 from spacecraft_telemetry.api.models import (
+    DriftEvent,
+    DriftFeature,
     ErrorResponse,
     HealthResponse,
     StreamQueryParams,
@@ -79,6 +81,7 @@ class TestHealthResponse:
             mission="ESA-Mission1",
             subsystem="subsystem_6",
             channels_loaded=["A-1", "A-2"],
+            channel_subsystems={"A-1": "subsystem_6", "A-2": "subsystem_6"},
             uptime_s=42.0,
             mlflow_tracking_uri="sqlite:///mlflow.db",
         )
@@ -92,6 +95,7 @@ class TestHealthResponse:
             mission="ESA-Mission1",
             subsystem="subsystem_6",
             channels_loaded=[],
+            channel_subsystems={},
             uptime_s=0.0,
             mlflow_tracking_uri="sqlite:///mlflow.db",
         )
@@ -166,3 +170,69 @@ class TestErrorResponse:
         reloaded = ErrorResponse.model_validate_json(err.model_dump_json())
         assert reloaded.detail == err.detail
         assert reloaded.correlation_id == err.correlation_id
+
+
+# ---------------------------------------------------------------------------
+# DriftFeature + DriftEvent
+# ---------------------------------------------------------------------------
+
+
+_FEATURE = DriftFeature(feature="value_normalized", score=0.12, drifted=True)
+
+
+class TestDriftFeature:
+    def test_fields(self) -> None:
+        assert _FEATURE.feature == "value_normalized"
+        assert _FEATURE.score == pytest.approx(0.12)
+        assert _FEATURE.drifted is True
+
+
+class TestDriftEvent:
+    def _base(self, **overrides: object) -> dict[str, object]:
+        data: dict[str, object] = {
+            "timestamp": _TS,
+            "mission": "ESA-Mission1",
+            "channel": "channel_1",
+            "features": [{"feature": "value_normalized", "score": 0.12, "drifted": True}],
+            "percent_drifted": 0.5,
+            "drifted": True,
+        }
+        data.update(overrides)
+        return data
+
+    def test_round_trip(self) -> None:
+        event = DriftEvent(**self._base())  # type: ignore[arg-type]
+        assert event.channel == "channel_1"
+        assert event.drifted is True
+        assert event.percent_drifted == pytest.approx(0.5)
+        assert event.subsystem_percent_drifted is None
+        assert event.subsystem_alert is None
+
+    def test_optional_subsystem_fields(self) -> None:
+        event = DriftEvent(
+            **self._base(subsystem_percent_drifted=0.35, subsystem_alert=True)  # type: ignore[arg-type]
+        )
+        assert event.subsystem_percent_drifted == pytest.approx(0.35)
+        assert event.subsystem_alert is True
+
+    def test_percent_drifted_zero(self) -> None:
+        event = DriftEvent(**self._base(percent_drifted=0.0, drifted=False))  # type: ignore[arg-type]
+        assert event.percent_drifted == pytest.approx(0.0)
+
+    def test_percent_drifted_one(self) -> None:
+        event = DriftEvent(**self._base(percent_drifted=1.0))  # type: ignore[arg-type]
+        assert event.percent_drifted == pytest.approx(1.0)
+
+    def test_percent_drifted_out_of_range_rejected(self) -> None:
+        with pytest.raises(Exception, match="percent_drifted"):
+            DriftEvent(**self._base(percent_drifted=1.1))  # type: ignore[arg-type]
+        with pytest.raises(Exception, match="percent_drifted"):
+            DriftEvent(**self._base(percent_drifted=-0.1))  # type: ignore[arg-type]
+
+    def test_json_roundtrip(self) -> None:
+        event = DriftEvent(**self._base(subsystem_percent_drifted=0.2))  # type: ignore[arg-type]
+        reloaded = DriftEvent.model_validate_json(event.model_dump_json())
+        assert reloaded.channel == event.channel
+        assert reloaded.percent_drifted == pytest.approx(event.percent_drifted)
+        assert reloaded.subsystem_percent_drifted == pytest.approx(0.2)  # type: ignore[arg-type]
+        assert reloaded.features[0].feature == "value_normalized"

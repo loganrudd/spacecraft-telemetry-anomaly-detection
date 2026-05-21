@@ -76,7 +76,12 @@ def run_drift_report(
         the extracted :class:`DriftResult`.
     """
     col_mapping = ColumnMapping(numerical_features=MONITORING_FEATURE_COLS)
-    report = Report(metrics=[DataDriftPreset(), DataQualityPreset()])
+    report = Report(
+        metrics=[
+            DataDriftPreset(num_stattest_threshold=settings.drift.feature_drift_threshold),
+            DataQualityPreset(),
+        ]
+    )
     report.run(
         reference_data=reference[MONITORING_FEATURE_COLS],
         current_data=current[MONITORING_FEATURE_COLS],
