@@ -50,16 +50,16 @@ describe("DriftPanel", () => {
     expect(screen.getByText(/no channels selected/i)).toBeInTheDocument();
   });
 
-  it("renders percent_drifted for a channel after event", () => {
+  it("shows DRIFT badge when channel is drifted", () => {
     render(<DriftPanel channels={["ch-a"]} />);
-    push(makeEvent("ch-a", 0.5));
-    expect(screen.getByText(/50% drifted/i)).toBeInTheDocument();
+    push(makeEvent("ch-a", 0.5)); // pct >= 0.3 → drifted: true
+    expect(screen.getByText("DRIFT")).toBeInTheDocument();
   });
 
-  it("renders 0% drifted for nominal channel", () => {
+  it("shows nominal badge when channel is not drifted", () => {
     render(<DriftPanel channels={["ch-a"]} />);
-    push(makeEvent("ch-a", 0.0));
-    expect(screen.getByText(/0% drifted/i)).toBeInTheDocument();
+    push(makeEvent("ch-a", 0.0)); // pct < 0.3 → drifted: false
+    expect(screen.getByText("nominal")).toBeInTheDocument();
   });
 
   it("subsystem gauge is absent before first subsystem summary", () => {

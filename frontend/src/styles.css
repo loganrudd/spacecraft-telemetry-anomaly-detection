@@ -211,10 +211,9 @@ button {
 
 /* ── AnomalyAlerts ─────────────────────────────────────────────── */
 .anomaly-alerts {
-  width: 260px;
-  flex-shrink: 0;
+  flex: 3;
+  min-height: 0;
   background: var(--bg-surface);
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -282,4 +281,168 @@ button {
 
 .anomaly-alerts__row--fp td:last-child {
   color: var(--danger);
+}
+
+/* Right sidebar: AnomalyAlerts stacked above DriftPanel */
+.app__right {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  width: 260px;
+  border-left: 1px solid var(--border);
+}
+
+/* ── DriftPanel ────────────────────────────────────────────────── */
+.drift-panel {
+  flex: 2;
+  min-height: 0;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.drift-panel--disabled {
+  flex-shrink: 0;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.drift-panel__header {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+}
+
+.drift-panel__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.drift-panel__gauge {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.drift-panel__gauge--alert {
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.drift-panel__gauge-label {
+  color: var(--fg-muted);
+  display: block;
+  margin-bottom: 0.3rem;
+}
+
+.drift-panel__gauge-label--waiting {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.drift-panel__gauge-bar {
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.drift-panel__gauge-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.drift-panel__gauge-fill--alert {
+  background: var(--danger);
+}
+
+.drift-panel__channels {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.drift-panel__empty {
+  padding: 0.75rem;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.drift-panel__channel {
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.drift-panel__channel--waiting {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--fg-muted);
+}
+
+.drift-panel__channel--drifted {
+  background: rgba(248, 81, 73, 0.06);
+}
+
+.drift-panel__channel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.drift-panel__channel-name {
+  font-weight: 500;
+  color: var(--fg);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drift-panel__channel-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.drift-panel__channel-badge--alert {
+  color: var(--danger);
+}
+
+.drift-panel__channel-ts {
+  font-size: 10px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ── DriftFeatureBar ───────────────────────────────────────────── */
+.drift-feature-bar {
+  display: flex;
+  height: 4px;
+  gap: 2px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.drift-feature-bar__segment {
+  background: var(--bg-elevated);
+  border-radius: 1px;
+}
+
+.drift-feature-bar__segment--drifted {
+  background: var(--danger);
 }

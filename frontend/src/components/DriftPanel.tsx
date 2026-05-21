@@ -56,8 +56,10 @@ function ChannelDriftRow({ channel }: { channel: string }) {
     >
       <div className="drift-panel__channel-header">
         <span className="drift-panel__channel-name">{channel}</span>
-        <span className="drift-panel__channel-pct">
-          {Math.round(event.percent_drifted * 100)}% drifted
+        <span
+          className={`drift-panel__channel-badge${event.drifted ? " drift-panel__channel-badge--alert" : ""}`}
+        >
+          {event.drifted ? "DRIFT" : "nominal"}
         </span>
         <span className="drift-panel__channel-ts">
           {event.timestamp.replace("T", " ").slice(0, 19)}
