@@ -1,5 +1,5 @@
 import DriftFeatureBar from "./DriftFeatureBar";
-import { useChannelDrift, useSubsystemDrift } from "../state/driftStore";
+import { useChannelDrift, useDriftedSince, useSubsystemDrift } from "../state/driftStore";
 
 const ALERT_THRESHOLD = 0.3;
 
@@ -38,8 +38,13 @@ function SubsystemGauge() {
   );
 }
 
+function fmtTs(iso: string): string {
+  return iso.replace("T", " ").slice(0, 19);
+}
+
 function ChannelDriftRow({ channel }: { channel: string }) {
   const event = useChannelDrift(channel);
+  const driftedSince = useDriftedSince(channel);
 
   if (!event) {
     return (
@@ -62,7 +67,9 @@ function ChannelDriftRow({ channel }: { channel: string }) {
           {event.drifted ? "DRIFT" : "nominal"}
         </span>
         <span className="drift-panel__channel-ts">
-          {event.timestamp.replace("T", " ").slice(0, 19)}
+          {event.drifted && driftedSince
+            ? `since ${fmtTs(driftedSince)}`
+            : fmtTs(event.timestamp)}
         </span>
       </div>
       <DriftFeatureBar features={event.features} />
