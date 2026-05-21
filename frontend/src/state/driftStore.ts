@@ -26,7 +26,7 @@ export class DriftStore {
     } else if (!event.drifted) {
       this.driftedSince.delete(event.channel);
     }
-    if (event.subsystem_percent_drifted !== null) {
+    if (event.subsystem_percent_drifted !== null && event.subsystem_alert !== null) {
       this.subsystemPct = event.subsystem_percent_drifted;
       this.subsystemAlert = event.subsystem_alert;
     }

@@ -68,7 +68,7 @@ class DriftEvent(BaseModel):
     drifted: bool               # True if percent_drifted >= channel drift threshold
     # Populated only on periodic subsystem-summary ticks; None on per-channel events.
     subsystem_percent_drifted: float | None = None
-    subsystem_alert: bool = False
+    subsystem_alert: bool | None = None
 
     @field_validator("percent_drifted")
     @classmethod

@@ -35,7 +35,7 @@ export type DriftEvent = {
   percent_drifted: number;
   drifted: boolean;
   subsystem_percent_drifted: number | null;
-  subsystem_alert: boolean;
+  subsystem_alert: boolean | null;
 };
 
 export const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "";

@@ -228,7 +228,7 @@ async def drift_stream(
                     drift_event_count += 1
 
                     sub_pct: float | None = None
-                    sub_alert = False
+                    sub_alert: bool | None = None
                     if drift_event_count % _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS == 0:
                         typed = {
                             ch: s
