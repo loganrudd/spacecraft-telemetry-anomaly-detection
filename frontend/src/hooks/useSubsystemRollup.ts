@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import { telemetryStore } from "../state/telemetryStore";
 import { driftStore } from "../state/driftStore";
 
@@ -11,6 +11,9 @@ export type ChannelStatus = {
 export type SubsystemRollup = Map<string, Map<string, ChannelStatus>>;
 
 const ANOMALY_TTL_MS = 60_000;
+// Throttle rollup rebuilds to ~4 Hz. TelemetryStore notifies at rAF rate (~60 Hz);
+// without throttling every tick triggers a full Map rebuild across all channels.
+const ROLLUP_THROTTLE_MS = 250;
 
 function computeRollup(
   channelSubsystems: Record<string, string>,
@@ -39,25 +42,33 @@ function computeRollup(
 export function useSubsystemRollup(
   channelSubsystems: Record<string, string>,
 ): SubsystemRollup {
-  // Force a re-render whenever either store notifies — useSyncExternalStore
-  // requires getSnapshot to return a new reference on every change, which a
-  // "__noop__" sentinel key cannot do. useReducer is simpler and correct here.
   const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
+  const pendingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    const unsub1 = telemetryStore.subscribe(forceUpdate);
-    const unsub2 = driftStore.subscribe(forceUpdate);
+    // Trailing-edge throttle: schedule one rebuild per ROLLUP_THROTTLE_MS window.
+    // Suppresses the ~60 Hz rAF flush from TelemetryStore down to ~4 Hz.
+    const throttled = () => {
+      if (pendingRef.current === null) {
+        pendingRef.current = setTimeout(() => {
+          pendingRef.current = null;
+          forceUpdate();
+        }, ROLLUP_THROTTLE_MS);
+      }
+    };
+
+    const unsub1 = telemetryStore.subscribe(throttled);
+    const unsub2 = driftStore.subscribe(throttled);
+    // 1 Hz tick so expired anomaly badges clear even when no SSE events arrive.
+    const id = setInterval(throttled, 1_000);
+
     return () => {
       unsub1();
       unsub2();
+      clearInterval(id);
+      if (pendingRef.current !== null) clearTimeout(pendingRef.current);
     };
-  }, []);
+  }, []); // forceUpdate and pendingRef are stable across renders
 
-  // 1 Hz tick to clear expired anomaly badges without waiting for a new SSE event.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(id);
-  }, []);
-
-  return computeRollup(channelSubsystems, nowMs);
+  return computeRollup(channelSubsystems, Date.now());
 }
