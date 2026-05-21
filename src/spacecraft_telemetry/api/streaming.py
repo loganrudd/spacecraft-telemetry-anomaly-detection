@@ -50,6 +50,64 @@ _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS = 10
 _DRIFT_POLL_SECONDS = 0.05
 
 
+async def _merge_queues(
+    request: Request,
+    tasks: dict[str, asyncio.Task[None]],
+    queues: dict[str, asyncio.Queue[bytes]],
+    channels: list[str],
+    log_event: str,
+) -> AsyncGenerator[bytes, None]:
+    """Race per-channel queues, yield payloads as they arrive, clean up on exit.
+
+    Shared merge loop used by both ``telemetry_stream`` and ``drift_stream``.
+    Detects client disconnect, drains queues fairly across channels via
+    ``asyncio.wait(FIRST_COMPLETED)``, and cancels pump tasks in the finally
+    block so no coroutines are leaked regardless of how the generator is closed.
+    """
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+
+            active: dict[str, asyncio.Queue[bytes]] = {
+                ch: q
+                for ch, q in queues.items()
+                if not tasks[ch].done() or not q.empty()
+            }
+            if not active:
+                break
+
+            getter_tasks: list[asyncio.Task[bytes]] = [
+                asyncio.create_task(q.get()) for q in active.values()
+            ]
+            done, pending = await asyncio.wait(
+                getter_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=1.0,
+            )
+
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if not done:
+                continue
+
+            for t in done:
+                yield t.result()
+
+    finally:
+        for pump_task in tasks.values():
+            pump_task.cancel()
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for ch, result in zip(channels, results, strict=False):
+            if isinstance(result, Exception) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                _log.error(log_event, channel=ch, error=str(result))
+
+
 async def telemetry_stream(
     state: AppState,
     request: Request,
@@ -114,56 +172,8 @@ async def telemetry_stream(
         ch: asyncio.create_task(pump(ch)) for ch in selected_channels
     }
 
-    try:
-        while True:
-            if await request.is_disconnected():
-                break
-
-            # Channels still active: pump is running OR its queue has buffered events.
-            active: dict[str, asyncio.Queue[bytes]] = {
-                ch: q
-                for ch, q in queues.items()
-                if not tasks[ch].done() or not q.empty()
-            }
-            if not active:
-                break  # All pumps finished and all queues drained.
-
-            # Race every active queue — yield the first payload that arrives.
-            # The payload is self-describing (contains channel in the JSON), so
-            # we don't need a task→channel mapping here.
-            getter_tasks: list[asyncio.Task[bytes]] = [
-                asyncio.create_task(q.get()) for q in active.values()
-            ]
-            done, pending = await asyncio.wait(
-                getter_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=1.0,
-            )
-
-            # Cancel the getters that lost the race (they held no event).
-            # Await them so CancelledError is processed before the tasks go out
-            # of scope — prevents "Task was destroyed but it is pending!" warnings.
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-            if not done:
-                # 1-second timeout with no events — recheck active queues.
-                continue
-
-            for t in done:
-                yield t.result()
-
-    finally:
-        for pump_task in tasks.values():
-            pump_task.cancel()
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for ch, result in zip(selected_channels, results, strict=False):
-            if isinstance(result, Exception) and not isinstance(
-                result, asyncio.CancelledError
-            ):
-                _log.error("api.pump.error", channel=ch, error=str(result))
+    async for chunk in _merge_queues(request, tasks, queues, selected_channels, "api.pump.error"):
+        yield chunk
 
 
 async def drift_stream(
@@ -266,42 +276,7 @@ async def drift_stream(
         ch: asyncio.create_task(pump(ch)) for ch in selected_channels
     }
 
-    try:
-        while True:
-            if await request.is_disconnected():
-                break
-
-            active: dict[str, asyncio.Queue[bytes]] = {
-                ch: q
-                for ch, q in queues.items()
-                if not tasks[ch].done() or not q.empty()
-            }
-            if not active:
-                break
-
-            getter_tasks: list[asyncio.Task[bytes]] = [
-                asyncio.create_task(q.get()) for q in active.values()
-            ]
-            done, pending = await asyncio.wait(
-                getter_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=1.0,
-            )
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            if not done:
-                continue
-            for t in done:
-                yield t.result()
-
-    finally:
-        for pump_task in tasks.values():
-            pump_task.cancel()
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for ch, result in zip(selected_channels, results, strict=False):
-            if isinstance(result, Exception) and not isinstance(
-                result, asyncio.CancelledError
-            ):
-                _log.error("api.drift_pump.error", channel=ch, error=str(result))
+    async for chunk in _merge_queues(
+        request, tasks, queues, selected_channels, "api.drift_pump.error"
+    ):
+        yield chunk
