@@ -28,11 +28,7 @@ function computeRollup(
     const latestDrift = driftStore.latestForChannel(ch);
     const drifted = latestDrift?.drifted ?? false;
 
-    const snapshot = telemetryStore.snapshot(ch);
-    const lastEvent = snapshot[snapshot.length - 1];
-    const lastUpdated = lastEvent
-      ? new Date(lastEvent.timestamp as unknown as string).getTime()
-      : null;
+    const lastUpdated = telemetryStore.lastTickAtMs[ch] ?? null;
 
     rollup.get(sub)!.set(ch, { anomaly, drifted, lastUpdated });
   }
