@@ -8,7 +8,8 @@
    backpressure to the offending channel only.
 2. Spawns one ``asyncio.Task`` per channel.  Each pump iterates
    ``replay_channel`` and pushes SSE-encoded payloads into its channel's
-   queue.
+   queue.  After each ``engine.step()`` it also appends a minimal tick record
+   to ``state.tick_buses[channel]`` (if present) for the drift stream.
 3. A merging consumer races all active queues with
    ``asyncio.wait(FIRST_COMPLETED)`` and yields whichever payload arrives
    first.  This keeps latency fair across channels regardless of their
@@ -18,11 +19,9 @@
 5. On any exit path (disconnect, exhaustion, exception) the pump tasks are
    cancelled and awaited so no coroutines are leaked.
 
-``drift_stream`` is fully self-contained: each connection creates its own
-per-request ``RollingDriftMonitor`` instances and drives its own
-``replay_channel`` iteration independently of any telemetry stream clients.
-Multiple concurrent drift clients each maintain isolated monitor state so
-tick counts are never doubled by a second connection.
+``drift_stream`` reads from the per-channel tick buses populated by
+``telemetry_stream`` pumps, drives ``RollingDriftMonitor`` instances, and
+emits ``drift`` SSE events at the configured cadence (every N ticks).
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ from collections.abc import AsyncGenerator
 import structlog.contextvars
 from starlette.requests import Request
 
-from spacecraft_telemetry.api.drift import DriftSnapshot, RollingDriftMonitor
 from spacecraft_telemetry.api.models import DriftEvent, DriftFeature
 from spacecraft_telemetry.api.replay import replay_channel
 from spacecraft_telemetry.api.state import AppState
@@ -47,6 +45,9 @@ _MIN_PER_CHANNEL_SLOTS = 8
 
 # How often to attach subsystem-level aggregation to a drift event.
 _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS = 10
+
+# Poll interval for the drift pump to drain the tick bus.
+_DRIFT_POLL_SECONDS = 0.05
 
 
 async def _merge_queues(
@@ -146,6 +147,7 @@ async def telemetry_stream(
         """Replay one channel and push SSE payloads into its queue."""
         structlog.contextvars.bind_contextvars(channel_id=channel)
         engine = state.engines[channel]
+        tick_bus = state.tick_buses.get(channel)
         async for ts, val, anom_true in replay_channel(
             state.settings.spark.processed_data_dir,
             state.mission,
@@ -159,6 +161,12 @@ async def telemetry_stream(
                 f"event: telemetry\ndata: {event.model_dump_json()}\n\n".encode()
             )
             await queues[channel].put(payload)
+            # Publish a minimal tick to the drift bus — non-blocking append,
+            # deque maxlen silently evicts oldest if drift consumer falls behind.
+            if tick_bus is not None:
+                tick_bus.append({
+                    "value_normalized": float(event.value_normalized),
+                })
 
     tasks: dict[str, asyncio.Task[None]] = {
         ch: asyncio.create_task(pump(ch)) for ch in selected_channels
@@ -172,20 +180,15 @@ async def drift_stream(
     state: AppState,
     request: Request,
     selected_channels: list[str],
-    speed: float,
 ) -> AsyncGenerator[bytes, None]:
     """Async generator yielding SSE-formatted bytes for the drift stream.
 
-    Fully self-contained: each connection creates per-request
-    ``RollingDriftMonitor`` instances and drives its own ``replay_channel``
-    loop.  Multiple concurrent clients maintain independent monitor state so
-    tick counts are never doubled and the stream works without a telemetry
-    stream client being open.
-
-    When the monitor fires (every ``tick_interval`` ticks after the window is
-    full), the ``DriftSnapshot`` is converted to a ``DriftEvent`` SSE frame.
-    Every ``_SUBSYSTEM_SUMMARY_EVERY_N_EVENTS`` events the subsystem-level
-    aggregation fields are attached.
+    Reads from ``state.tick_buses`` populated by ``telemetry_stream`` pumps.
+    Drives one ``RollingDriftMonitor`` per selected channel.  When the monitor
+    fires (every ``tick_interval`` ticks after the window is full), the resulting
+    ``DriftSnapshot`` is converted to a ``DriftEvent`` and emitted as an SSE
+    frame.  Every ``_SUBSYSTEM_SUMMARY_EVERY_N_EVENTS`` events the subsystem-level
+    ``percent_drifted`` and alert flag are attached to the outgoing event.
 
     SSE format per event::
 
@@ -193,11 +196,13 @@ async def drift_stream(
         data: <DriftEvent JSON>\\n
         \\n
 
+    The drift pump polls the tick bus with a short sleep rather than blocking on
+    a queue, so the telemetry pump is never stalled waiting for drift consumers.
+
     Args:
-        state:             Runtime application state (drift_references + settings).
+        state:             Runtime application state (drift_monitors + tick_buses).
         request:           Starlette request — used for disconnect detection.
         selected_channels: Ordered list of channel IDs to monitor.
-        speed:             Replay speed multiplier passed to ``replay_channel``.
     """
     n = max(1, len(selected_channels))
     per_ch_maxsize = max(
@@ -213,70 +218,59 @@ async def drift_stream(
     latest_snapshots: dict[str, object] = {}
 
     async def pump(channel: str) -> None:
-        """Replay one channel, push ticks into a fresh monitor, emit drift events."""
+        """Drain tick bus → monitor → emit drift SSE frames."""
+        from spacecraft_telemetry.api.drift import DriftSnapshot  # local to avoid circular
+
         structlog.contextvars.bind_contextvars(channel_id=channel)
-        monitor = RollingDriftMonitor(
-            channel=channel,
-            reference=state.drift_references[channel],
-            window_size=state.settings.drift.window_size,
-            tick_interval=state.settings.drift.tick_interval,
-            feature_drift_threshold=state.settings.drift.feature_drift_threshold,
-            channel_drift_threshold=state.settings.drift.drift_alert_threshold,
-        )
+        monitor = state.drift_monitors[channel]
+        tick_bus = state.tick_buses[channel]
         drift_event_count = 0
 
-        async for _ts, val, _anom in replay_channel(
-            state.settings.spark.processed_data_dir,
-            state.mission,
-            channel,
-            speed=speed,
-            tick_interval_seconds=state.settings.api.replay_tick_interval_seconds,
-            cached_data=state.replay_data.get(channel),
-        ):
-            monitor.push({"value_normalized": float(val)})
+        while True:
+            # Drain any new ticks into the monitor (O(1) per tick, cooperative).
+            while tick_bus:
+                monitor.push(tick_bus.popleft())
 
-            if not monitor.should_run():
-                continue
+            if monitor.should_run():
+                snapshot = await monitor.run()
+                if snapshot is not None:
+                    latest_snapshots[channel] = snapshot
+                    drift_event_count += 1
 
-            snapshot = await monitor.run()
-            if snapshot is None:
-                continue
+                    sub_pct: float | None = None
+                    sub_alert: bool | None = None
+                    if drift_event_count % _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS == 0:
+                        typed = {
+                            ch: s
+                            for ch, s in latest_snapshots.items()
+                            if isinstance(s, DriftSnapshot)
+                        }
+                        if typed:
+                            n_drifted = sum(1 for s in typed.values() if s.drifted)
+                            sub_pct = n_drifted / len(typed)
+                            sub_alert = sub_pct >= state.settings.drift.drift_alert_threshold
 
-            latest_snapshots[channel] = snapshot
-            drift_event_count += 1
-
-            sub_pct: float | None = None
-            sub_alert: bool | None = None
-            if drift_event_count % _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS == 0:
-                typed = {
-                    ch: s
-                    for ch, s in latest_snapshots.items()
-                    if isinstance(s, DriftSnapshot)
-                }
-                if typed:
-                    n_drifted = sum(1 for s in typed.values() if s.drifted)
-                    sub_pct = n_drifted / len(typed)
-                    sub_alert = sub_pct >= state.settings.drift.drift_alert_threshold
-
-            event = DriftEvent(
-                timestamp=snapshot.timestamp,
-                mission=state.mission,
-                channel=snapshot.channel,
-                features=[
-                    DriftFeature(
-                        feature=f.feature,
-                        score=f.score,
-                        drifted=f.drifted,
+                    event = DriftEvent(
+                        timestamp=snapshot.timestamp,
+                        mission=state.mission,
+                        channel=snapshot.channel,
+                        features=[
+                            DriftFeature(
+                                feature=f.feature,
+                                score=f.score,
+                                drifted=f.drifted,
+                            )
+                            for f in snapshot.features
+                        ],
+                        percent_drifted=snapshot.percent_drifted,
+                        drifted=snapshot.drifted,
+                        subsystem_percent_drifted=sub_pct,
+                        subsystem_alert=sub_alert,
                     )
-                    for f in snapshot.features
-                ],
-                percent_drifted=snapshot.percent_drifted,
-                drifted=snapshot.drifted,
-                subsystem_percent_drifted=sub_pct,
-                subsystem_alert=sub_alert,
-            )
-            payload = f"event: drift\ndata: {event.model_dump_json()}\n\n".encode()
-            await queues[channel].put(payload)
+                    payload = f"event: drift\ndata: {event.model_dump_json()}\n\n".encode()
+                    await queues[channel].put(payload)
+
+            await asyncio.sleep(_DRIFT_POLL_SECONDS)
 
     tasks: dict[str, asyncio.Task[None]] = {
         ch: asyncio.create_task(pump(ch)) for ch in selected_channels

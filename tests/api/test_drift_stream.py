@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from types import MappingProxyType
 
 import numpy as np
@@ -14,6 +15,7 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from spacecraft_telemetry.api.drift import RollingDriftMonitor
 from spacecraft_telemetry.api.endpoints import router
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.state import AppState
@@ -26,9 +28,6 @@ from spacecraft_telemetry.evidently_monitoring.reference import (
 _MISSION = "test-mission"
 _CHANNEL = "test-ch"
 _SUBSYSTEM = "test-sub"
-
-# Run the replay fast enough that tests complete in <30 s.
-_TEST_SPEED = 1e6
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,25 +57,25 @@ def _make_drift_settings(*, enabled: bool = True) -> Settings:
 
 
 def _make_app(settings: Settings, *, drift_enabled: bool = True) -> FastAPI:
-    """Build a minimal FastAPI app with drift reference profiles and replay data."""
+    """Build a minimal FastAPI app with drift state pre-loaded."""
     app = FastAPI()
     app.state.settings = settings
 
-    drift_references: dict[str, pd.DataFrame] = {}
-    replay_data_map: dict[str, object] = {}
+    drift_monitors: dict[str, RollingDriftMonitor] = {}
+    tick_buses: dict[str, deque[dict[str, float]]] = {}
 
     if drift_enabled:
         ref = _make_reference()
-        drift_references[_CHANNEL] = ref
-
-        # Synthetic replay: enough ticks to fill the window several times so
-        # drift_stream can emit multiple events during a test.
-        rng = np.random.default_rng(42)
-        n = settings.drift.window_size * 6
-        values = rng.choice(ref["value_normalized"].values, size=n).astype(np.float64)
-        anom = np.zeros(n, dtype=bool)
-        timestamps = pd.date_range("2020-01-01", periods=n, freq="1s").to_numpy()
-        replay_data_map[_CHANNEL] = (values, anom, timestamps)
+        monitor = RollingDriftMonitor(
+            channel=_CHANNEL,
+            reference=ref,
+            window_size=settings.drift.window_size,
+            tick_interval=settings.drift.tick_interval,
+            feature_drift_threshold=settings.drift.feature_drift_threshold,
+            channel_drift_threshold=settings.drift.drift_alert_threshold,
+        )
+        drift_monitors[_CHANNEL] = monitor
+        tick_buses[_CHANNEL] = deque(maxlen=settings.drift.window_size)
 
     app.state.app_state = AppState(
         settings=settings,
@@ -85,10 +84,11 @@ def _make_app(settings: Settings, *, drift_enabled: bool = True) -> FastAPI:
         device=torch.device("cpu"),
         engines=MappingProxyType({}),
         channel_subsystem_map=MappingProxyType({}),
-        replay_data=MappingProxyType(replay_data_map),
+        replay_data=MappingProxyType({}),
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
-        drift_references=drift_references,
+        drift_monitors=drift_monitors,
+        tick_buses=tick_buses,
     )
     app.add_middleware(CorrelationIdMiddleware)
     app.include_router(router)
@@ -101,7 +101,7 @@ def _make_app(settings: Settings, *, drift_enabled: bool = True) -> FastAPI:
 
 
 class TestDriftStreamErrors:
-    def test_503_when_no_drift_references(self) -> None:
+    def test_503_when_no_drift_monitors(self) -> None:
         settings = _make_drift_settings(enabled=False)
         app = _make_app(settings, drift_enabled=False)
         with TestClient(app) as client:
@@ -118,6 +118,7 @@ class TestDriftStreamErrors:
         assert "no-such-channel" in resp.json()["detail"]
 
 
+
 # ---------------------------------------------------------------------------
 # Drift event emission (slow — drives Evidently)
 # ---------------------------------------------------------------------------
@@ -132,11 +133,36 @@ class TestDriftStreamEvents:
     returns, so client.stream().__enter__() hangs forever.  Calling the async
     generator directly lets the event loop drive pump tasks and collect events
     without any HTTP transport.
-
-    drift_stream is now self-contained: each call creates its own per-request
-    RollingDriftMonitor and drives replay_channel from AppState.replay_data, so
-    no tick-bus pre-filling is needed.
     """
+
+    def _fill_tick_bus(
+        self,
+        app: FastAPI,
+        *,
+        drifted: bool = False,
+    ) -> None:
+        """Push exactly window_size ticks so should_run() fires on the first pump iteration.
+
+        Requires window_size % tick_interval == 0 (enforced by _make_drift_settings).
+        The tick bus deque has maxlen=window_size, so pushing exactly window_size ticks
+        fills it completely.  The pump drains all of them in one pass, giving
+        monitor._tick_count == window_size, which satisfies both conditions in
+        should_run(): len(window) >= window_size AND tick_count % tick_interval == 0.
+        """
+        state: AppState = app.state.app_state
+        bus = state.tick_buses[_CHANNEL]
+        ref = _make_reference()
+        rng = np.random.default_rng(99)
+        window_size = state.settings.drift.window_size
+        for _ in range(window_size):
+            if drifted:
+                ref_mean = float(ref["value_normalized"].mean())
+                ref_std = max(float(ref["value_normalized"].std()), 1e-6)
+                val = ref_mean + 5.0 * ref_std
+            else:
+                idx = int(rng.integers(0, len(ref)))
+                val = float(ref.iloc[idx]["value_normalized"])
+            bus.append({"value_normalized": val})
 
     async def _collect_events(
         self,
@@ -157,9 +183,7 @@ class TestDriftStreamEvents:
         events: list[dict] = []
 
         async def _drain() -> None:
-            gen = drift_stream(
-                state, _NeverDisconnects(), selected_channels=[_CHANNEL], speed=_TEST_SPEED
-            )
+            gen = drift_stream(state, _NeverDisconnects(), selected_channels=[_CHANNEL])
             try:
                 async for chunk in gen:
                     for line in chunk.decode().splitlines():
@@ -174,15 +198,17 @@ class TestDriftStreamEvents:
         return events
 
     async def test_200_content_type_and_fields(self) -> None:
-        """Generator emits at least one event driven by its own replay."""
+        """Generator emits at least one event after pre-filling the tick bus."""
         settings = _make_drift_settings()
         app = _make_app(settings)
+        self._fill_tick_bus(app)
         events = await self._collect_events(app, n=1)
         assert len(events) >= 1
 
     async def test_drift_events_have_required_fields(self) -> None:
         settings = _make_drift_settings()
         app = _make_app(settings)
+        self._fill_tick_bus(app)
         events = await self._collect_events(app, n=1)
         assert len(events) >= 1
         ev = events[0]
@@ -202,6 +228,7 @@ class TestDriftStreamEvents:
     async def test_drift_event_timestamps_monotone(self) -> None:
         settings = _make_drift_settings()
         app = _make_app(settings)
+        self._fill_tick_bus(app)
         events = await self._collect_events(app, n=2)
         timestamps = [ev["timestamp"] for ev in events]
         # Strict monotone — equal timestamps would mean the clock is frozen.
@@ -222,9 +249,7 @@ class TestDriftStreamEvents:
             async def is_disconnected(self) -> bool:
                 return True
 
-        gen = drift_stream(
-            state, _DisconnectsImmediately(), selected_channels=[_CHANNEL], speed=_TEST_SPEED
-        )
+        gen = drift_stream(state, _DisconnectsImmediately(), selected_channels=[_CHANNEL])
         async for _ in gen:
             break  # pragma: no cover
         await gen.aclose()

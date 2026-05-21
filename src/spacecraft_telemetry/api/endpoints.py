@@ -147,16 +147,16 @@ async def stream_drift(
 ) -> StreamingResponse:
     """SSE drift-monitoring stream.
 
-    Creates per-request ``RollingDriftMonitor`` instances from the reference
-    profiles loaded at startup and drives its own replay, so the stream works
-    independently of any telemetry stream clients.
+    Emits ``drift`` SSE events driven by the ``RollingDriftMonitor`` instances
+    loaded at startup.  Each event carries per-feature drift scores computed by
+    Evidently against the Phase 7 reference profile.
 
     Returns 503 when drift monitoring is disabled or no reference profiles were
     loaded at startup.  Returns 400 for unknown channel names.
     """
     state: AppState = request.app.state.app_state
 
-    if not state.drift_references:
+    if not state.drift_monitors:
         raise HTTPException(
             status_code=503,
             detail="drift monitoring disabled or no reference profiles loaded",
@@ -165,20 +165,18 @@ async def stream_drift(
     selected = (
         [c.strip() for c in params.channels.split(",") if c.strip()]
         if params.channels
-        else sorted(state.drift_references.keys())
+        else sorted(state.drift_monitors.keys())
     )
 
-    unknown = sorted(set(selected) - set(state.drift_references.keys()))
+    unknown = sorted(set(selected) - set(state.drift_monitors.keys()))
     if unknown:
         raise HTTPException(
             status_code=400,
             detail=f"unknown channels: {unknown}",
         )
 
-    effective_speed = params.speed or state.settings.api.replay_speed_default
-
     return StreamingResponse(
-        drift_stream(state, request, selected_channels=selected, speed=effective_speed),
+        drift_stream(state, request, selected_channels=selected),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
