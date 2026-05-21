@@ -78,6 +78,11 @@ def version() -> None:
     default=None,
     help="When sampling, restrict to channels from this subsystem (e.g. subsystem_6).",
 )
+@click.option(
+    "--channel",
+    default=None,
+    help="When sampling, restrict to a single channel (overrides --subsystem).",
+)
 @click.pass_context
 def download(
     ctx: click.Context,
@@ -85,6 +90,7 @@ def download(
     create_sample: bool,
     sample_fraction: float | None,
     subsystem: str | None,
+    channel: str | None,
 ) -> None:
     """Download an ESA mission from Zenodo and optionally create a local sample.
 
@@ -101,6 +107,9 @@ def download(
 
         # Download and sample only subsystem_6 channels (anomaly-rich)
         spacecraft-telemetry download --mission ESA-Mission1 --sample --subsystem subsystem_6
+
+        # Download and sample a single channel
+        spacecraft-telemetry download --mission ESA-Mission1 --sample --channel channel_22
 
         # Download and create a 5% sample
         spacecraft-telemetry download --mission ESA-Mission1 --sample --sample-fraction 0.05
@@ -126,7 +135,9 @@ def download(
             sample_fraction if sample_fraction is not None else settings.data.sample_fraction
         )
         channel_filter: list[str] | None = None
-        if subsystem is not None:
+        if channel is not None:
+            channel_filter = [channel]
+        elif subsystem is not None:
             all_channels = sorted(
                 p.stem
                 for p in (raw_dir / mission / "channels").glob("*.zip")
@@ -134,7 +145,13 @@ def download(
             channel_filter = _filter_channels_by_subsystem(
                 settings, mission, all_channels, subsystem
             )
-        log.info("creating sample", mission=mission, fraction=fraction, subsystem=subsystem)
+        log.info(
+            "creating sample",
+            mission=mission,
+            fraction=fraction,
+            channel=channel,
+            subsystem=subsystem,
+        )
         creator = SampleCreator(
             raw_dir=raw_dir,
             sample_dir=Path(str(settings.data.sample_data_dir)),
@@ -250,6 +267,11 @@ def spark() -> None:
     default=None,
     help="Optional subsystem name to preprocess only those channels (e.g. subsystem_6).",
 )
+@click.option(
+    "--channel",
+    default=None,
+    help="Optional single channel to preprocess (overrides --subsystem).",
+)
 @click.pass_context
 def spark_preprocess(
     ctx: click.Context,
@@ -257,6 +279,7 @@ def spark_preprocess(
     sample_fraction: float | None,
     train_fraction: float | None,
     subsystem: str | None,
+    channel: str | None,
 ) -> None:
     """Run the Spark preprocessing pipeline for one mission.
 
@@ -271,6 +294,9 @@ def spark_preprocess(
 
         # Only preprocess channels belonging to subsystem_6
         spacecraft-telemetry spark preprocess --mission ESA-Mission1 --subsystem subsystem_6
+
+        # Only preprocess a single channel
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --channel channel_22
     """
     from pathlib import Path
 
@@ -289,9 +315,11 @@ def spark_preprocess(
             update={"spark": settings.spark.model_copy(update=spark_overrides)}
         )
 
-    # Resolve subsystem → channel list before starting Spark.
+    # Resolve channel filter: explicit channel > subsystem > all.
     channels: list[str] | None = None
-    if subsystem is not None:
+    if channel is not None:
+        channels = [channel]
+    elif subsystem is not None:
         data_dir = Path(str(settings.data.sample_data_dir))
         channel_dir = data_dir / mission / "channels"
         all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
@@ -301,6 +329,7 @@ def spark_preprocess(
         "spark.preprocess.start",
         mission=mission,
         train_fraction=settings.spark.train_fraction,
+        channel=channel,
         subsystem=subsystem,
         channels=channels,
     )

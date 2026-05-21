@@ -66,10 +66,11 @@ typecheck:     ## Run mypy type checker
 # Data
 # ---------------------------------------------------------------------------
 
-download-sample: ## Download ESA dataset sample from Zenodo (MISSION=…, SUBSYSTEM=subsystem_6)
+download-sample: ## Download ESA dataset sample from Zenodo (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry download \
 		--mission $(MISSION) \
 		--sample \
+		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
@@ -80,9 +81,10 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 # Spark preprocessing (Phase 2)
 # ---------------------------------------------------------------------------
 
-spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=subsystem_6)
+spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
 	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
 		--mission $(MISSION) \
+		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 # ---------------------------------------------------------------------------
