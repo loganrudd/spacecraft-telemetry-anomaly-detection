@@ -7,6 +7,10 @@ type Props = {
   onEnterChannel: (channel: string) => void;
 };
 
+function shortName(ch: string): string {
+  return ch.replace(/^channel_?/, "Ch. ");
+}
+
 export default function SubsystemCard({
   subsystem,
   channels,
@@ -16,8 +20,9 @@ export default function SubsystemCard({
   const channelList = Array.from(channels.entries()).sort(([a], [b]) =>
     a.localeCompare(b),
   );
-  const anomalyCount = channelList.filter(([, s]) => s.anomaly).length;
-  const driftCount = channelList.filter(([, s]) => s.drifted).length;
+  const anomalousChannels = channelList.filter(([, s]) => s.anomaly);
+  const driftedChannels = channelList.filter(([, s]) => s.drifted);
+  const isNominal = anomalousChannels.length === 0 && driftedChannels.length === 0;
 
   return (
     <div
@@ -53,21 +58,36 @@ export default function SubsystemCard({
         ))}
       </div>
 
-      <div className="subsystem-card__summary">
-        {anomalyCount > 0 && (
-          <span className="subsystem-card__badge subsystem-card__badge--anomaly">
-            {anomalyCount} anomal{anomalyCount === 1 ? "y" : "ies"}
-          </span>
-        )}
-        {driftCount > 0 && (
-          <span className="subsystem-card__badge subsystem-card__badge--drift">
-            drift on {driftCount}
-          </span>
-        )}
-        {anomalyCount === 0 && driftCount === 0 && (
+      <div className={`subsystem-card__summary${isNominal ? " subsystem-card__summary--nominal" : ""}`}>
+        {isNominal ? (
           <span className="subsystem-card__badge subsystem-card__badge--nominal">
             nominal
           </span>
+        ) : (
+          <>
+            <div className="subsystem-card__summary-col">
+              {anomalousChannels.map(([ch]) => (
+                <button
+                  key={ch}
+                  className="subsystem-card__badge subsystem-card__badge--anomaly"
+                  onClick={(e) => { e.stopPropagation(); onEnterChannel(ch); }}
+                >
+                  anomaly on {shortName(ch)}
+                </button>
+              ))}
+            </div>
+            <div className="subsystem-card__summary-col">
+              {driftedChannels.map(([ch]) => (
+                <button
+                  key={ch}
+                  className="subsystem-card__badge subsystem-card__badge--drift"
+                  onClick={(e) => { e.stopPropagation(); onEnterChannel(ch); }}
+                >
+                  drift on {shortName(ch)}
+                </button>
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>

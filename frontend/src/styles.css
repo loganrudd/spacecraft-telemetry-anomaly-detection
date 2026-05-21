@@ -616,19 +616,47 @@ button {
 }
 
 .subsystem-card__summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.3rem;
+  min-height: 1.4rem;
+}
+
+.subsystem-card__summary--nominal {
   display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
+}
+
+.subsystem-card__summary-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
 }
 
 .subsystem-card__badge {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.03em;
-  padding: 0.1rem 0.4rem;
+  padding: 0.15rem 0.45rem;
   border-radius: 3px;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
 }
 
-.subsystem-card__badge--nominal  { color: var(--success); background: rgba(63, 185, 80, 0.1); }
+button.subsystem-card__badge {
+  cursor: pointer;
+  width: 100%;
+}
+
+button.subsystem-card__badge:hover {
+  filter: brightness(0.88);
+}
+
+.subsystem-card__badge--nominal  { color: var(--success); background: rgba(63, 185, 80, 0.1); cursor: default; }
 .subsystem-card__badge--drift    { color: var(--alert);   background: rgba(210, 153, 34, 0.15); }
 .subsystem-card__badge--anomaly  { color: var(--danger);  background: rgba(248, 81, 73, 0.12); }

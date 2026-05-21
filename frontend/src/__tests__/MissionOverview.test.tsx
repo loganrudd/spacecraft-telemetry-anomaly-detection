@@ -178,27 +178,7 @@ describe("MissionOverview", () => {
     expect(onEnter).toHaveBeenCalledWith("subsystem_1", ["channel_1"]);
   });
 
-  it("shows anomaly badge count in summary when anomalies present", () => {
-    vi.mocked(useSubsystemRollup).mockReturnValue(
-      makeRollup({
-        subsystem_1: {
-          channel_1: { anomaly: true },
-          channel_2: { anomaly: true },
-        },
-        subsystem_2: { channel_3: {} },
-      }),
-    );
-    render(
-      <MissionOverview
-        mission="ESA-Mission1"
-        channelSubsystems={CHANNEL_SUBSYSTEMS}
-        onEnterSubsystem={() => {}}
-      />,
-    );
-    expect(screen.getByText(/2 anomalies/)).toBeInTheDocument();
-  });
-
-  it("shows drift badge even when a drifted channel also has an anomaly", () => {
+  it("shows drift tag even when a drifted channel also has an anomaly", () => {
     vi.mocked(useSubsystemRollup).mockReturnValue(
       makeRollup({
         subsystem_1: {
@@ -215,9 +195,30 @@ describe("MissionOverview", () => {
         onEnterSubsystem={() => {}}
       />,
     );
-    // Both badges should be visible — drift is independent of anomaly in the summary.
-    expect(screen.getByText(/1 anomaly/)).toBeInTheDocument();
-    expect(screen.getByText(/drift on 1/)).toBeInTheDocument();
+    // Both per-channel tags visible — drift is independent of anomaly.
+    expect(screen.getByText("anomaly on Ch. 1")).toBeInTheDocument();
+    expect(screen.getByText("drift on Ch. 1")).toBeInTheDocument();
+  });
+
+  it("shows per-channel anomaly tags for each anomalous channel", () => {
+    vi.mocked(useSubsystemRollup).mockReturnValue(
+      makeRollup({
+        subsystem_1: {
+          channel_1: { anomaly: true },
+          channel_2: { anomaly: true },
+        },
+        subsystem_2: { channel_3: {} },
+      }),
+    );
+    render(
+      <MissionOverview
+        mission="ESA-Mission1"
+        channelSubsystems={CHANNEL_SUBSYSTEMS}
+        onEnterSubsystem={() => {}}
+      />,
+    );
+    expect(screen.getByText("anomaly on Ch. 1")).toBeInTheDocument();
+    expect(screen.getByText("anomaly on Ch. 2")).toBeInTheDocument();
   });
 
   it("shows nominal badge when no anomalies or drift", () => {
