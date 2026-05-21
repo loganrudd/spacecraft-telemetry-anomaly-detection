@@ -228,3 +228,52 @@ class TestDriftStreamEvents:
         async for _ in gen:
             break  # pragma: no cover
         await gen.aclose()
+
+
+# ---------------------------------------------------------------------------
+# HTTP boundary smoke test (slow — goes through ASGI transport)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestDriftStreamHTTPBoundary:
+    """Verify StreamingResponse headers and SSE wire format via httpx ASGITransport.
+
+    The TestDriftStreamEvents tests drive drift_stream as a raw async generator,
+    bypassing the HTTP layer entirely.  This class adds one end-to-end check that
+    the endpoint wires up the correct Content-Type, Cache-Control, and
+    X-Accel-Buffering headers and that the SSE wire format uses the ``event: drift``
+    prefix — regressions in endpoints.py would not be caught by the generator tests.
+    """
+
+    async def test_sse_headers_and_framing(self) -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        settings = _make_drift_settings()
+        app = _make_app(settings)
+
+        raw = b""
+
+        async def _read_one_frame() -> dict[str, str]:
+            nonlocal raw
+            transport = ASGITransport(app=app)
+            async with (
+                AsyncClient(transport=transport, base_url="http://test") as client,
+                client.stream("GET", f"/api/stream/drift?speed={int(_TEST_SPEED)}") as resp,
+            ):
+                headers = dict(resp.headers)
+                async for chunk in resp.aiter_bytes():
+                    raw += chunk
+                    if b"\n\n" in raw:
+                        return headers
+            return {}  # pragma: no cover
+
+        headers = await asyncio.wait_for(_read_one_frame(), timeout=30.0)
+
+        assert "text/event-stream" in headers["content-type"]
+        assert headers.get("cache-control") == "no-cache"
+        assert headers.get("x-accel-buffering") == "no"
+
+        frame = raw[: raw.index(b"\n\n") + 2].decode()
+        assert frame.startswith("event: drift\n"), f"unexpected SSE prefix: {frame[:60]!r}"
+        assert "\ndata:" in frame
