@@ -141,8 +141,12 @@ async def telemetry_stream(
             )
 
             # Cancel the getters that lost the race (they held no event).
+            # Await them so CancelledError is processed before the tasks go out
+            # of scope — prevents "Task was destroyed but it is pending!" warnings.
             for t in pending:
                 t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
             if not done:
                 # 1-second timeout with no events — recheck active queues.
@@ -285,6 +289,8 @@ async def drift_stream(
             )
             for t in pending:
                 t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             if not done:
                 continue
             for t in done:
