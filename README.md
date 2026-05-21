@@ -75,11 +75,14 @@ make setup
 # 2) (Optional) set Java for Spark
 export JAVA_HOME=$(brew --prefix openjdk@21)
 
-# 3) Download sampled ESA data
+# 3) Download and sample and entire ESA mission's data
 make download-sample MISSION=ESA-Mission1
 
+# you can also specify a specific subsystem and/or channel you want to sample/preprocess/train/score/tune
+make download-sample MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6
+
 # 4) Preprocess data with Spark
-make spark-preprocess MISSION=ESA-Mission1
+make spark-preprocess MISSION=ESA-Mission1 CHANNEL=channel_22
 
 # 5) Run test suite (fast + slow mix per project config)
 make test
@@ -113,7 +116,7 @@ make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
 # 7) Run drift monitoring for a single channel
 #    Builds reference profile from train split, compares to test split,
 #    logs HTML report + per-feature metrics to telemanom-monitoring-ESA-Mission1 experiment.
-uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_1
+uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_22
 
 # 8) Run drift monitoring for all discovered channels in a mission
 uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
