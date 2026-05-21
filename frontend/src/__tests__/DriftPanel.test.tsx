@@ -93,4 +93,28 @@ describe("DriftPanel", () => {
     push(makeEvent("ch-a", 0.5));
     expect(screen.getByLabelText("Feature drift scores")).toBeInTheDocument();
   });
+
+  it("shows 'since HH:MM:SS' timestamp when channel is drifted", () => {
+    render(<DriftPanel channels={["ch-a"]} />);
+    push(makeEvent("ch-a", 0.5)); // drifted: true, timestamp: "2000-01-01T00:00:00Z"
+    expect(screen.getByText(/since 2000-01-01 00:00:00/)).toBeInTheDocument();
+  });
+
+  it("does not update the drift timestamp when subsequent drifted events arrive", () => {
+    render(<DriftPanel channels={["ch-a"]} />);
+    push(makeEvent("ch-a", 0.5)); // first onset: "2000-01-01T00:00:00Z"
+    act(() => {
+      driftStore.push({ ...makeEvent("ch-a", 0.6), timestamp: "2000-01-01T00:01:00Z" });
+      driftStore.flushForTest();
+    });
+    // Still shows the first onset time, not the updated event timestamp.
+    expect(screen.getByText(/since 2000-01-01 00:00:00/)).toBeInTheDocument();
+    expect(screen.queryByText(/since 2000-01-01 00:01:00/)).not.toBeInTheDocument();
+  });
+
+  it("shows plain event timestamp when channel is nominal", () => {
+    render(<DriftPanel channels={["ch-a"]} />);
+    push(makeEvent("ch-a", 0.0)); // drifted: false
+    expect(screen.getByText("2000-01-01 00:00:00")).toBeInTheDocument();
+  });
 });

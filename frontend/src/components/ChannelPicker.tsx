@@ -1,43 +1,11 @@
-import { useEffect, useState } from "react";
-import { fetchHealth } from "../api/health";
-import type { HealthResponse } from "../api/types";
-
-const MAX_RECOMMENDED_CHANNELS = 5;
-
 type Props = {
+  allChannels: string[];  // channels in the current subsystem
   selected: string[];
   onChange: (channels: string[]) => void;
 };
 
-export default function ChannelPicker({ selected, onChange }: Props) {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchHealth()
-      .then(setHealth)
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : "Failed to load channels");
-      });
-  }, []);
-
-  if (error) {
-    return (
-      <aside className="channel-picker channel-picker--error">
-        <p className="channel-picker__error">⚠ {error}</p>
-      </aside>
-    );
-  }
-
-  if (!health) {
-    return (
-      <aside className="channel-picker channel-picker--loading">
-        <p className="channel-picker__loading">Loading channels…</p>
-      </aside>
-    );
-  }
-
-  const { mission, subsystem, channels_loaded } = health;
+export default function ChannelPicker({ allChannels, selected, onChange }: Props) {
+  const allSelected = allChannels.length > 0 && allChannels.every((ch) => selected.includes(ch));
 
   function toggle(channel: string) {
     if (selected.includes(channel)) {
@@ -47,23 +15,30 @@ export default function ChannelPicker({ selected, onChange }: Props) {
     }
   }
 
+  function toggleAll() {
+    if (allSelected) {
+      onChange([]);
+    } else {
+      onChange([...allChannels]);
+    }
+  }
+
   return (
     <aside className="channel-picker">
       <header className="channel-picker__header">
-        <span className="channel-picker__mission">{mission}</span>
-        <span className="channel-picker__sep">/</span>
-        <span className="channel-picker__subsystem">{subsystem}</span>
+        <label className="channel-picker__select-all">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            onChange={toggleAll}
+            aria-label="Select all channels"
+          />
+          All channels
+        </label>
       </header>
 
-      {selected.length > MAX_RECOMMENDED_CHANNELS && (
-        <div className="channel-picker__warn" role="alert">
-          Rendering {selected.length} live charts may be slow (recommended: ≤
-          {MAX_RECOMMENDED_CHANNELS}).
-        </div>
-      )}
-
       <ul className="channel-picker__list" role="listbox" aria-multiselectable>
-        {channels_loaded.map((ch) => {
+        {allChannels.map((ch) => {
           const isSelected = selected.includes(ch);
           return (
             <li

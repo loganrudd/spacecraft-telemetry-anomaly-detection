@@ -81,6 +81,7 @@ class TestHealthResponse:
             mission="ESA-Mission1",
             subsystem="subsystem_6",
             channels_loaded=["A-1", "A-2"],
+            channel_subsystems={"A-1": "subsystem_6", "A-2": "subsystem_6"},
             uptime_s=42.0,
             mlflow_tracking_uri="sqlite:///mlflow.db",
         )
@@ -94,6 +95,7 @@ class TestHealthResponse:
             mission="ESA-Mission1",
             subsystem="subsystem_6",
             channels_loaded=[],
+            channel_subsystems={},
             uptime_s=0.0,
             mlflow_tracking_uri="sqlite:///mlflow.db",
         )

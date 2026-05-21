@@ -84,3 +84,57 @@ describe("DriftStore", () => {
     expect(driftStore.latestForChannel("ch-a")?.percent_drifted).toBeCloseTo(0.8);
   });
 });
+
+describe("DriftStore — driftedSince", () => {
+  beforeEach(() => {
+    driftStore.clear();
+  });
+
+  it("returns null before any event", () => {
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBeNull();
+  });
+
+  it("records the first drifted event timestamp", () => {
+    push(makeEvent("ch-a", 0.5, false)); // drifted: true (pct >= 0.3)
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBe("2000-01-01T00:00:00Z");
+  });
+
+  it("does not overwrite driftedSince on subsequent drifted events", () => {
+    push(makeEvent("ch-a", 0.5, false));
+    // Push a second drifted event with a different timestamp
+    act(() => {
+      driftStore.push({
+        ...makeEvent("ch-a", 0.6, false),
+        timestamp: "2000-01-01T00:01:00Z",
+      });
+      driftStore.flushForTest();
+    });
+    // Still the first timestamp
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBe("2000-01-01T00:00:00Z");
+  });
+
+  it("clears driftedSince when a non-drifted event arrives", () => {
+    push(makeEvent("ch-a", 0.5, false)); // drifted
+    push(makeEvent("ch-a", 0.1, false)); // not drifted
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBeNull();
+  });
+
+  it("records a fresh timestamp after drift clears and restarts", () => {
+    push(makeEvent("ch-a", 0.5, false)); // first onset
+    push(makeEvent("ch-a", 0.1, false)); // clears
+    act(() => {
+      driftStore.push({
+        ...makeEvent("ch-a", 0.7, false),
+        timestamp: "2000-01-01T00:05:00Z",
+      });
+      driftStore.flushForTest();
+    });
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBe("2000-01-01T00:05:00Z");
+  });
+
+  it("clear resets driftedSince", () => {
+    push(makeEvent("ch-a", 0.5, false));
+    act(() => { driftStore.clear(); });
+    expect(driftStore.driftedSinceForChannel("ch-a")).toBeNull();
+  });
+});

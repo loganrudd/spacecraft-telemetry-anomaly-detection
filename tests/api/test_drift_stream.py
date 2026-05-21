@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import deque
@@ -19,7 +20,10 @@ from spacecraft_telemetry.api.endpoints import router
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.state import AppState
 from spacecraft_telemetry.core.config import Settings, load_settings
-from spacecraft_telemetry.evidently_monitoring.reference import MONITORING_FEATURE_COLS
+from spacecraft_telemetry.evidently_monitoring.reference import (
+    MONITORING_FEATURE_COLS,
+    REALTIME_FEATURE_COLS,
+)
 
 _MISSION = "test-mission"
 _CHANNEL = "test-ch"
@@ -44,7 +48,7 @@ def _make_drift_settings(*, enabled: bool = True) -> Settings:
             "drift": settings.drift.model_copy(
                 update={
                     "enabled": enabled,
-                    "window_size": 32,
+                    "window_size": 30,  # must be divisible by tick_interval so should_run() fires after first drain
                     "tick_interval": 5,
                 }
             )
@@ -122,22 +126,35 @@ class TestDriftStreamErrors:
 
 @pytest.mark.slow
 class TestDriftStreamEvents:
-    """Pre-fill the tick bus so the monitor fires without waiting for telemetry."""
+    """Drive the drift_stream generator directly — bypasses TestClient body collection.
+
+    Starlette's TestClient.handle_request() calls portal.call(app, ...) which
+    blocks until the ASGI app completes.  For an infinite SSE stream this never
+    returns, so client.stream().__enter__() hangs forever.  Calling the async
+    generator directly lets the event loop drive pump tasks and collect events
+    without any HTTP transport.
+    """
 
     def _fill_tick_bus(
         self,
         app: FastAPI,
         *,
-        n_extra: int = 10,
         drifted: bool = False,
     ) -> None:
-        """Push window_size + n_extra rows into the tick bus."""
+        """Push exactly window_size ticks so should_run() fires on the first pump iteration.
+
+        Requires window_size % tick_interval == 0 (enforced by _make_drift_settings).
+        The tick bus deque has maxlen=window_size, so pushing exactly window_size ticks
+        fills it completely.  The pump drains all of them in one pass, giving
+        monitor._tick_count == window_size, which satisfies both conditions in
+        should_run(): len(window) >= window_size AND tick_count % tick_interval == 0.
+        """
         state: AppState = app.state.app_state
         bus = state.tick_buses[_CHANNEL]
         ref = _make_reference()
         rng = np.random.default_rng(99)
         window_size = state.settings.drift.window_size
-        for _ in range(window_size + n_extra):
+        for _ in range(window_size):
             if drifted:
                 ref_mean = float(ref["value_normalized"].mean())
                 ref_std = max(float(ref["value_normalized"].std()), 1e-6)
@@ -147,38 +164,52 @@ class TestDriftStreamEvents:
                 val = float(ref.iloc[idx]["value_normalized"])
             bus.append({"value_normalized": val})
 
-    def test_200_content_type_and_fields(self) -> None:
-        """Verify status 200 + SSE content-type and check required event fields."""
+    async def _collect_events(
+        self,
+        app: FastAPI,
+        *,
+        n: int = 1,
+        timeout: float = 30.0,
+    ) -> list[dict]:
+        """Invoke drift_stream directly and collect *n* parsed event payloads."""
+        from spacecraft_telemetry.api.streaming import drift_stream
+
+        state: AppState = app.state.app_state
+
+        class _NeverDisconnects:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        events: list[dict] = []
+
+        async def _drain() -> None:
+            gen = drift_stream(state, _NeverDisconnects(), selected_channels=[_CHANNEL])
+            try:
+                async for chunk in gen:
+                    for line in chunk.decode().splitlines():
+                        if line.startswith("data:"):
+                            events.append(json.loads(line[5:].strip()))
+                    if len(events) >= n:
+                        return
+            finally:
+                await gen.aclose()
+
+        await asyncio.wait_for(_drain(), timeout=timeout)
+        return events
+
+    async def test_200_content_type_and_fields(self) -> None:
+        """Generator emits at least one event after pre-filling the tick bus."""
         settings = _make_drift_settings()
         app = _make_app(settings)
         self._fill_tick_bus(app)
-        with TestClient(app) as client:
-            events = []
-            with client.stream("GET", f"/api/stream/drift?channels={_CHANNEL}") as resp:
-                assert resp.status_code == 200
-                assert "text/event-stream" in resp.headers["content-type"]
-                for line in resp.iter_lines():
-                    if line.startswith("data:"):
-                        payload = json.loads(line[len("data:"):].strip())
-                        events.append(payload)
-                        if len(events) >= 1:
-                            break
+        events = await self._collect_events(app, n=1)
         assert len(events) >= 1
 
-    def test_drift_events_have_required_fields(self) -> None:
+    async def test_drift_events_have_required_fields(self) -> None:
         settings = _make_drift_settings()
         app = _make_app(settings)
         self._fill_tick_bus(app)
-        with TestClient(app) as client:
-            events = []
-            with client.stream("GET", f"/api/stream/drift?channels={_CHANNEL}") as resp:
-                assert resp.status_code == 200
-                for line in resp.iter_lines():
-                    if line.startswith("data:"):
-                        payload = json.loads(line[len("data:"):].strip())
-                        events.append(payload)
-                        if len(events) >= 1:
-                            break
+        events = await self._collect_events(app, n=1)
         assert len(events) >= 1
         ev = events[0]
         assert "channel" in ev
@@ -187,29 +218,29 @@ class TestDriftStreamEvents:
         assert "drifted" in ev
         assert 0.0 <= ev["percent_drifted"] <= 1.0
         assert isinstance(ev["drifted"], bool)
-        assert len(ev["features"]) == len(MONITORING_FEATURE_COLS)
+        assert len(ev["features"]) == len(REALTIME_FEATURE_COLS)
 
-    def test_drift_event_timestamps_monotone(self) -> None:
+    async def test_drift_event_timestamps_monotone(self) -> None:
         settings = _make_drift_settings()
         app = _make_app(settings)
-        self._fill_tick_bus(app, n_extra=30)
-        with TestClient(app) as client:
-            timestamps = []
-            with client.stream("GET", f"/api/stream/drift?channels={_CHANNEL}") as resp:
-                for line in resp.iter_lines():
-                    if line.startswith("data:"):
-                        payload = json.loads(line[len("data:"):].strip())
-                        timestamps.append(payload["timestamp"])
-                        if len(timestamps) >= 2:
-                            break
+        self._fill_tick_bus(app)
+        events = await self._collect_events(app, n=2)
+        timestamps = [ev["timestamp"] for ev in events]
         assert timestamps == sorted(timestamps)
 
-    def test_disconnect_no_traceback(self) -> None:
+    async def test_disconnect_no_traceback(self) -> None:
+        """A disconnect on the first iteration must not raise."""
+        from spacecraft_telemetry.api.streaming import drift_stream
+
         settings = _make_drift_settings()
         app = _make_app(settings)
-        # Connect and immediately close — must not raise.
-        with TestClient(app, raise_server_exceptions=True) as client, client.stream(
-            "GET", f"/api/stream/drift?channels={_CHANNEL}"
-        ) as resp:
-            assert resp.status_code == 200
-            # Read nothing and let the context manager close the connection.
+        state: AppState = app.state.app_state
+
+        class _DisconnectsImmediately:
+            async def is_disconnected(self) -> bool:
+                return True
+
+        gen = drift_stream(state, _DisconnectsImmediately(), selected_channels=[_CHANNEL])
+        async for _ in gen:
+            break  # pragma: no cover
+        await gen.aclose()

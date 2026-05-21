@@ -100,12 +100,19 @@ class TestCorrelationIdMiddleware:
 
 
 class TestLifespanFailure:
-    def test_lifespan_raises_when_no_channels(self) -> None:
+    def test_lifespan_raises_when_no_channels(self, tmp_path) -> None:
         """create_app() instantiation is fine; lifespan raises on empty registry."""
         settings = load_settings("test")
+        # Use a fresh empty database — mlflow.test.db may have accumulated
+        # models from previous training runs and is not hermetic for this test.
+        settings = settings.model_copy(
+            update={
+                "mlflow": settings.mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/empty.db"}
+                )
+            }
+        )
         app = create_app(settings)
-        # Entering the lifespan context (TestClient startup) should raise because
-        # there are no trained + scored channels in the test MLflow registry.
         with pytest.raises(RuntimeError), TestClient(app, raise_server_exceptions=True):
             pass  # pragma: no cover
 

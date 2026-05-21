@@ -63,13 +63,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     channel_subsystem_map = load_channel_subsystem_map(settings, settings.api.mission)
 
-    # TODO: add mission-wide fallback (discover all channels) when Mission2/Mission3
-    # support is needed — currently an absent channels.csv produces resolved=[] which
-    # hits the RuntimeError below with a clear message.
     if settings.api.channels:
         resolved = list(settings.api.channels)
         log.info("api.lifespan.channels.explicit", count=len(resolved))
-    else:
+    elif settings.api.subsystem is not None:
         resolved = [
             ch for ch, sub in channel_subsystem_map.items()
             if sub == settings.api.subsystem
@@ -79,21 +76,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             subsystem=settings.api.subsystem,
             count=len(resolved),
         )
+    else:
+        resolved = sorted(channel_subsystem_map.keys())
+        log.info("api.lifespan.channels.whole_mission", count=len(resolved))
 
-    engines: dict[str, ChannelInferenceEngine] = {}
-    for ch in resolved:
+    async def _load_engine(ch: str) -> tuple[str, ChannelInferenceEngine | None]:
         try:
             name = registered_model_name("telemanom", settings.api.mission, ch)
-            model, window_size = load_model_for_scoring(
-                name, device, settings.mlflow.tracking_uri
+            model, window_size = await asyncio.to_thread(
+                load_model_for_scoring, name, device, settings.mlflow.tracking_uri
             )
             model.eval()
-            params = load_scoring_params(
+            params = await asyncio.to_thread(
+                load_scoring_params,
                 channel=ch,
                 mission=settings.api.mission,
                 tracking_uri=settings.mlflow.tracking_uri,
             )
-            engines[ch] = ChannelInferenceEngine(
+            engine = ChannelInferenceEngine(
                 mission=settings.api.mission,
                 channel=ch,
                 model=model,
@@ -102,8 +102,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 device=device,
             )
             log.info("api.lifespan.channel.loaded", channel=ch, window_size=window_size)
+            return ch, engine
         except Exception as exc:
             log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
+            return ch, None
+
+    engine_results = await asyncio.gather(*[_load_engine(ch) for ch in resolved])
+    engines: dict[str, ChannelInferenceEngine] = {
+        ch: eng for ch, eng in engine_results if eng is not None
+    }
 
     replay_data: dict[str, ReplayData] = {}
     for ch in engines:
@@ -120,9 +127,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
 
     if not engines:
+        scope = (
+            f"subsystem={settings.api.subsystem!r}"
+            if settings.api.subsystem
+            else "whole mission"
+        )
         raise RuntimeError(
-            f"No channels loaded for mission={settings.api.mission!r} "
-            f"subsystem={settings.api.subsystem!r}. "
+            f"No channels loaded for mission={settings.api.mission!r} ({scope}). "
             "Train and score at least one channel first."
         )
 
@@ -131,11 +142,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     drift_monitors: dict[str, RollingDriftMonitor] = {}
     tick_buses: dict[str, deque[dict[str, float]]] = {}
     if settings.drift.enabled:
-        for ch in engines:
+        async def _load_drift_monitor(
+            ch: str,
+        ) -> tuple[str, RollingDriftMonitor | None]:
             prof_path = reference_profile_path(settings, settings.api.mission, ch)
             try:
                 ref = await asyncio.to_thread(load_reference_profile, prof_path)
-                drift_monitors[ch] = RollingDriftMonitor(
+                monitor = RollingDriftMonitor(
                     channel=ch,
                     reference=ref,
                     window_size=settings.drift.window_size,
@@ -143,10 +156,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     feature_drift_threshold=settings.drift.feature_drift_threshold,
                     channel_drift_threshold=settings.drift.subsystem_alert_threshold,
                 )
-                tick_buses[ch] = deque(maxlen=settings.drift.window_size)
                 log.info("api.lifespan.drift_monitor.loaded", channel=ch)
+                return ch, monitor
             except FileNotFoundError:
                 log.warning("api.lifespan.drift_monitor.missing_reference", channel=ch)
+                return ch, None
+
+        monitor_results = await asyncio.gather(
+            *[_load_drift_monitor(ch) for ch in engines]
+        )
+        for ch, monitor in monitor_results:
+            if monitor is not None:
+                drift_monitors[ch] = monitor
+                tick_buses[ch] = deque(maxlen=settings.drift.window_size)
     else:
         log.info("api.lifespan.drift.disabled")
 

@@ -7,6 +7,7 @@ const SAMPLE_HEALTH: HealthResponse = {
   mission: "ESA-Mission1",
   subsystem: "subsystem_6",
   channels_loaded: ["channel_12", "channel_13"],
+  channel_subsystems: { channel_12: "subsystem_6", channel_13: "subsystem_6" },
   uptime_s: 42.5,
   mlflow_tracking_uri: "sqlite:///mlflow.db",
 };

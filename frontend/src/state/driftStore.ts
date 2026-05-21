@@ -7,6 +7,9 @@ const NULL_EVENT: null = null;
 export class DriftStore {
   // Latest DriftEvent per channel (point-in-time snapshot; history lives in MLflow).
   private latest = new Map<string, DriftEvent>();
+  // Timestamp of the first event where drifted=true for each channel.
+  // Cleared when a drifted=false event arrives so the next drift onset gets a fresh time.
+  private driftedSince = new Map<string, string>();
   // Most recent subsystem-level aggregation fields (populated periodically by the server).
   private subsystemPct: number | null = null;
   private subsystemAlert = false;
@@ -18,6 +21,11 @@ export class DriftStore {
 
   push(event: DriftEvent): void {
     this.latest.set(event.channel, event);
+    if (event.drifted && !this.driftedSince.has(event.channel)) {
+      this.driftedSince.set(event.channel, event.timestamp);
+    } else if (!event.drifted) {
+      this.driftedSince.delete(event.channel);
+    }
     if (event.subsystem_percent_drifted !== null) {
       this.subsystemPct = event.subsystem_percent_drifted;
       this.subsystemAlert = event.subsystem_alert;
@@ -35,6 +43,10 @@ export class DriftStore {
     return this.latest.get(channel) ?? NULL_EVENT;
   }
 
+  driftedSinceForChannel(channel: string): string | null {
+    return this.driftedSince.get(channel) ?? NULL_EVENT;
+  }
+
   subsystemPercent(): number | null {
     return this.subsystemPct;
   }
@@ -45,6 +57,7 @@ export class DriftStore {
 
   clear(): void {
     this.latest.clear();
+    this.driftedSince.clear();
     this.subsystemPct = null;
     this.subsystemAlert = false;
     this.notify();
@@ -72,6 +85,14 @@ export function useChannelDrift(channel: string): DriftEvent | null {
   return useSyncExternalStore(
     (cb) => driftStore.subscribe(cb),
     () => driftStore.latestForChannel(channel),
+    () => NULL_EVENT,
+  );
+}
+
+export function useDriftedSince(channel: string): string | null {
+  return useSyncExternalStore(
+    (cb) => driftStore.subscribe(cb),
+    () => driftStore.driftedSinceForChannel(channel),
     () => NULL_EVENT,
   );
 }
