@@ -1,8 +1,6 @@
 import DriftFeatureBar from "./DriftFeatureBar";
 import { useChannelDrift, useDriftedSince, useSubsystemDrift } from "../state/driftStore";
 
-const ALERT_THRESHOLD = 0.3;
-
 type Props = {
   channels: string[];
   disabled?: boolean;
@@ -24,7 +22,7 @@ function SubsystemGauge() {
           </span>
           <div className="drift-panel__gauge-bar">
             <div
-              className={`drift-panel__gauge-fill${pct / 100 >= ALERT_THRESHOLD ? " drift-panel__gauge-fill--alert" : ""}`}
+              className={`drift-panel__gauge-fill${alert ? " drift-panel__gauge-fill--alert" : ""}`}
               style={{ width: `${pct}%` }}
             />
           </div>
