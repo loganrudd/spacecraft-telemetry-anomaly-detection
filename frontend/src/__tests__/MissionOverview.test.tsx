@@ -198,6 +198,28 @@ describe("MissionOverview", () => {
     expect(screen.getByText(/2 anomalies/)).toBeInTheDocument();
   });
 
+  it("shows drift badge even when a drifted channel also has an anomaly", () => {
+    vi.mocked(useSubsystemRollup).mockReturnValue(
+      makeRollup({
+        subsystem_1: {
+          channel_1: { anomaly: true, drifted: true },
+          channel_2: {},
+        },
+        subsystem_2: { channel_3: {} },
+      }),
+    );
+    render(
+      <MissionOverview
+        mission="ESA-Mission1"
+        channelSubsystems={CHANNEL_SUBSYSTEMS}
+        onEnterSubsystem={() => {}}
+      />,
+    );
+    // Both badges should be visible — drift is independent of anomaly in the summary.
+    expect(screen.getByText(/1 anomaly/)).toBeInTheDocument();
+    expect(screen.getByText(/drift on 1/)).toBeInTheDocument();
+  });
+
   it("shows nominal badge when no anomalies or drift", () => {
     render(
       <MissionOverview

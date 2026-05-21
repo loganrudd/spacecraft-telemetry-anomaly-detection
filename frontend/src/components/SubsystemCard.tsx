@@ -17,7 +17,7 @@ export default function SubsystemCard({
     a.localeCompare(b),
   );
   const anomalyCount = channelList.filter(([, s]) => s.anomaly).length;
-  const driftCount = channelList.filter(([, s]) => s.drifted && !s.anomaly).length;
+  const driftCount = channelList.filter(([, s]) => s.drifted).length;
 
   return (
     <div
