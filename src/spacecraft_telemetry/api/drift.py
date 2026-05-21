@@ -27,7 +27,7 @@ from evidently.legacy.metric_preset import DataDriftPreset
 from evidently.legacy.pipeline.column_mapping import ColumnMapping
 from evidently.legacy.report import Report
 
-from spacecraft_telemetry.evidently_monitoring.reference import MONITORING_FEATURE_COLS
+from spacecraft_telemetry.evidently_monitoring.reference import REALTIME_FEATURE_COLS
 
 
 @dataclass
@@ -79,24 +79,24 @@ class RollingDriftMonitor:
         channel_drift_threshold: float,
     ) -> None:
         self._channel = channel
-        self._reference = reference[MONITORING_FEATURE_COLS].copy()
+        self._reference = reference[REALTIME_FEATURE_COLS].copy()
         self._window: deque[dict[str, float]] = deque(maxlen=window_size)
         self._window_size = window_size
         self._tick_interval = tick_interval
         self._feature_drift_threshold = feature_drift_threshold
         self._channel_drift_threshold = channel_drift_threshold
         self._tick_count: int = 0
-        self._col_mapping = ColumnMapping(numerical_features=MONITORING_FEATURE_COLS)
+        self._col_mapping = ColumnMapping(numerical_features=REALTIME_FEATURE_COLS)
 
     def push(self, row: dict[str, float]) -> None:
-        """Append one tick's monitoring-schema values to the rolling window.
+        """Append one tick's values to the rolling window.
 
         Args:
-            row: Mapping of MONITORING_FEATURE_COLS column names to float values.
-                 Extra keys are silently ignored; missing keys produce NaN in the
-                 Evidently current DataFrame (Evidently handles NaN gracefully).
+            row: At minimum ``{"value_normalized": float}``.  ``rate_of_change``
+                 is recomputed from value_normalized inside ``_compute_drift``
+                 so it does not need to be supplied here.
         """
-        self._window.append({col: row.get(col, float("nan")) for col in MONITORING_FEATURE_COLS})
+        self._window.append({col: row.get(col, float("nan")) for col in REALTIME_FEATURE_COLS})
         self._tick_count += 1
 
     def should_run(self) -> bool:
@@ -121,8 +121,22 @@ class RollingDriftMonitor:
         current = pd.DataFrame(list(self._window))
         return await asyncio.to_thread(self._compute_drift, current)
 
+    @staticmethod
+    def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Fill rate_of_change from value_normalized.
+
+        The tick bus only pushes value_normalized; rate_of_change is derived here
+        so Evidently receives a non-NaN column.  Rolling stats (rolling_mean_*, etc.)
+        are deliberately excluded from real-time comparison — their distributions are
+        only reliable when the buffer is much longer than the rolling window period,
+        which cannot be guaranteed at serve time.  See REALTIME_FEATURE_COLS.
+        """
+        df["rate_of_change"] = df["value_normalized"].diff().fillna(0.0)
+        return df
+
     def _compute_drift(self, current: pd.DataFrame) -> DriftSnapshot:
         """Run Evidently synchronously — called from a thread pool worker."""
+        current = self._add_rolling_features(current)
         report = Report(metrics=[DataDriftPreset()])
         with warnings.catch_warnings():
             # Evidently triggers numpy divide-by-zero warnings on constant-value
@@ -131,7 +145,7 @@ class RollingDriftMonitor:
             warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
             report.run(
                 reference_data=self._reference,
-                current_data=current[MONITORING_FEATURE_COLS],
+                current_data=current[REALTIME_FEATURE_COLS],
                 column_mapping=self._col_mapping,
             )
 
@@ -139,7 +153,7 @@ class RollingDriftMonitor:
         drift_table = by_name["DataDriftTable"]["drift_by_columns"]
 
         features: list[FeatureDrift] = []
-        for col in MONITORING_FEATURE_COLS:
+        for col in REALTIME_FEATURE_COLS:
             col_info = drift_table.get(col, {})
             score = float(col_info.get("drift_score", 0.0))
             drifted = bool(col_info.get("drift_detected", False))

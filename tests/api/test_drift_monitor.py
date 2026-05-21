@@ -7,22 +7,36 @@ import pandas as pd
 import pytest
 
 from spacecraft_telemetry.api.drift import DriftSnapshot, FeatureDrift, RollingDriftMonitor
-from spacecraft_telemetry.evidently_monitoring.reference import MONITORING_FEATURE_COLS
+from spacecraft_telemetry.evidently_monitoring.reference import (
+    MONITORING_FEATURE_COLS,
+    REALTIME_FEATURE_COLS,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-_N_FEATURES = len(MONITORING_FEATURE_COLS)
+_N_FEATURES = len(REALTIME_FEATURE_COLS)  # 2: value_normalized + rate_of_change
 _WINDOW_SIZE = 64
 _TICK_INTERVAL = 10
 
 
 def _make_reference(n_rows: int = 500, seed: int = 0) -> pd.DataFrame:
-    """Build a synthetic reference DataFrame matching MONITORING_FEATURE_COLS."""
+    """Build a synthetic reference DataFrame matching MONITORING_FEATURE_COLS.
+
+    The monitor subsets to REALTIME_FEATURE_COLS internally, so all 14 columns
+    must be present here (as they would be in a real reference.parquet).
+    """
     rng = np.random.default_rng(seed)
-    data = {col: rng.standard_normal(n_rows).astype(float) for col in MONITORING_FEATURE_COLS}
-    return pd.DataFrame(data)
+    v = pd.Series(rng.standard_normal(n_rows).astype(float))
+    df = pd.DataFrame({"value_normalized": v})
+    for w in (10, 50, 100):
+        df[f"rolling_mean_{w}"] = v.rolling(w, min_periods=1).mean()
+        df[f"rolling_std_{w}"]  = v.rolling(w, min_periods=2).std().fillna(0.0)
+        df[f"rolling_min_{w}"]  = v.rolling(w, min_periods=1).min()
+        df[f"rolling_max_{w}"]  = v.rolling(w, min_periods=1).max()
+    df["rate_of_change"] = v.diff().fillna(0.0)
+    return df
 
 
 def _make_monitor(
@@ -42,16 +56,20 @@ def _make_monitor(
 
 
 def _nominal_row(reference: pd.DataFrame, rng: np.random.Generator) -> dict[str, float]:
-    """Sample one row from the reference distribution (no drift)."""
+    """Sample value_normalized from the reference distribution (no drift).
+
+    Only value_normalized is pushed — rolling features are recomputed by
+    _add_rolling_features inside _compute_drift.
+    """
     idx = int(rng.integers(0, len(reference)))
-    return {col: float(reference.iloc[idx][col]) for col in MONITORING_FEATURE_COLS}
+    return {"value_normalized": float(reference.iloc[idx]["value_normalized"])}
 
 
 def _drifted_row(reference: pd.DataFrame) -> dict[str, float]:
-    """Return a row shifted far from the reference mean (+5 std)."""
-    ref_mean = reference[MONITORING_FEATURE_COLS].mean()
-    ref_std = reference[MONITORING_FEATURE_COLS].std().clip(lower=1e-6)
-    return {col: float(ref_mean[col] + 5.0 * ref_std[col]) for col in MONITORING_FEATURE_COLS}
+    """Return value_normalized shifted far from the reference mean (+5 std)."""
+    ref_mean = float(reference["value_normalized"].mean())
+    ref_std = max(float(reference["value_normalized"].std()), 1e-6)
+    return {"value_normalized": ref_mean + 5.0 * ref_std}
 
 
 # ---------------------------------------------------------------------------
