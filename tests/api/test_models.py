@@ -206,7 +206,7 @@ class TestDriftEvent:
         assert event.drifted is True
         assert event.percent_drifted == pytest.approx(0.5)
         assert event.subsystem_percent_drifted is None
-        assert event.subsystem_alert is False
+        assert event.subsystem_alert is None
 
     def test_optional_subsystem_fields(self) -> None:
         event = DriftEvent(

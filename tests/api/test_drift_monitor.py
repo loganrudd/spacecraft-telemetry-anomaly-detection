@@ -206,9 +206,12 @@ async def test_full_nan_window_does_not_raise() -> None:
     for _ in range(_WINDOW_SIZE):
         monitor.push({})  # all keys missing → all NaN
     snapshot = await monitor.run()
-    # Must return a snapshot, not None (window is full).
+    # Evidently raises ValueError on all-NaN columns; _compute_drift catches it
+    # and returns a zero-score, non-drifted snapshot so the pump task survives.
     assert isinstance(snapshot, DriftSnapshot)
     assert len(snapshot.features) == _N_FEATURES
-    # NaN scores come through as 0.0 after float() coercion in _compute_drift.
+    assert snapshot.drifted is False
+    assert snapshot.percent_drifted == pytest.approx(0.0)
     for f in snapshot.features:
-        assert isinstance(f.score, float)
+        assert f.score == pytest.approx(0.0)
+        assert f.drifted is False

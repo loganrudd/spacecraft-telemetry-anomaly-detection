@@ -142,21 +142,39 @@ class RollingDriftMonitor:
         report = Report(
             metrics=[DataDriftPreset(num_stattest_threshold=self._feature_drift_threshold)]
         )
-        with warnings.catch_warnings():
-            # Evidently triggers numpy divide-by-zero warnings on constant-value
-            # columns (zero variance).  These are benign and would spam logs at
-            # every drift evaluation for flat-signal channels.
-            warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
-            report.run(
-                reference_data=self._reference,
-                current_data=current[REALTIME_FEATURE_COLS],
-                column_mapping=self._col_mapping,
+        try:
+            with warnings.catch_warnings():
+                # Evidently triggers numpy divide-by-zero warnings on constant-value
+                # columns (zero variance).  These are benign and would spam logs at
+                # every drift evaluation for flat-signal channels.
+                warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
+                report.run(
+                    reference_data=self._reference,
+                    current_data=current[REALTIME_FEATURE_COLS],
+                    column_mapping=self._col_mapping,
+                )
+            # Evidently defers computation errors until as_dict() is called —
+            # report.run() succeeds but raises on result extraction.
+            by_name = {m["metric"]: m["result"] for m in report.as_dict()["metrics"]}
+        except ValueError:
+            # Raised when a column is entirely NaN (e.g. a channel that has
+            # flat-lined and produced no valid readings for the entire window).
+            # Return a zero-score, non-drifted snapshot so the pump task survives.
+            features = [
+                FeatureDrift(feature=col, score=0.0, drifted=False)
+                for col in REALTIME_FEATURE_COLS
+            ]
+            return DriftSnapshot(
+                timestamp=datetime.now(UTC),
+                channel=self._channel,
+                features=features,
+                percent_drifted=0.0,
+                drifted=False,
             )
 
-        by_name = {m["metric"]: m["result"] for m in report.as_dict()["metrics"]}
         drift_table = by_name["DataDriftTable"]["drift_by_columns"]
 
-        features: list[FeatureDrift] = []
+        features = []
         for col in REALTIME_FEATURE_COLS:
             col_info = drift_table.get(col, {})
             score = float(col_info.get("drift_score", 0.0))
