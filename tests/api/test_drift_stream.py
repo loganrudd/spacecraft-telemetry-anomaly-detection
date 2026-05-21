@@ -212,13 +212,18 @@ class TestDriftStreamEvents:
         events = await self._collect_events(app, n=1)
         assert len(events) >= 1
         ev = events[0]
-        assert "channel" in ev
+        # Per-channel fields always present.
+        assert ev["channel"] == _CHANNEL
+        assert ev["mission"] == _MISSION
         assert "features" in ev
         assert "percent_drifted" in ev
         assert "drifted" in ev
         assert 0.0 <= ev["percent_drifted"] <= 1.0
         assert isinstance(ev["drifted"], bool)
         assert len(ev["features"]) == len(REALTIME_FEATURE_COLS)
+        # Subsystem fields are None on per-channel events (not a summary tick).
+        assert ev["subsystem_percent_drifted"] is None
+        assert ev["subsystem_alert"] is None
 
     async def test_drift_event_timestamps_monotone(self) -> None:
         settings = _make_drift_settings()
@@ -226,7 +231,11 @@ class TestDriftStreamEvents:
         self._fill_tick_bus(app)
         events = await self._collect_events(app, n=2)
         timestamps = [ev["timestamp"] for ev in events]
-        assert timestamps == sorted(timestamps)
+        # Strict monotone — equal timestamps would mean the clock is frozen.
+        for i in range(len(timestamps) - 1):
+            assert timestamps[i] <= timestamps[i + 1], (
+                f"timestamp[{i}]={timestamps[i]} > timestamp[{i + 1}]={timestamps[i + 1]}"
+            )
 
     async def test_disconnect_no_traceback(self) -> None:
         """A disconnect on the first iteration must not raise."""
