@@ -48,7 +48,7 @@ def _make_drift_settings(*, enabled: bool = True) -> Settings:
             "drift": settings.drift.model_copy(
                 update={
                     "enabled": enabled,
-                    "window_size": 30,  # must be divisible by tick_interval so should_run() fires after first drain
+                    "window_size": 30,  # divisible by tick_interval → should_run() fires
                     "tick_interval": 5,
                 }
             )
@@ -72,7 +72,7 @@ def _make_app(settings: Settings, *, drift_enabled: bool = True) -> FastAPI:
             window_size=settings.drift.window_size,
             tick_interval=settings.drift.tick_interval,
             feature_drift_threshold=settings.drift.feature_drift_threshold,
-            channel_drift_threshold=settings.drift.subsystem_alert_threshold,
+            channel_drift_threshold=settings.drift.drift_alert_threshold,
         )
         drift_monitors[_CHANNEL] = monitor
         tick_buses[_CHANNEL] = deque(maxlen=settings.drift.window_size)

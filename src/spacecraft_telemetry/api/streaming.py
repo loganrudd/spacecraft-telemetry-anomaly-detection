@@ -238,7 +238,7 @@ async def drift_stream(
                         if typed:
                             n_drifted = sum(1 for s in typed.values() if s.drifted)
                             sub_pct = n_drifted / len(typed)
-                            sub_alert = sub_pct >= state.settings.drift.subsystem_alert_threshold
+                            sub_alert = sub_pct >= state.settings.drift.drift_alert_threshold
 
                     event = DriftEvent(
                         timestamp=snapshot.timestamp,

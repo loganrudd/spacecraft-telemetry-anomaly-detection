@@ -8,7 +8,7 @@ data:
   missions:
     - ESA-Mission1
   sample_fraction: 0.001
-  sample_channels: 2
+  sample_channels: 22
 
 logging:
   level: WARNING
@@ -70,7 +70,7 @@ drift:
   window_size: 32
   tick_interval: 5
   feature_drift_threshold: 0.05
-  subsystem_alert_threshold: 0.30
+  drift_alert_threshold: 0.30
   reference_profiles_dir: monitoring/reference_profiles
 
 api:

@@ -64,8 +64,10 @@ class RollingDriftMonitor:
         reference:               Reference-profile DataFrame (MONITORING_FEATURE_COLS columns).
         window_size:             Rolling window capacity in ticks.
         tick_interval:           Number of ticks between Evidently runs.
-        feature_drift_threshold: Fraction of features that must drift to flag the channel.
-        channel_drift_threshold: Per-feature drift threshold (Evidently threshold parameter).
+        feature_drift_threshold: KS test p-value threshold passed to Evidently's
+                                 ``DataDriftPreset(num_stattest_threshold=...)``.
+                                 Lower values = stricter per-feature drift detection.
+        channel_drift_threshold: Fraction of features that must drift to flag the channel.
     """
 
     def __init__(
@@ -137,7 +139,9 @@ class RollingDriftMonitor:
     def _compute_drift(self, current: pd.DataFrame) -> DriftSnapshot:
         """Run Evidently synchronously — called from a thread pool worker."""
         current = self._add_rolling_features(current)
-        report = Report(metrics=[DataDriftPreset()])
+        report = Report(
+            metrics=[DataDriftPreset(num_stattest_threshold=self._feature_drift_threshold)]
+        )
         with warnings.catch_warnings():
             # Evidently triggers numpy divide-by-zero warnings on constant-value
             # columns (zero variance).  These are benign and would spam logs at

@@ -524,7 +524,7 @@ class TestDriftConfig:
         assert cfg.window_size == 256
         assert cfg.tick_interval == 60
         assert cfg.feature_drift_threshold == pytest.approx(0.05)
-        assert cfg.subsystem_alert_threshold == pytest.approx(0.30)
+        assert cfg.drift_alert_threshold == pytest.approx(0.30)
 
     def test_window_size_must_be_positive(self) -> None:
         with pytest.raises(ValueError, match="must be >= 1"):
@@ -540,11 +540,11 @@ class TestDriftConfig:
         with pytest.raises(ValueError, match="must be in"):
             DriftConfig(feature_drift_threshold=1.0)
 
-    def test_subsystem_alert_threshold_bounds(self) -> None:
+    def test_drift_alert_threshold_bounds(self) -> None:
         with pytest.raises(ValueError, match="must be in"):
-            DriftConfig(subsystem_alert_threshold=0.0)
+            DriftConfig(drift_alert_threshold=0.0)
         with pytest.raises(ValueError, match="must be in"):
-            DriftConfig(subsystem_alert_threshold=1.0)
+            DriftConfig(drift_alert_threshold=1.0)
 
     def test_test_yaml_disables_drift(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SPACECRAFT_DRIFT__ENABLED", raising=False)

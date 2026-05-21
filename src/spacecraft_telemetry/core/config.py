@@ -317,10 +317,14 @@ class DriftConfig(BaseModel):
     # Run Evidently every N telemetry ticks per channel.
     # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
     tick_interval: int = 60
-    # Fraction of a channel's features that must drift to flag the channel as drifted.
+    # KS test p-value threshold passed to Evidently DataDriftPreset for per-feature
+    # drift detection. Consistent between batch (reports.py) and real-time (drift.py).
     feature_drift_threshold: float = 0.05
-    # Fraction of drifted channels at which a subsystem-level alert fires.
-    subsystem_alert_threshold: float = 0.30
+    # Shared alert threshold used at two levels:
+    #   1. Channel level: fraction of features drifted → channel flagged as drifted.
+    #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.
+    # One knob keeps both levels consistent; tune it to change overall sensitivity.
+    drift_alert_threshold: float = 0.30
     reference_profiles_dir: Path = Path("monitoring/reference_profiles")
 
     @field_validator("window_size", "tick_interval")
@@ -330,7 +334,7 @@ class DriftConfig(BaseModel):
             raise ValueError(f"must be >= 1, got {v}")
         return v
 
-    @field_validator("feature_drift_threshold", "subsystem_alert_threshold")
+    @field_validator("feature_drift_threshold", "drift_alert_threshold")
     @classmethod
     def threshold_in_range(cls, v: float) -> float:
         if not 0.0 < v < 1.0:

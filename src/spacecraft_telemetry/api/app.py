@@ -154,7 +154,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     window_size=settings.drift.window_size,
                     tick_interval=settings.drift.tick_interval,
                     feature_drift_threshold=settings.drift.feature_drift_threshold,
-                    channel_drift_threshold=settings.drift.subsystem_alert_threshold,
+                    channel_drift_threshold=settings.drift.drift_alert_threshold,
                 )
                 log.info("api.lifespan.drift_monitor.loaded", channel=ch)
                 return ch, monitor
