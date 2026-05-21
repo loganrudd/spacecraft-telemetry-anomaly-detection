@@ -37,7 +37,7 @@ class AppState:
 
     settings: Settings
     mission: str
-    subsystem: str
+    subsystem: str | None  # None when serving the whole mission
     device: torch.device
     engines: MappingProxyType[str, Any]  # values: ChannelInferenceEngine
     channel_subsystem_map: MappingProxyType[str, str]

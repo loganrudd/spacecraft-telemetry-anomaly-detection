@@ -14,7 +14,15 @@ import { useTelemetryChannel } from "../state/telemetryStore";
 import { collapseFlags } from "../utils/anomalyIntervals";
 import type { TelemetryEvent } from "../api/types";
 
-type Props = { channel: string };
+type DensityTier = "comfortable" | "compact" | "dense";
+
+const CHART_HEIGHTS: Record<DensityTier, number> = {
+  comfortable: 220,
+  compact: 150,
+  dense: 100,
+};
+
+type Props = { channel: string; density?: DensityTier };
 
 function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
   if (!active || !payload?.length) return null;
@@ -37,15 +45,16 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
   );
 }
 
-function TelemetryChart({ channel }: Props) {
+function TelemetryChart({ channel, density = "comfortable" }: Props) {
   const events = useTelemetryChannel(channel);
 
   const trueIntervals = collapseFlags(events, "is_anomaly");
   const predIntervals = collapseFlags(events, "is_anomaly_predicted");
+  const chartHeight = CHART_HEIGHTS[density];
 
   if (events.length === 0) {
     return (
-      <section className="telemetry-chart">
+      <section className={`telemetry-chart telemetry-chart--${density}`}>
         <h2 className="telemetry-chart__title">{channel}</h2>
         <p className="telemetry-chart__waiting">Waiting for data…</p>
       </section>
@@ -53,9 +62,9 @@ function TelemetryChart({ channel }: Props) {
   }
 
   return (
-    <section className="telemetry-chart">
+    <section className={`telemetry-chart telemetry-chart--${density}`}>
       <h2 className="telemetry-chart__title">{channel}</h2>
-      <ResponsiveContainer width="100%" height={220}>
+      <ResponsiveContainer width="100%" height={chartHeight}>
         <LineChart
           data={events}
           margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
@@ -66,14 +75,14 @@ function TelemetryChart({ channel }: Props) {
             axisLine={{ stroke: "var(--border)" }}
           />
           <YAxis
-            width={52}
-            tick={{ fill: "var(--fg-muted)", fontSize: 11 }}
+            width={density === "dense" ? 36 : 52}
+            tick={{ fill: "var(--fg-muted)", fontSize: density === "dense" ? 9 : 11 }}
             axisLine={{ stroke: "var(--border)" }}
           />
-          <Tooltip content={<CustomTooltip />} />
-          <Legend
-            wrapperStyle={{ fontSize: 11, color: "var(--fg-muted)" }}
-          />
+          {density !== "dense" && <Tooltip content={<CustomTooltip />} />}
+          {density === "comfortable" && (
+            <Legend wrapperStyle={{ fontSize: 11, color: "var(--fg-muted)" }} />
+          )}
 
           {/* Ground-truth anomaly bands (labeled, red) */}
           {trueIntervals.map((iv, i) => (

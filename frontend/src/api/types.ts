@@ -14,8 +14,9 @@ export type TelemetryEvent = {
 export type HealthResponse = {
   status: "ok" | "degraded";
   mission: string;
-  subsystem: string;
+  subsystem: string | null;
   channels_loaded: string[];
+  channel_subsystems: Record<string, string>; // channel_id → subsystem name
   uptime_s: number;
   mlflow_tracking_uri: string;
 };

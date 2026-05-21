@@ -64,12 +64,18 @@ async def health(request: Request) -> JSONResponse:
                 "detail": "no channels loaded",
             },
         )
+    loaded = set(state.channels_loaded)
     return JSONResponse(
         content=HealthResponse(
             status="ok",
             mission=state.mission,
             subsystem=state.subsystem,
             channels_loaded=state.channels_loaded,
+            channel_subsystems={
+                ch: sub
+                for ch, sub in state.channel_subsystem_map.items()
+                if ch in loaded
+            },
             uptime_s=state.uptime_seconds(),
             mlflow_tracking_uri=state.mlflow_tracking_uri,
         ).model_dump(),

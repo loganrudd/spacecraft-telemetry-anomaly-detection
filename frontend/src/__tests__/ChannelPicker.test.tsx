@@ -1,84 +1,66 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import ChannelPicker from "../components/ChannelPicker";
-import type { HealthResponse } from "../api/types";
-import { fetchHealth } from "../api/health";
 
-vi.mock("../api/health");
-
-const mockFetchHealth = vi.mocked(fetchHealth);
-
-const HEALTH: HealthResponse = {
-  status: "ok",
-  mission: "ESA-Mission1",
-  subsystem: "subsystem_6",
-  channels_loaded: ["channel_12", "channel_13", "channel_14"],
-  uptime_s: 10,
-  mlflow_tracking_uri: "sqlite:///mlflow.db",
-};
+const CHANNELS = ["channel_12", "channel_13", "channel_14"];
 
 describe("ChannelPicker", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it("shows loading state initially", () => {
-    mockFetchHealth.mockReturnValue(new Promise(() => {})); // never resolves
-    render(<ChannelPicker selected={[]} onChange={() => {}} />);
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
-  });
-
-  it("renders channel list after health loads", async () => {
-    mockFetchHealth.mockResolvedValueOnce(HEALTH);
-    render(<ChannelPicker selected={[]} onChange={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByText("channel_12")).toBeInTheDocument(),
-    );
+  it("renders all channels in the list", () => {
+    render(<ChannelPicker allChannels={CHANNELS} selected={[]} onChange={() => {}} />);
+    expect(screen.getByText("channel_12")).toBeInTheDocument();
     expect(screen.getByText("channel_13")).toBeInTheDocument();
     expect(screen.getByText("channel_14")).toBeInTheDocument();
   });
 
-  it("shows mission and subsystem in header", async () => {
-    mockFetchHealth.mockResolvedValueOnce(HEALTH);
-    render(<ChannelPicker selected={[]} onChange={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByText("ESA-Mission1")).toBeInTheDocument(),
+  it("marks selected channels as active", () => {
+    render(
+      <ChannelPicker
+        allChannels={CHANNELS}
+        selected={["channel_12"]}
+        onChange={() => {}}
+      />,
     );
-    expect(screen.getByText("subsystem_6")).toBeInTheDocument();
+    const item = screen.getByText("channel_12").closest("li");
+    expect(item?.className).toContain("channel-picker__item--active");
   });
 
-  it("calls onChange when a channel is clicked", async () => {
-    mockFetchHealth.mockResolvedValueOnce(HEALTH);
+  it("calls onChange with added channel when an unselected channel is clicked", () => {
     const onChange = vi.fn();
-    render(<ChannelPicker selected={[]} onChange={onChange} />);
-    await waitFor(() =>
-      expect(screen.getByText("channel_12")).toBeInTheDocument(),
+    render(
+      <ChannelPicker allChannels={CHANNELS} selected={[]} onChange={onChange} />,
     );
     fireEvent.click(screen.getByText("channel_12"));
     expect(onChange).toHaveBeenCalledWith(["channel_12"]);
   });
 
-  it("shows performance warning when >5 channels selected", async () => {
-    mockFetchHealth.mockResolvedValueOnce({
-      ...HEALTH,
-      channels_loaded: ["ch-1", "ch-2", "ch-3", "ch-4", "ch-5", "ch-6", "ch-7"],
-    });
+  it("calls onChange removing channel when a selected channel is clicked", () => {
+    const onChange = vi.fn();
     render(
       <ChannelPicker
-        selected={["ch-1", "ch-2", "ch-3", "ch-4", "ch-5", "ch-6"]}
-        onChange={() => {}}
+        allChannels={CHANNELS}
+        selected={["channel_12"]}
+        onChange={onChange}
       />,
     );
-    await waitFor(() =>
-      expect(screen.getByRole("alert")).toBeInTheDocument(),
-    );
+    fireEvent.click(screen.getByText("channel_12"));
+    expect(onChange).toHaveBeenCalledWith([]);
   });
 
-  it("shows error message when fetchHealth fails", async () => {
-    mockFetchHealth.mockRejectedValueOnce(new Error("503 Service Unavailable"));
-    render(<ChannelPicker selected={[]} onChange={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByText(/503/)).toBeInTheDocument(),
+  it("select-all checkbox selects all channels", () => {
+    const onChange = vi.fn();
+    render(
+      <ChannelPicker allChannels={CHANNELS} selected={[]} onChange={onChange} />,
     );
+    fireEvent.click(screen.getByLabelText("Select all channels"));
+    expect(onChange).toHaveBeenCalledWith(CHANNELS);
+  });
+
+  it("select-all checkbox deselects all when all are selected", () => {
+    const onChange = vi.fn();
+    render(
+      <ChannelPicker allChannels={CHANNELS} selected={CHANNELS} onChange={onChange} />,
+    );
+    fireEvent.click(screen.getByLabelText("Select all channels"));
+    expect(onChange).toHaveBeenCalledWith([]);
   });
 });

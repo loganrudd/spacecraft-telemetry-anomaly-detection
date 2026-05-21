@@ -10,6 +10,9 @@ type Props = {
   eventsPerSecond: number;
   speed: Speed;
   onSpeedChange: (speed: Speed) => void;
+  mission: string | null;
+  subsystem: string | null;
+  onBackToOverview: () => void;
 };
 
 const STATE_LABELS: Record<ConnectionState, string> = {
@@ -31,6 +34,9 @@ export default function StatusBar({
   eventsPerSecond,
   speed,
   onSpeedChange,
+  mission,
+  subsystem,
+  onBackToOverview,
 }: Props) {
   const [uptime, setUptime] = useState<number | null>(null);
   const [apiOnline, setApiOnline] = useState(true);
@@ -54,7 +60,23 @@ export default function StatusBar({
 
   return (
     <header className="status-bar">
-      <span className="status-bar__title">Spacecraft Telemetry Dashboard</span>
+      <span className="status-bar__title">
+        {mission && subsystem ? (
+          <>
+            <button
+              className="status-bar__back"
+              onClick={onBackToOverview}
+              aria-label="Back to mission overview"
+            >
+              ← {mission}
+            </button>
+            <span className="status-bar__sep"> / </span>
+            <span className="status-bar__subsystem">{subsystem}</span>
+          </>
+        ) : (
+          "Spacecraft Telemetry Dashboard"
+        )}
+      </span>
       <span
         className="status-bar__conn"
         style={{ color: STATE_COLORS[connectionState] }}

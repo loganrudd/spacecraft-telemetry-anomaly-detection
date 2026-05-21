@@ -28,8 +28,9 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok", "degraded"]
     mission: str
-    subsystem: str
+    subsystem: str | None  # None when serving whole mission
     channels_loaded: list[str]
+    channel_subsystems: dict[str, str]  # channel_id → subsystem name
     uptime_s: float
     mlflow_tracking_uri: str
 

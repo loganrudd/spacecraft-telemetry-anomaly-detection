@@ -421,7 +421,7 @@ class TestApiConfig:
         assert cfg.host == "127.0.0.1"
         assert cfg.port == 8000
         assert cfg.mission == "ESA-Mission1"
-        assert cfg.subsystem == "subsystem_6"
+        assert cfg.subsystem is None
         assert cfg.channels == []
         assert cfg.replay_speed_default == 10.0
         assert cfg.replay_tick_interval_seconds == 1.0
