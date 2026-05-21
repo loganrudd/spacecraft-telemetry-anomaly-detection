@@ -182,3 +182,33 @@ async def test_run_returns_snapshot_when_nominal() -> None:
     assert isinstance(snapshot, DriftSnapshot)
     assert snapshot.drifted is False
     assert snapshot.percent_drifted < 0.30
+
+
+def test_col_mapping_covers_realtime_feature_cols() -> None:
+    """_col_mapping.numerical_features must match REALTIME_FEATURE_COLS exactly.
+
+    If a future REALTIME_FEATURE_COLS change adds or removes a column, this test
+    will catch the mismatch before it silently changes what Evidently monitors.
+    """
+    monitor = _make_monitor()
+    assert monitor._col_mapping.numerical_features == list(REALTIME_FEATURE_COLS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_full_nan_window_does_not_raise() -> None:
+    """Pushing a full window of {} rows (all-NaN) must not raise during run().
+
+    Evidently may return NaN drift scores on constant-value columns — the monitor
+    must survive this and return a snapshot (not raise or return None).
+    """
+    monitor = _make_monitor(window_size=_WINDOW_SIZE, tick_interval=_WINDOW_SIZE)
+    for _ in range(_WINDOW_SIZE):
+        monitor.push({})  # all keys missing → all NaN
+    snapshot = await monitor.run()
+    # Must return a snapshot, not None (window is full).
+    assert isinstance(snapshot, DriftSnapshot)
+    assert len(snapshot.features) == _N_FEATURES
+    # NaN scores come through as 0.0 after float() coercion in _compute_drift.
+    for f in snapshot.features:
+        assert isinstance(f.score, float)
