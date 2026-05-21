@@ -73,7 +73,11 @@ class SampleCreator:
     # Public API
     # ------------------------------------------------------------------
 
-    def create_sample(self, mission: str) -> SampleManifest:
+    def create_sample(
+        self,
+        mission: str,
+        channel_filter: list[str] | None = None,
+    ) -> SampleManifest:
         """Create a Parquet sample for one mission.
 
         Writes:
@@ -83,11 +87,13 @@ class SampleCreator:
 
         Args:
             mission: Mission directory name under raw_dir.
+            channel_filter: If set, restrict sampling to these channel IDs
+                (intersection with available files, capped at sample_channels).
 
         Returns:
             SampleManifest describing what was created.
         """
-        channels = self._select_channels(mission)
+        channels = self._select_channels(mission, channel_filter=channel_filter)
         row_counts: dict[str, int] = {}
 
         for channel in channels:
@@ -127,8 +133,17 @@ class SampleCreator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _select_channels(self, mission: str) -> list[str]:
-        """Return the first sample_channels channel names, sorted alphabetically."""
+    def _select_channels(
+        self,
+        mission: str,
+        channel_filter: list[str] | None = None,
+    ) -> list[str]:
+        """Return channel names to sample, sorted alphabetically.
+
+        When channel_filter is given, only those channels that both appear in
+        the filter list and exist on disk are considered. Otherwise all available
+        channels are candidates. Either way the result is capped at sample_channels.
+        """
         channel_dir = self.raw_dir / mission / "channels"
         if not channel_dir.exists():
             raise FileNotFoundError(f"Channel directory not found: {channel_dir}")
@@ -142,12 +157,16 @@ class SampleCreator:
             raise FileNotFoundError(f"No channel files found in {channel_dir}")
 
         channel_names = [_channel_name(p) for p in channel_files]
+        if channel_filter is not None:
+            keep = set(channel_filter)
+            channel_names = [ch for ch in channel_names if ch in keep]
         selected = channel_names[: self.sample_channels]
         log.info(
             "channels selected",
             mission=mission,
             selected=selected,
             total_available=len(channel_names),
+            subsystem_filter=bool(channel_filter),
         )
         return selected
 

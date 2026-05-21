@@ -73,12 +73,18 @@ def version() -> None:
     show_default=True,
     help="Fraction of rows to keep in the sample (overrides config).",
 )
+@click.option(
+    "--subsystem",
+    default=None,
+    help="When sampling, restrict to channels from this subsystem (e.g. subsystem_6).",
+)
 @click.pass_context
 def download(
     ctx: click.Context,
     mission: str,
     create_sample: bool,
     sample_fraction: float | None,
+    subsystem: str | None,
 ) -> None:
     """Download an ESA mission from Zenodo and optionally create a local sample.
 
@@ -92,6 +98,9 @@ def download(
 
         # Download and create a 1% sample with 5 channels
         spacecraft-telemetry download --mission ESA-Mission1 --sample
+
+        # Download and sample only subsystem_6 channels (anomaly-rich)
+        spacecraft-telemetry download --mission ESA-Mission1 --sample --subsystem subsystem_6
 
         # Download and create a 5% sample
         spacecraft-telemetry download --mission ESA-Mission1 --sample --sample-fraction 0.05
@@ -116,14 +125,23 @@ def download(
         fraction = (
             sample_fraction if sample_fraction is not None else settings.data.sample_fraction
         )
-        log.info("creating sample", mission=mission, fraction=fraction)
+        channel_filter: list[str] | None = None
+        if subsystem is not None:
+            all_channels = sorted(
+                p.stem
+                for p in (raw_dir / mission / "channels").glob("*.zip")
+            )
+            channel_filter = _filter_channels_by_subsystem(
+                settings, mission, all_channels, subsystem
+            )
+        log.info("creating sample", mission=mission, fraction=fraction, subsystem=subsystem)
         creator = SampleCreator(
             raw_dir=raw_dir,
             sample_dir=Path(str(settings.data.sample_data_dir)),
             sample_fraction=fraction,
             sample_channels=settings.data.sample_channels,
         )
-        manifest = creator.create_sample(mission)
+        manifest = creator.create_sample(mission, channel_filter=channel_filter)
         click.echo(f"Sample written to {manifest.sample_dir}")
         click.echo(f"  Channels : {', '.join(manifest.channels)}")
         click.echo(f"  Rows     : { {ch: n for ch, n in manifest.row_counts.items()} }")
@@ -227,12 +245,18 @@ def spark() -> None:
     show_default=True,
     help="Temporal train split fraction (overrides config, default 0.8).",
 )
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to preprocess only those channels (e.g. subsystem_6).",
+)
 @click.pass_context
 def spark_preprocess(
     ctx: click.Context,
     mission: str,
     sample_fraction: float | None,
     train_fraction: float | None,
+    subsystem: str | None,
 ) -> None:
     """Run the Spark preprocessing pipeline for one mission.
 
@@ -244,7 +268,12 @@ def spark_preprocess(
 
         # Default settings (train_fraction=0.8)
         spacecraft-telemetry spark preprocess --mission ESA-Mission1
+
+        # Only preprocess channels belonging to subsystem_6
+        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --subsystem subsystem_6
     """
+    from pathlib import Path
+
     from spacecraft_telemetry.spark.pipeline import run_preprocessing
     from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
 
@@ -260,15 +289,25 @@ def spark_preprocess(
             update={"spark": settings.spark.model_copy(update=spark_overrides)}
         )
 
+    # Resolve subsystem → channel list before starting Spark.
+    channels: list[str] | None = None
+    if subsystem is not None:
+        data_dir = Path(str(settings.data.sample_data_dir))
+        channel_dir = data_dir / mission / "channels"
+        all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
+        channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+
     log.info(
         "spark.preprocess.start",
         mission=mission,
         train_fraction=settings.spark.train_fraction,
+        subsystem=subsystem,
+        channels=channels,
     )
 
     session = create_spark_session(settings.spark)
     try:
-        summary = run_preprocessing(session, settings, mission)
+        summary = run_preprocessing(session, settings, mission, channels=channels)
     finally:
         stop_spark_session(session)
 

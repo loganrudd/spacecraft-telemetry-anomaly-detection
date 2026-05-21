@@ -2,6 +2,7 @@
 SHELL         := bash
 MISSION       ?= ESA-Mission1
 CHANNEL       ?= channel_1
+SUBSYSTEM     ?=
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
 UV := uv
@@ -65,10 +66,11 @@ typecheck:     ## Run mypy type checker
 # Data
 # ---------------------------------------------------------------------------
 
-download-sample: ## Download ESA dataset sample from Zenodo (MISSION=ESA-Mission1)
+download-sample: ## Download ESA dataset sample from Zenodo (MISSION=…, SUBSYSTEM=subsystem_6)
 	$(RUN) spacecraft-telemetry download \
 		--mission $(MISSION) \
-		--sample
+		--sample \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 	$(RUN) spacecraft-telemetry explore \
@@ -78,9 +80,10 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 # Spark preprocessing (Phase 2)
 # ---------------------------------------------------------------------------
 
-spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=ESA-Mission1)
+spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=subsystem_6)
 	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
-		--mission $(MISSION)
+		--mission $(MISSION) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 # ---------------------------------------------------------------------------
 # Telemanom model (Phase 4)
@@ -107,15 +110,18 @@ model-test:       ## Run only model tests (fast; excludes @pytest.mark.slow)
 # Ray parallel training (Phase 5)
 # ---------------------------------------------------------------------------
 
-ray-train:        ## Train channels in parallel with Ray (MISSION=…)
-	$(RUN) spacecraft-telemetry ray train --mission $(MISSION)
+ray-train:        ## Train channels in parallel with Ray (MISSION=…, SUBSYSTEM=subsystem_6)
+	$(RUN) spacecraft-telemetry ray train --mission $(MISSION) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
-ray-score:        ## Score channels in parallel with Ray (MISSION=…, TUNED_CONFIGS=path/to/tuned_configs.json)
+ray-score:        ## Score channels in parallel with Ray (MISSION=…, SUBSYSTEM=…, TUNED_CONFIGS=…)
 	$(RUN) spacecraft-telemetry ray score --mission $(MISSION) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),) \
 		$(if $(TUNED_CONFIGS),--tuned-configs $(TUNED_CONFIGS),)
 
-ray-tune:         ## Run Ray Tune HPO (all discovered subsystems)
-	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION)
+ray-tune:         ## Run Ray Tune HPO (MISSION=…, SUBSYSTEM=subsystem_6 for one subsystem)
+	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 ray-train-smoke:  ## Smoke test: train 1 channel via Ray (fast local check)
 	$(RUN) spacecraft-telemetry ray train --mission $(MISSION) --max-channels 1
@@ -165,8 +171,6 @@ clean-all:       ## Remove everything: caches + processed + models + downloaded 
 # ---------------------------------------------------------------------------
 # FastAPI serving (Phase 8)
 # ---------------------------------------------------------------------------
-
-SUBSYSTEM     ?=
 
 serve:            ## Start the FastAPI serving layer locally (SUBSYSTEM=subsystem_6)
 	$(RUN) spacecraft-telemetry --env local api serve \

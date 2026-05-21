@@ -7,10 +7,7 @@ import pandas as pd
 import pytest
 
 from spacecraft_telemetry.api.drift import DriftSnapshot, FeatureDrift, RollingDriftMonitor
-from spacecraft_telemetry.evidently_monitoring.reference import (
-    MONITORING_FEATURE_COLS,
-    REALTIME_FEATURE_COLS,
-)
+from spacecraft_telemetry.evidently_monitoring.reference import REALTIME_FEATURE_COLS
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -34,6 +34,7 @@ def run_preprocessing(
     spark: SparkSession,
     settings: Settings,
     mission: str,
+    channels: list[str] | None = None,
 ) -> dict[str, int]:
     """Run the full preprocessing pipeline for one mission.
 
@@ -65,6 +66,9 @@ def run_preprocessing(
     labels_path = data_dir / mission / "labels.csv"
 
     channel_paths = sorted(channel_dir.glob("*.parquet"))
+    if channels is not None:
+        keep = set(channels)
+        channel_paths = [p for p in channel_paths if p.stem in keep]
     if not channel_paths:
         raise FileNotFoundError(f"No channel Parquet files found in {channel_dir}")
 

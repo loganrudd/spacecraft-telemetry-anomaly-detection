@@ -9,7 +9,7 @@ data:
     - ESA-Mission2
     - ESA-Mission3
   sample_fraction: .01
-  sample_channels: 4 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
+  sample_channels: 22 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
   level: DEBUG
@@ -89,7 +89,7 @@ api:
   host: "127.0.0.1"
   port: 8000
   mission: "ESA-Mission1"
-  subsystem: "subsystem_1"
+  subsystem: "subsystem_6"
   channels: []
   replay_speed_default: 10.0
   replay_tick_interval_seconds: 1.0
