@@ -82,6 +82,7 @@ describe("useSubsystemRollup", () => {
     act(() => {
       telemetryStore.push(makeTelemetryEvent("channel_1", true));
       telemetryStore.flushForTest();
+      vi.advanceTimersByTime(250); // drain trailing-edge throttle
     });
 
     expect(
@@ -150,6 +151,7 @@ describe("useSubsystemRollup", () => {
     act(() => {
       driftStore.push(makeDriftEvent("channel_3", true));
       driftStore.flushForTest();
+      vi.advanceTimersByTime(250); // drain trailing-edge throttle
     });
 
     expect(
@@ -183,6 +185,7 @@ describe("useSubsystemRollup", () => {
       telemetryStore.flushForTest();
       driftStore.push(makeDriftEvent("channel_1", true));
       driftStore.flushForTest();
+      vi.advanceTimersByTime(250); // drain trailing-edge throttle
     });
 
     const status = result.current.get("subsystem_1")?.get("channel_1");
@@ -198,6 +201,7 @@ describe("useSubsystemRollup", () => {
     act(() => {
       telemetryStore.push(makeTelemetryEvent("channel_2", false));
       telemetryStore.flushForTest();
+      vi.advanceTimersByTime(250); // drain trailing-edge throttle
     });
 
     expect(

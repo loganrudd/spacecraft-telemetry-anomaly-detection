@@ -7,11 +7,37 @@ const BUFFER_SIZE = 600;
 // object each call, triggering an infinite re-render loop for empty channels.
 const EMPTY: TelemetryEvent[] = [];
 
+// O(1) ring buffer — avoids the O(n) memmove of Array.shift() on every eviction.
+// `head` points to the oldest item; `size` tracks how many slots are valid.
+interface RingBuffer {
+  items: TelemetryEvent[];
+  head: number;
+  size: number;
+}
+
+function ringPush(ring: RingBuffer, event: TelemetryEvent): void {
+  if (ring.size < BUFFER_SIZE) {
+    ring.items[(ring.head + ring.size) % BUFFER_SIZE] = event;
+    ring.size++;
+  } else {
+    // Full: overwrite the oldest slot and advance head.
+    ring.items[ring.head] = event;
+    ring.head = (ring.head + 1) % BUFFER_SIZE;
+  }
+}
+
+function ringToArray(ring: RingBuffer): TelemetryEvent[] {
+  const arr = new Array<TelemetryEvent>(ring.size);
+  for (let i = 0; i < ring.size; i++) {
+    arr[i] = ring.items[(ring.head + i) % BUFFER_SIZE];
+  }
+  return arr;
+}
+
 export class TelemetryStore {
-  private buffers = new Map<string, TelemetryEvent[]>();
-  // Snapshots hold a fresh slice minted by the rAF flush so useSyncExternalStore
-  // can detect changes via reference equality.  The mutable buffer itself never
-  // changes identity, so comparing buffer refs would miss every update.
+  private buffers = new Map<string, RingBuffer>();
+  // Snapshots hold a fresh ordered array minted by the rAF flush so
+  // useSyncExternalStore can detect changes via reference equality.
   private snapshots = new Map<string, TelemetryEvent[]>();
   private listeners = new Set<() => void>();
   // rAF throttle state — tracks which channels need a new snapshot minted.
@@ -25,13 +51,12 @@ export class TelemetryStore {
   lastTickAtMs: Record<string, number> = {};
 
   push(event: TelemetryEvent): void {
-    let buf = this.buffers.get(event.channel);
-    if (!buf) {
-      buf = [];
-      this.buffers.set(event.channel, buf);
+    let ring = this.buffers.get(event.channel);
+    if (!ring) {
+      ring = { items: new Array<TelemetryEvent>(BUFFER_SIZE), head: 0, size: 0 };
+      this.buffers.set(event.channel, ring);
     }
-    buf.push(event);
-    if (buf.length > BUFFER_SIZE) buf.shift();
+    ringPush(ring, event);
     this.lastTickAtMs[event.channel] = Date.now();
     if (event.is_anomaly_predicted) {
       this.lastAnomalyAtMs[event.channel] = Date.now();
@@ -44,7 +69,7 @@ export class TelemetryStore {
         this.rafScheduled = false;
         for (const ch of this.dirty) {
           const b = this.buffers.get(ch);
-          if (b) this.snapshots.set(ch, b.slice());
+          if (b) this.snapshots.set(ch, ringToArray(b));
         }
         this.dirty.clear();
         this.notify();
@@ -74,7 +99,7 @@ export class TelemetryStore {
     this.rafScheduled = false;
     for (const ch of this.dirty) {
       const b = this.buffers.get(ch);
-      if (b) this.snapshots.set(ch, b.slice());
+      if (b) this.snapshots.set(ch, ringToArray(b));
     }
     this.dirty.clear();
     this.notify();
