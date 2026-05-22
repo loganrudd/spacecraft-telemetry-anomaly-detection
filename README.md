@@ -27,8 +27,7 @@ Completed:
 - Phase 6: MLflow experiment tracking + model registry
 - Phase 7: Evidently batch drift detection + MLflow artifact logging
 - Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
-- Phase 9: React dashboard — live telemetry charts, anomaly alerts, dark mission-control UI
-- Phase 9.5: Real-time drift panel — per-channel Evidently KS drift via SSE, subsystem gauge
+- Phase 9: React dashboard — live telemetry charts + anomaly & Real-time drift alerts
 
 ## What Works Today
 
@@ -229,7 +228,7 @@ expected behaviour.
 | 6 | MLflow integration | Complete |
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
-| 9 | React dashboard + Real-time drift panel | Complete |
+| 9 | React dashboard | Complete |
 | 10 | GCP deployment | In Progress |
 | 11 | Documentation + polish | Planned |
 
