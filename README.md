@@ -229,9 +229,8 @@ expected behaviour.
 | 6 | MLflow integration | Complete |
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
-| 9 | React dashboard | Complete |
-| 9.5 | Real-time drift panel | Complete |
-| 10 | GCP deployment | Planned |
+| 9 | React dashboard + Real-time drift panel | Complete |
+| 10 | GCP deployment | In Progress |
 | 11 | Documentation + polish | Planned |
 
 ## Links
