@@ -71,11 +71,11 @@ def _install_id_token_auth(tracking_uri: str) -> None:
             token = cached[0]
         else:
             try:
-                import google.auth.transport.requests  # type: ignore[import-untyped]
-                import google.oauth2.id_token  # type: ignore[import-untyped]
+                import google.auth.transport.requests
+                import google.oauth2.id_token
 
                 req = google.auth.transport.requests.Request()
-                token = google.oauth2.id_token.fetch_id_token(req, tracking_uri)
+                token = google.oauth2.id_token.fetch_id_token(req, tracking_uri)  # type: ignore[no-untyped-call]
                 _token_cache[tracking_uri] = (token, now + 50 * 60)
             except Exception:
                 return

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -64,6 +63,7 @@ class TestHealthLifespanFailure:
         """When registry is empty, background loading records an error and
         /health returns 503 degraded (lifespan no longer raises)."""
         import time
+
         from spacecraft_telemetry.api.app import create_app
         from spacecraft_telemetry.core.config import load_settings
 

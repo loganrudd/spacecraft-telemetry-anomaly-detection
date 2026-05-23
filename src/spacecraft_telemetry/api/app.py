@@ -18,7 +18,7 @@ Startup sequence (Phase 10 deferred-load design):
     9. Attach AppState to app.state.app_state
    10. Mark LoadingState.is_complete = True
 
-During steps 6–9, GET /health returns status="loading" with progress counters
+During steps 6-9, GET /health returns status="loading" with progress counters
 so the React dashboard can show a progress bar instead of a blank screen.
 SSE endpoints return 503 until app_state is set.
 """
@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import MappingProxyType
 
@@ -200,10 +200,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if not task.done():
             task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         log.info("api.lifespan.shutdown")
 
 

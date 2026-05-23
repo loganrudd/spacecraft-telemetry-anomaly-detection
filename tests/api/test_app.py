@@ -13,7 +13,6 @@ from spacecraft_telemetry.api.app import create_app
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.core.config import load_settings
 
-
 # ---------------------------------------------------------------------------
 # Helpers for deferred background loading
 # ---------------------------------------------------------------------------
