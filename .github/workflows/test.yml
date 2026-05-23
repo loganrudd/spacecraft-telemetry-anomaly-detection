@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+jobs:
+  python-tests:
+    name: Python tests (3.12)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        # Pin to SHA for supply-chain safety:
+        #   gh api repos/actions/checkout/git/ref/tags/v4 --jq '.object.sha'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev,serving,tracking,gcp]"
+
+      - name: Run fast tests
+        run: pytest -m "not slow" --cov=spacecraft_telemetry --cov-report=xml -q
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+  frontend-tests:
+    name: Frontend build (Node 20)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Type-check + build
+        run: npm run build
+        working-directory: frontend
+
+      - name: Run Vitest unit tests
+        run: npm test -- --run
+        working-directory: frontend

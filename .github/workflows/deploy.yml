@@ -1,0 +1,172 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "frontend/**"
+      - "configs/**"
+      - "Dockerfile"
+      - "deploy/mlflow/**"
+      - ".github/workflows/deploy.yml"
+
+# Serialize deploys — never cancel an in-flight deploy, only queue behind it.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# Required for Workload Identity Federation (keyless GCP auth).
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGION: us-central1
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+
+# ---------------------------------------------------------------------------
+# How to set up the required GitHub secrets and variables:
+#
+#   Repository secrets (Settings → Secrets → Actions):
+#     GCP_WIF_PROVIDER   — `terraform output -raw wif_provider`
+#     GCP_DEPLOYER_SA    — `terraform output -raw deployer_sa_email`
+#
+#   Repository variables (Settings → Variables → Actions):
+#     GCP_PROJECT_ID     — your GCP project ID
+#
+#   The WIF binding in github_oidc.tf is scoped to refs/heads/main, so only
+#   pushes to main can authenticate with GCP.  PRs never get credentials.
+# ---------------------------------------------------------------------------
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build API and MLflow images in parallel, then deploy sequentially.
+  # MLflow deploys before API because the API Cloud Run service declares
+  # depends_on = [mlflow] in Terraform — we preserve that ordering here.
+  # ---------------------------------------------------------------------------
+
+  build-api:
+    name: Build API image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push API image
+        id: image
+        run: |
+          AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
+          IMAGE="${AR_REPO}/api:${{ github.sha }}"
+          docker build -t "${IMAGE}" -t "${AR_REPO}/api:latest" .
+          docker push "${IMAGE}"
+          docker push "${AR_REPO}/api:latest"
+          echo "ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+  build-mlflow:
+    name: Build MLflow image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push MLflow image
+        id: image
+        run: |
+          AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
+          IMAGE="${AR_REPO}/mlflow:${{ github.sha }}"
+          docker build -f deploy/mlflow/Dockerfile -t "${IMAGE}" -t "${AR_REPO}/mlflow:latest" .
+          docker push "${IMAGE}"
+          docker push "${AR_REPO}/mlflow:latest"
+          echo "ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+  deploy-mlflow:
+    name: Deploy MLflow to Cloud Run
+    needs: build-mlflow
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Deploy mlflow service
+        run: |
+          gcloud run deploy mlflow \
+            --image "${{ needs.build-mlflow.outputs.image }}" \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --quiet
+
+  deploy-api:
+    name: Deploy API to Cloud Run
+    needs: [build-api, deploy-mlflow]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Deploy api service
+        run: |
+          gcloud run deploy api \
+            --image "${{ needs.build-api.outputs.image }}" \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --quiet
+
+  smoke:
+    name: Smoke test
+    needs: deploy-api
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Wait for API health check
+        run: |
+          API_URL=$(gcloud run services describe api \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --format='value(status.url)')
+          echo "API URL: ${API_URL}"
+          for i in $(seq 1 5); do
+            STATUS=$(curl -fsS "${API_URL}/health" 2>/dev/null \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" \
+              2>/dev/null || echo "")
+            if [ "$STATUS" = "ok" ]; then
+              echo "Health check passed (status=ok)"
+              exit 0
+            fi
+            echo "Attempt ${i}/5 — retrying in 12s..."
+            sleep 12
+          done
+          echo "ERROR: API did not return status=ok after 5 attempts"
+          exit 1
