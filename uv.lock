@@ -3638,6 +3638,7 @@ dev = [
 ]
 gcp = [
     { name = "gcsfs" },
+    { name = "google-auth" },
     { name = "google-cloud-storage" },
 ]
 inference = [
@@ -3667,6 +3668,7 @@ requires-dist = [
     { name = "evidently", marker = "extra == 'tracking'", specifier = ">=0.4,<1" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.110" },
     { name = "gcsfs", marker = "extra == 'gcp'", specifier = ">=2024.2" },
+    { name = "google-auth", marker = "extra == 'gcp'", specifier = ">=2.30" },
     { name = "google-cloud-storage", marker = "extra == 'gcp'", specifier = ">=2.10" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hyperopt", marker = "extra == 'ml'", specifier = ">=0.2.7" },

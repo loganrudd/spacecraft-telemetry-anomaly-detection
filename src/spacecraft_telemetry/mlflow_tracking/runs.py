@@ -14,10 +14,13 @@ params / metrics dicts and receive run objects they can use for registry ops.
 
 from __future__ import annotations
 
+import os
 import tempfile
+import time
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import mlflow
@@ -29,6 +32,55 @@ if TYPE_CHECKING:
     pass
 
 log = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# GCP ID-token auth for Cloud Run MLflow backend
+# ---------------------------------------------------------------------------
+
+_token_cache: dict[str, tuple[str, float]] = {}  # uri -> (token, expires_at)
+_token_lock = Lock()
+
+
+def _install_id_token_auth(tracking_uri: str) -> None:
+    """Set MLFLOW_TRACKING_TOKEN to a fresh GCP ID token for *.run.app URIs.
+
+    The MLflow Cloud Run service uses INGRESS_TRAFFIC_INTERNAL_ONLY; callers
+    must include a GCP ID token in the Authorization header.  Setting
+    MLFLOW_TRACKING_TOKEN is the standard MLflow mechanism — the HTTP client
+    reads it on every request.
+
+    Works transparently from:
+    - Cloud Run api service (sa-api via attached service account)
+    - GKE Ray pods (sa-ray via Workload Identity metadata server)
+    - Local dev with `gcloud auth application-default login` (for testing)
+
+    Token is cached for 50 min (ID tokens expire after 60 min; 10-min buffer
+    avoids requests failing at the edge of token validity).  Silently skips
+    when google-auth is absent or ADC is unavailable — local SQLite dev never
+    hits this path.
+    """
+    from urllib.parse import urlparse
+
+    if not (urlparse(tracking_uri).hostname or "").endswith(".run.app"):
+        return
+
+    with _token_lock:
+        cached = _token_cache.get(tracking_uri)
+        now = time.monotonic()
+        if cached and now < cached[1]:
+            token = cached[0]
+        else:
+            try:
+                import google.auth.transport.requests  # type: ignore[import-untyped]
+                import google.oauth2.id_token  # type: ignore[import-untyped]
+
+                req = google.auth.transport.requests.Request()
+                token = google.oauth2.id_token.fetch_id_token(req, tracking_uri)
+                _token_cache[tracking_uri] = (token, now + 50 * 60)
+            except Exception:
+                return
+
+    os.environ["MLFLOW_TRACKING_TOKEN"] = token
 
 
 def configure_mlflow(settings: Settings) -> None:
@@ -72,6 +124,7 @@ def configure_mlflow(settings: Settings) -> None:
     mlflow.set_tracking_uri(uri)
     if settings.mlflow.registry_uri is not None:
         mlflow.set_registry_uri(settings.mlflow.registry_uri)
+    _install_id_token_auth(uri)
 
 
 @contextmanager

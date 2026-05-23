@@ -82,3 +82,10 @@ docs/PLANNING_MODE_GUIDE.md
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Terraform
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/terraform.tfvars
+# infra/.terraform.lock.hcl is committed — it pins provider versions
