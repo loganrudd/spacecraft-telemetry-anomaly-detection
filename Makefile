@@ -22,6 +22,12 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         mlflow-server mlflow-ui mlflow-promote \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
+        docker-build docker-build-ray docker-run-local \
+        tf-init tf-plan tf-apply tf-destroy \
+        dataproc-preprocess \
+        cloud-train cloud-tune \
+        seed-reference-profiles \
+        smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
 
 help:          ## Show this help message
@@ -193,3 +199,88 @@ frontend-build:   ## Build the dashboard static bundle to frontend/dist/
 
 frontend-test:    ## Run dashboard unit tests (Vitest)
 	cd frontend && npm run test
+
+# ---------------------------------------------------------------------------
+# Docker (Phase 10)
+# ---------------------------------------------------------------------------
+
+IMAGE_TAG     ?= dev
+PROJECT_ID    ?=
+REGION        ?= us-central1
+AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
+
+docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
+	docker build -t st-api:$(IMAGE_TAG) .
+
+docker-build-ray:  ## Build the Ray training/tuning image locally (IMAGE_TAG=dev)
+	docker build -f deploy/ray/Dockerfile -t st-training:$(IMAGE_TAG) .
+
+docker-run-local: ## Run the API container locally against local MLflow (IMAGE_TAG=dev)
+	docker run --rm -p 8080:8080 \
+		-e SPACECRAFT_ENV=local \
+		-e SPACECRAFT_MLFLOW__TRACKING_URI=http://host.docker.internal:5001 \
+		-v "$(PWD)/models:/app/models" \
+		-v "$(PWD)/data:/app/data" \
+		st-api:$(IMAGE_TAG)
+
+# ---------------------------------------------------------------------------
+# Terraform (Phase 10)
+# ---------------------------------------------------------------------------
+
+tf-init:          ## Initialize Terraform providers (run once per checkout)
+	cd infra && terraform init
+
+tf-plan:          ## Show Terraform plan (PROJECT_ID=… BILLING_ACCOUNT=… required)
+	cd infra && terraform plan \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+tf-apply:         ## Apply Terraform changes (PROJECT_ID=… BILLING_ACCOUNT=… required)
+	cd infra && terraform apply \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
+	cd infra && terraform destroy \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+# ---------------------------------------------------------------------------
+# GCP one-time operations (Phase 10 — M6)
+# ---------------------------------------------------------------------------
+
+# MLFLOW_URL is fetched live so the Makefile works without storing it.
+_mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
+
+dataproc-preprocess: ## Run Spark preprocessing on Dataproc (MISSION=…, PROJECT_ID=…)
+	gcloud dataproc workflow-templates instantiate spark-preprocess \
+		--region $(REGION) \
+		--project $(PROJECT_ID) \
+		--parameters MISSION=$(MISSION)
+
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		./scripts/cloud_train.sh
+
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		./scripts/cloud_tune.sh
+
+seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
+	$(RUN) python scripts/build_reference_profiles.py \
+		--env cloud \
+		--mission $(MISSION) \
+		--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt \
+		--upload gs://$(PROJECT_ID)-artifacts/reference_profiles \
+		--upload-only
+
+smoke-cloud:      ## Smoke-test the deployed API (PROJECT_ID=… REGION=…)
+	@API_URL=$$(gcloud run services describe api --region $(REGION) --project $(PROJECT_ID) \
+		--format='value(status.url)'); \
+	echo "==> GET $${API_URL}/health"; \
+	for i in 1 2 3 4 5; do \
+		STATUS=$$(curl -fsS "$${API_URL}/health" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null); \
+		[ "$$STATUS" = "ok" ] && echo "==> API status: ok" && exit 0; \
+		echo "  attempt $$i/5 — retrying in 12s..."; sleep 12; \
+	done; \
+	echo "ERROR: API did not return status=ok after 5 attempts"; exit 1

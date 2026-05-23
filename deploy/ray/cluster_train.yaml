@@ -1,0 +1,110 @@
+# RayJob — parallel channel training on GKE Autopilot.
+#
+# Environment variables required before applying (cloud_train.sh sets these):
+#   PROJECT_ID   GCP project ID
+#   REGION       GCP region (e.g. us-central1)
+#   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
+#   MISSION      Mission name (default: ESA-Mission2)
+#
+# Apply via:
+#   envsubst < deploy/ray/cluster_train.yaml | kubectl apply -f -
+#
+# Sizing rationale (M1.5 measurements):
+#   Head: 1 vCPU / 4 GiB — driver only, no model work.
+#   Workers: n1-standard-4 + 1× T4; num_gpus_per_task=0.25 packs 4 LSTMs per GPU.
+#   Autopilot Spot nodes are ~70% cheaper than on-demand for preemptible workloads.
+
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: spacecraft-train
+  namespace: ray
+spec:
+  entrypoint: >-
+    spacecraft-telemetry --env cloud ray train
+    --mission ${MISSION:-ESA-Mission2}
+    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION:-ESA-Mission2}/channels.txt
+
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 3600
+
+  rayClusterSpec:
+    rayVersion: "2.31.0"
+
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        num-cpus: "0"
+      template:
+        spec:
+          serviceAccountName: ray-sa
+          containers:
+            - name: ray-head
+              image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/training:latest
+              env:
+                - name: SPACECRAFT_ENV
+                  value: cloud
+                - name: SPACECRAFT_MLFLOW__TRACKING_URI
+                  value: ${MLFLOW_URL}
+                - name: SPACECRAFT_SPARK__PROCESSED_DATA_DIR
+                  value: gs://${PROJECT_ID}-processed-data
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: gs://${PROJECT_ID}-artifacts/mlflow
+                - name: SPACECRAFT_RAY__ADDRESS
+                  value: auto
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "4Gi"
+                limits:
+                  cpu: "1"
+                  memory: "4Gi"
+
+    workerGroupSpecs:
+      - groupName: gpu-workers
+        replicas: 1
+        minReplicas: 0
+        maxReplicas: 4
+        rayStartParams: {}
+        template:
+          metadata:
+            labels:
+              # Autopilot: request Spot node pool via node selector + toleration below.
+              cloud.google.com/gke-spot: "true"
+          spec:
+            serviceAccountName: ray-sa
+            nodeSelector:
+              cloud.google.com/gke-accelerator: nvidia-tesla-t4
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
+              - key: cloud.google.com/gke-spot
+                operator: Exists
+                effect: NoSchedule
+            containers:
+              - name: ray-worker
+                image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/training:latest
+                env:
+                  - name: SPACECRAFT_ENV
+                    value: cloud
+                  - name: SPACECRAFT_MLFLOW__TRACKING_URI
+                    value: ${MLFLOW_URL}
+                  - name: SPACECRAFT_SPARK__PROCESSED_DATA_DIR
+                    value: gs://${PROJECT_ID}-processed-data
+                  - name: MLFLOW_ARTIFACTS_DESTINATION
+                    value: gs://${PROJECT_ID}-artifacts/mlflow
+                  - name: SPACECRAFT_RAY__ADDRESS
+                    value: auto
+                  # Pack 4 channel models per T4 (each model is ~50K–500K params).
+                  - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                    value: "0.25"
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: "13Gi"
+                    nvidia.com/gpu: "1"
+                  limits:
+                    cpu: "4"
+                    memory: "13Gi"
+                    nvidia.com/gpu: "1"

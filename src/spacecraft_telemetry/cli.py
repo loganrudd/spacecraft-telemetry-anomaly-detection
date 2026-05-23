@@ -547,29 +547,59 @@ def _filter_channels_by_subsystem(
     return filtered
 
 
+def _read_channels_from_file(path: str) -> list[str]:
+    """Read channel IDs from a local or GCS text file, one per line.
+
+    Uses fsspec so ``gs://`` URIs work transparently when gcsfs is installed.
+    """
+    import fsspec
+
+    with fsspec.open(path, "r") as fh:
+        return [line.strip() for line in fh if line.strip()]
+
+
 def _resolve_ray_channels(
     settings: Settings,
     mission: str,
     channels: str | None,
     subsystem: str | None = None,
+    channels_from: str | None = None,
 ) -> list[str]:
     """Resolve the channel list for a Ray command from CLI flags.
 
-    Precedence: explicit ``--channels`` CSV > ``discover_channels()`` filtered
-    by optional ``--subsystem``.  Raises ``click.ClickException`` when
-    ``discover_channels`` returns nothing (pipeline not yet run).
+    Precedence:
+    1. ``--channels`` CSV — highest priority (explicit override)
+    2. ``--channels-from`` file (local or gs://) — cloud-friendly alternative to discovery
+    3. ``discover_channels()`` filtered by optional ``--subsystem`` — local fallback
+
+    Raises ``click.ClickException`` when discovery returns nothing (pipeline not yet run).
     """
     from spacecraft_telemetry.ray_training import discover_channels
 
     if channels is not None:
         return [c.strip() for c in channels.split(",") if c.strip()]
 
+    if channels_from is not None:
+        try:
+            channel_list = _read_channels_from_file(channels_from)
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to read channels from {channels_from!r}: {exc}"
+            ) from exc
+        if not channel_list:
+            raise click.ClickException(f"No channel IDs found in {channels_from!r}.")
+        if subsystem is not None:
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
+        return channel_list
+
     channel_list = discover_channels(settings, mission)
     if not channel_list:
         raise click.ClickException(
             f"No preprocessed channels found for {mission}. "
             "Run `spacecraft-telemetry spark preprocess` first, "
-            "or pass --channels explicitly."
+            "or pass --channels / --channels-from explicitly."
         )
     if subsystem is not None:
         channel_list = _filter_channels_by_subsystem(
@@ -591,6 +621,13 @@ def ray_group() -> None:
     help="Comma-separated channel IDs to train. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line. "
+    "Required when processed-data lives on GCS (discover_channels is local-only).",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to filter channels (e.g. subsystem_1).",
@@ -606,14 +643,15 @@ def ray_train(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     max_channels: int | None,
 ) -> None:
     """Train channels in parallel using Ray Core.
 
     Trains all discovered channels by default. Discovers channels by scanning
-    the Spark processed-data directory unless --channels is supplied explicitly
-    (required for gs:// artifact stores).
+    the Spark processed-data directory unless --channels or --channels-from is
+    supplied (required when processed data lives on GCS).
 
     Examples:
 
@@ -623,10 +661,10 @@ def ray_train(
         # Smoke test: only first 3 channels
         spacecraft-telemetry ray train --mission ESA-Mission1 --max-channels 3
 
-        # Cloud: explicit channel list (gs:// scan not supported)
+        # Cloud: read channel list from GCS
         spacecraft-telemetry --env cloud ray train \\
-            --mission ESA-Mission1 \\
-            --channels channel_1,channel_2,channel_3
+            --mission ESA-Mission2 \\
+            --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
     """
     from spacecraft_telemetry.ray_training import train_all_channels
 
@@ -634,7 +672,9 @@ def ray_train(
     log = get_logger(__name__)
 
     with _ray_session(settings):
-        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
+        channel_list = _resolve_ray_channels(
+            settings, mission, channels, subsystem, channels_from
+        )
 
         log.info(
             "ray.train.start",
@@ -673,6 +713,12 @@ def ray_train(
     help="Comma-separated channel IDs to score. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line.",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to filter channels (e.g. subsystem_1).",
@@ -694,6 +740,7 @@ def ray_score(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
@@ -727,7 +774,9 @@ def ray_score(
         log.info("ray.score.tuned_configs_loaded", path=str(tuned_configs))
 
     with _ray_session(settings):
-        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
+        channel_list = _resolve_ray_channels(
+            settings, mission, channels, subsystem, channels_from
+        )
 
         log.info(
             "ray.score.start",
@@ -771,6 +820,12 @@ def ray_score(
     help="Comma-separated channel IDs to tune. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line.",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to tune a single group (e.g. subsystem_1).",
@@ -792,6 +847,7 @@ def ray_tune(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     num_samples: int | None,
     overwrite_existing: bool,
@@ -836,7 +892,9 @@ def ray_tune(
         # For tune, don't apply the subsystem filter at discovery time —
         # run_all_sweeps groups by subsystem internally; run_hpo_sweep
         # applies _filter_channels_by_subsystem below when subsystem is given.
-        channel_list = _resolve_ray_channels(tune_settings, mission, channels)
+        channel_list = _resolve_ray_channels(
+            tune_settings, mission, channels, channels_from=channels_from
+        )
 
         log.info(
             "ray.tune.start",
