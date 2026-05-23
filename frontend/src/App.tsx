@@ -41,10 +41,18 @@ export default function App() {
   const driftStreamRef = useRef<DriftStreamHandle | null>(null);
   const tickCountRef = useRef(0);
 
-  // Fetch health once on mount to get channel list + subsystem map.
+  // Fetch health on mount; poll every 2 s while status === "loading".
   useEffect(() => {
     fetchHealth().then(setHealth).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    if (!health || health.status !== "loading") return;
+    const id = setInterval(() => {
+      fetchHealth().then(setHealth).catch(console.error);
+    }, 2_000);
+    return () => clearInterval(id);
+  }, [health]);
 
   // Publish tick rate at 1Hz.
   useEffect(() => {
@@ -109,6 +117,43 @@ export default function App() {
   const selected = view.kind === "subsystem" ? view.selected : [];
   const subsystem = view.kind === "subsystem" ? view.subsystem : null;
   const density = getDensity(selected.length);
+
+  // Show loading / error screen until all engines are ready.
+  if (!health || health.status === "loading" || health.status === "degraded") {
+    const ready = health?.channels_ready ?? 0;
+    const total = health?.channels_total ?? 0;
+    const pct = total > 0 ? Math.round((ready / total) * 100) : 0;
+    const mission = health?.mission ?? null;
+    const isDegraded = health?.status === "degraded";
+
+    return (
+      <div className="app__loading">
+        <div className="app__loading-card">
+          <p className="app__loading-mission">
+            {mission ?? "Spacecraft Telemetry"}
+          </p>
+          <p className="app__loading-title">
+            {isDegraded ? "No models available" : "Loading mission models"}
+          </p>
+          {isDegraded ? (
+            <p className="app__loading-error">
+              No channels loaded. Train and register at least one channel
+              model before starting the server.
+            </p>
+          ) : (
+            <>
+              <div className="app__loading-track">
+                <div className="app__loading-fill" style={{ width: `${pct}%` }} />
+              </div>
+              <p className="app__loading-label">
+                {total > 0 ? `${ready} / ${total} channels` : "Initializing…"}
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

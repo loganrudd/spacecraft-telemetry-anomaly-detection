@@ -24,15 +24,23 @@ class TelemetryEvent(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Response model for GET /health."""
+    """Response model for GET /health.
 
-    status: Literal["ok", "degraded"]
+    status="loading"  → background task is still loading models;
+                        channels_ready / channels_total show progress.
+    status="ok"       → all engines ready; channels_loaded is the full list.
+    status="degraded" → loading finished but no engines could be loaded.
+    """
+
+    status: Literal["ok", "degraded", "loading"]
     mission: str
-    subsystem: str | None  # None when serving whole mission
-    channels_loaded: list[str]
-    channel_subsystems: dict[str, str]  # channel_id → subsystem name
-    uptime_s: float
-    mlflow_tracking_uri: str
+    subsystem: str | None = None
+    channels_loaded: list[str] = []
+    channels_total: int = 0    # target channel count (set once channels are resolved)
+    channels_ready: int = 0    # successfully loaded so far (== len(channels_loaded) when ok)
+    channel_subsystems: dict[str, str] = {}
+    uptime_s: float = 0.0
+    mlflow_tracking_uri: str = ""
 
 
 class StreamQueryParams(BaseModel):
