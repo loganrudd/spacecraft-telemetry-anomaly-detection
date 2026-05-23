@@ -159,15 +159,20 @@ class TestOutputSchemas:
         df = spark_session.read.parquet(str(_output(settings) / "test"))
         assert "is_anomaly" in df.columns
 
-    def test_train_no_anomaly_rows(self, spark_session, settings) -> None:
-        """Anomalies are excluded from the training set."""
+    def test_train_is_anomaly_never_null(self, spark_session, settings) -> None:
+        """Every train row has a non-null is_anomaly value.
+
+        Anomaly-labeled rows are kept in the train Parquet so the DataLoader
+        can identify and skip them via skip_anomalous_windows=True.  The contract
+        is that is_anomaly is always populated, not that it is always False.
+        """
         from pyspark.sql import functions as F
 
         from spacecraft_telemetry.spark.pipeline import run_preprocessing
 
         run_preprocessing(spark_session, settings, "ESA-Mission1")
         df = spark_session.read.parquet(str(_output(settings) / "train"))
-        assert df.filter(F.col("is_anomaly")).count() == 0
+        assert df.filter(F.col("is_anomaly").isNull()).count() == 0
 
 
 # ---------------------------------------------------------------------------
