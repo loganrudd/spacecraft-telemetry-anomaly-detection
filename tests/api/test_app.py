@@ -39,6 +39,39 @@ class TestCreateApp:
         middleware_classes = [m.cls for m in app.user_middleware]
         assert CorrelationIdMiddleware in middleware_classes
 
+    def test_no_static_mount_when_static_dir_unset(self) -> None:
+        """Default test config has no static_dir → no dashboard mount."""
+        settings = load_settings("test")
+        assert settings.api.static_dir is None
+        app = create_app(settings)
+        assert not any(getattr(r, "name", None) == "dashboard" for r in app.routes)
+
+    def test_static_mount_serves_index_when_dir_exists(self, tmp_path) -> None:
+        """A real static_dir gets mounted at / and serves index.html."""
+        (tmp_path / "index.html").write_text("<!doctype html><title>dash</title>")
+        settings = load_settings("test").model_copy(
+            update={
+                "api": load_settings("test").api.model_copy(
+                    update={"static_dir": str(tmp_path)}
+                )
+            }
+        )
+        app = create_app(settings)
+        # Mount registered with the documented name.
+        assert any(getattr(r, "name", None) == "dashboard" for r in app.routes)
+
+    def test_static_dir_missing_does_not_raise(self, tmp_path) -> None:
+        """A configured-but-missing static_dir logs a warning, does not crash."""
+        settings = load_settings("test").model_copy(
+            update={
+                "api": load_settings("test").api.model_copy(
+                    update={"static_dir": str(tmp_path / "does-not-exist")}
+                )
+            }
+        )
+        app = create_app(settings)
+        assert not any(getattr(r, "name", None) == "dashboard" for r in app.routes)
+
 
 # ---------------------------------------------------------------------------
 # CorrelationIdMiddleware

@@ -359,6 +359,10 @@ class ApiConfig(BaseModel):
     # CORS allowed origins — empty list disables CORS middleware entirely.
     # Populate in local.yaml for Vite dev server; set prod origin in cloud.yaml.
     cors_allowed_origins: list[str] = []
+    # Filesystem path to a built dashboard bundle (e.g. frontend/dist) to serve at /.
+    # When set and the directory exists, create_app mounts it via StaticFiles(html=True)
+    # so the SPA shares the API origin (no CORS). None = serve API only.
+    static_dir: str | None = None
 
     @field_validator("port")
     @classmethod

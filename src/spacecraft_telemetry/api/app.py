@@ -23,10 +23,12 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import MappingProxyType
 
 import torch
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
@@ -223,4 +225,21 @@ def create_app(settings: Settings) -> FastAPI:
             expose_headers=["X-Correlation-Id"],
         )
     app.include_router(endpoints.router)
+
+    # Mount the built dashboard at / when configured (Phase 10: same-origin SPA on
+    # Cloud Run). Routes registered above match first; html=True serves index.html
+    # for unknown paths so client-side routes work on refresh.
+    if settings.api.static_dir:
+        static_path = Path(settings.api.static_dir)
+        if static_path.is_dir():
+            app.mount(
+                "/",
+                StaticFiles(directory=static_path, html=True),
+                name="dashboard",
+            )
+        else:
+            get_logger("api.startup").warning(
+                "api.static_dir.missing",
+                static_dir=str(static_path),
+            )
     return app

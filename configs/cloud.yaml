@@ -1,8 +1,13 @@
 env: cloud
 
-# GCS paths are set via env vars in deployment (Phase 11):
+# GCS paths are set via env vars in deployment (Phase 10):
 #   SPACECRAFT_DATA__RAW_DATA_DIR=gs://{project}-raw-data
 #   SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://{project}-processed/sample
+#   SPACECRAFT_SPARK__PROCESSED_DATA_DIR=gs://{project}-processed
+#   SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR=gs://{project}-artifacts/reference_profiles
+#   SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR=gs://{project}-artifacts/reference_profiles
+#   SPACECRAFT_MLFLOW__TRACKING_URI=https://{mlflow-cloud-run}.run.app
+#   MLFLOW_ARTIFACTS_DESTINATION=gs://{project}-artifacts/mlflow
 data:
   raw_data_dir: data/raw
   sample_data_dir: data/processed/sample
@@ -62,9 +67,11 @@ tune:
   hpo_eval_fraction: 0.6
 
 mlflow:
-  # tracking_uri and registry_uri are set via env vars in deployment (Phase 11):
-  #   SPACECRAFT_MLFLOW__TRACKING_URI=postgresql+psycopg2://...
-  #   SPACECRAFT_MLFLOW__REGISTRY_URI=postgresql+psycopg2://...
+  # In cloud, point at the self-hosted MLflow Cloud Run service via env var:
+  #   SPACECRAFT_MLFLOW__TRACKING_URI=https://{mlflow-cloud-run}.run.app
+  # The auth hook in mlflow_tracking.runs.configure_mlflow (added in M3) injects
+  # GCP ID tokens automatically when the host ends in .run.app.
+  # Local fallback used when no env var is set:
   tracking_uri: "sqlite:///mlflow.db"
   experiment_prefix: ""
 
@@ -85,11 +92,14 @@ drift:
 api:
   host: "0.0.0.0"
   port: 8080
-  mission: "ESA-Mission1"
-  subsystem: "subsystem_6"
+  mission: "ESA-Mission2"
+  # subsystem omitted → load every channel for the mission (Plan 009b semantics).
   channels: []
   replay_speed_default: 10.0
   replay_tick_interval_seconds: 1.0
   stream_buffer_max_events: 256
   request_timeout_seconds: 30
+  # Path inside the Docker image where the built React dashboard lives.
+  # create_app mounts this at / via StaticFiles(html=True).
+  static_dir: /app/frontend/dist
 
