@@ -80,7 +80,13 @@ resource "google_storage_bucket_iam_member" "mlflow_artifacts_admin" {
   member = "serviceAccount:${google_service_account.mlflow.email}"
 }
 
-# ray: write training outputs to processed and artifacts buckets.
+# ray: read sample Parquet (Spark input), write to processed and artifacts buckets.
+resource "google_storage_bucket_iam_member" "ray_sample_viewer" {
+  bucket = google_storage_bucket.sample_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.ray.email}"
+}
+
 resource "google_storage_bucket_iam_member" "ray_artifacts_admin" {
   bucket = google_storage_bucket.artifacts.name
   role   = "roles/storage.objectAdmin"

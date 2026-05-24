@@ -1,10 +1,11 @@
 # GCS bucket layout per .claude/rules/gcp.md:
-#   {project}-raw-data   — ESA dataset, immutable, never deleted by lifecycle
-#   {project}-processed  — Spark output, partitioned by mission/channel; pruned after 90 days
-#   {project}-artifacts  — MLflow artifacts, model files, reference profiles; versioned
+#   {project}-sample-data — Parquet-converted ESA sample (zip→pickle→Parquet via ingest/sample.py);
+#                           immutable once uploaded, never deleted by lifecycle rule
+#   {project}-processed-data   — Spark output, partitioned by mission/channel; pruned after 90 days
+#   {project}-artifacts   — MLflow artifacts, model files, reference profiles; versioned
 
-resource "google_storage_bucket" "raw_data" {
-  name          = "${var.project_id}-raw-data"
+resource "google_storage_bucket" "sample_data" {
+  name          = "${var.project_id}-sample-data"
   location      = var.region
   force_destroy = false
 

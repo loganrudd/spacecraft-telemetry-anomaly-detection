@@ -60,7 +60,7 @@ ray:
   address: auto
 
 tune:
-  num_samples: 100
+  num_samples: 50
   max_concurrent_trials: 8
   parallel_subsystems: true
   max_parallel_subsystems: 4

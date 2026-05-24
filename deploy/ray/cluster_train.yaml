@@ -64,7 +64,7 @@ spec:
       - groupName: gpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 4
+        maxReplicas: 6 # 6 x 4 = 24 concurrent models training => ~5 batches at 3 min per batch/model = ~15 min total train time
         rayStartParams: {}
         template:
           metadata:
