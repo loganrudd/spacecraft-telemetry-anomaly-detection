@@ -8,15 +8,9 @@ SUBSYSTEM     ?=
 UV := uv
 RUN := $(UV) run
 
-# Auto-detect JDK 21 for PySpark (macOS Homebrew path).
-# Override by setting JAVA_HOME externally (e.g. on Linux CI).
-JAVA_HOME_21 ?= $(shell brew --prefix openjdk@21 2>/dev/null)
-# Prepended to commands that need JDK 21; empty string if not found (tests skip gracefully).
-_SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
-
 .PHONY: help setup test test-all lint format typecheck \
         download-sample explore \
-        spark-test spark-preprocess \
+        preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
         mlflow-server mlflow-ui mlflow-promote \
@@ -24,8 +18,7 @@ _SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
-        dataproc-preprocess \
-        cloud-train cloud-tune \
+        cloud-preprocess cloud-train cloud-tune \
         seed-reference-profiles \
         smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
@@ -38,21 +31,18 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + spark + tracking + ml)
-	$(UV) sync --extra dev --extra spark --extra tracking --extra ml
+setup:         ## Install all dependency groups (dev + tracking + ml)
+	$(UV) sync --extra dev --extra tracking --extra ml
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-test:          ## Run fast tests (Spark tests skip automatically if JDK 21 absent)
-	$(_SPARK_ENV) $(RUN) pytest -m "not slow" -q
+test:          ## Run fast tests
+	$(RUN) pytest -m "not slow" -q
 
 test-all:      ## Run the full test suite including slow tests
-	$(_SPARK_ENV) $(RUN) pytest -q
-
-spark-test:    ## Run only PySpark tests (requires JDK 21 — brew install openjdk@21)
-	$(_SPARK_ENV) $(RUN) pytest tests/spark/ -v
+	$(RUN) pytest -q
 
 # ---------------------------------------------------------------------------
 # Code quality
@@ -84,11 +74,11 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 		--mission $(MISSION)
 
 # ---------------------------------------------------------------------------
-# Spark preprocessing (Phase 2)
+# Preprocessing (Phase 10.5 — pandas + Ray)
 # ---------------------------------------------------------------------------
 
-spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
-	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
+preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
+	$(RUN) spacecraft-telemetry preprocess run \
 		--mission $(MISSION) \
 		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
@@ -164,7 +154,7 @@ clean:           ## Remove build artifacts and Python caches (safe, instant)
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-clean-processed: ## Remove Spark output (data/processed/) — re-run spark-preprocess to rebuild
+clean-processed: ## Remove preprocessed data (data/processed/) — re-run preprocess to rebuild
 	rm -rf data/processed/
 
 clean-models:    ## Remove trained model artifacts (models/) — re-run model-train to rebuild
@@ -252,11 +242,9 @@ tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
 # MLFLOW_URL is fetched live so the Makefile works without storing it.
 _mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
 
-dataproc-preprocess: ## Run Spark preprocessing on Dataproc (MISSION=…, PROJECT_ID=…)
-	gcloud dataproc workflow-templates instantiate spark-preprocess \
-		--region $(REGION) \
-		--project $(PROJECT_ID) \
-		--parameters MISSION=$(MISSION)
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) \
+		./scripts/cloud_preprocess.sh
 
 cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \

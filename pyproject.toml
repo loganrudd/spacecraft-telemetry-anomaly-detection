@@ -22,9 +22,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-spark = [
-    "pyspark>=4.1,<5",
-]
 inference = [
     "torch>=2.0",
 ]

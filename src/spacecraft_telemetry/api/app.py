@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 try:
                     values, _seg, anom, timestamps = await asyncio.to_thread(
                         load_series_parquet,
-                        settings.spark.processed_data_dir,
+                        settings.preprocess.processed_data_dir,
                         settings.api.mission,
                         ch,
                         "test",

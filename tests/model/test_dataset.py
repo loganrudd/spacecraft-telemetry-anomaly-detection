@@ -217,7 +217,7 @@ def test_dataloader_yields_correct_batch_shape(
             "prediction_horizon": fx.prediction_horizon,
             "batch_size": 8,
         },
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     train_loader, _ = make_dataloaders(settings, fx.mission, fx.channel)
     x_batch, _ = next(iter(train_loader))
@@ -234,7 +234,7 @@ def test_val_split_is_temporal_not_random(
     settings = Settings(
         model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon,
                "val_fraction": 0.2, "batch_size": 4},
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     n_val = max(1, int(fx.n_train_windows * 0.2))
     n_train_expected = fx.n_train_windows - n_val
@@ -257,7 +257,7 @@ def test_val_loader_is_deterministic(
             "prediction_horizon": fx.prediction_horizon,
             "batch_size": 4,
         },
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     _, val_loader = make_dataloaders(settings, fx.mission, fx.channel)
 
@@ -275,7 +275,7 @@ def test_make_dataloaders_skips_anomalous_train_windows(
     fx = tiny_series_parquet
     settings = Settings(
         model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     train_loader, val_loader = make_dataloaders(settings, fx.mission, fx.channel)
     total = len(train_loader.dataset) + len(val_loader.dataset)  # type: ignore[arg-type]
@@ -295,7 +295,7 @@ def test_make_test_dataloader_returns_correct_window_count(
     fx = tiny_series_parquet
     settings = Settings(
         model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     loader, target_timestamps, window_is_anomaly = make_test_dataloader(
         settings, fx.mission, fx.channel
@@ -314,7 +314,7 @@ def test_make_test_dataloader_target_timestamps_monotone(
     fx = tiny_series_parquet
     settings = Settings(
         model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     _, target_timestamps, _ = make_test_dataloader(settings, fx.mission, fx.channel)
     diffs = np.diff(pd.DatetimeIndex(target_timestamps).asi8)
@@ -330,7 +330,7 @@ def test_make_test_dataloader_anomaly_flags_match_tail(
     fx = tiny_series_parquet
     settings = Settings(
         model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
-        spark={"processed_data_dir": str(fx.processed_dir)},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
     )
     _, _, window_is_anomaly = make_test_dataloader(settings, fx.mission, fx.channel)
 

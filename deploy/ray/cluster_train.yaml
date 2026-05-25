@@ -46,7 +46,7 @@ spec:
                   value: cloud
                 - name: SPACECRAFT_MLFLOW__TRACKING_URI
                   value: ${MLFLOW_URL}
-                - name: SPACECRAFT_SPARK__PROCESSED_DATA_DIR
+                - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                   value: gs://${PROJECT_ID}-processed-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
@@ -90,7 +90,7 @@ spec:
                     value: cloud
                   - name: SPACECRAFT_MLFLOW__TRACKING_URI
                     value: ${MLFLOW_URL}
-                  - name: SPACECRAFT_SPARK__PROCESSED_DATA_DIR
+                  - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                     value: gs://${PROJECT_ID}-processed-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow

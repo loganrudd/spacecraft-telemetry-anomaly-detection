@@ -7,10 +7,10 @@ from 3 ESA missions, ~225 telemetry channels.
 The model ([Telemanom LSTM, Hundman et al. 2018](https://arxiv.org/abs/1802.04431)) is
 intentionally off-the-shelf: one small LSTM per channel trains on nominal data and flags
 when sensor readings diverge from its predictions. The engineering emphasis is the platform
-wrapping it — Spark preprocessing, Ray Core for parallelizing
-hundreds of training jobs, Ray Tune for per-subsystem HPO, MLflow for experiment tracking
-and model registry, Evidently for drift monitoring, FastAPI with SSE for real-time stream
-replay, and Cloud Run for serving.
+wrapping it — pandas + PyArrow preprocessing with Ray Core fan-out across hundreds of
+channels, Ray Tune for per-subsystem HPO, MLflow for experiment tracking and model registry,
+Evidently for drift monitoring, FastAPI with SSE for real-time stream replay, and Cloud Run
+for serving.
 
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
@@ -20,7 +20,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 Completed:
 - Phase 1: repo scaffold + ingestion
-- Phase 2: PySpark preprocessing
+- Phase 2: Pandas + Ray Core preprocessing (migrated from PySpark in Phase 10.5)
 - Phase 3: Telemanom model drop-in
 - Phase 4: Ray parallel training + scoring
 - Phase 5: Ray Tune scoring-parameter HPO
@@ -32,7 +32,7 @@ Completed:
 ## What Works Today
 
 - End-to-end local workflow on sampled ESA data
-- Spark preprocessing to partitioned Parquet outputs
+- Preprocessing to partitioned Parquet outputs (pandas + Ray Core fan-out per channel)
 - Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
 - Ray Tune HPO over scoring parameters per subsystem
@@ -65,25 +65,21 @@ Completed:
 Prerequisites:
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- JDK 21 (required for PySpark locally)
 
 ```bash
 # 1) Install dependencies
 make setup
 
-# 2) (Optional) set Java for Spark
-export JAVA_HOME=$(brew --prefix openjdk@21)
-
-# 3) Download and sample and entire ESA mission's data
+# 2) Download and sample an entire ESA mission's data
 make download-sample MISSION=ESA-Mission1
 
 # you can also specify a specific subsystem and/or channel you want to sample/preprocess/train/score/tune
 make download-sample MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6
 
-# 4) Preprocess data with Spark
-make spark-preprocess MISSION=ESA-Mission1 CHANNEL=channel_22
+# 3) Preprocess data (pandas + Ray Core)
+make preprocess MISSION=ESA-Mission1 CHANNEL=channel_22
 
-# 5) Run test suite (fast + slow mix per project config)
+# 4) Run test suite (fast + slow mix per project config)
 make test
 ```
 
@@ -166,7 +162,7 @@ Expected key artifacts:
 ## Repository Map
 
 Top-level directories:
-- `src/spacecraft_telemetry/`: application modules (ingest, spark, model, ray, api)
+- `src/spacecraft_telemetry/`: application modules (ingest, preprocess, model, ray, api)
 - `frontend/`: React dashboard (Vite + TypeScript, `npm run dev` / `make frontend-dev`)
 - `tests/`: unit and integration tests mirroring source structure
 - `configs/`: environment YAML configs (`local`, `test`, `cloud`)
@@ -179,7 +175,7 @@ Top-level directories:
 ```text
 ESA Parquet (Zenodo/GCS)
   -> Download + Sample
-  -> Spark preprocessing
+  -> Pandas + Ray Core preprocessing (per-channel fan-out)
   -> Telemanom LSTM (per-channel)
   -> Ray parallel train/score
   -> Ray Tune scoring HPO
@@ -221,7 +217,7 @@ expected behaviour.
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Repo scaffold + data ingestion | Complete |
-| 2 | PySpark preprocessing pipeline | Complete |
+| 2 | Preprocessing pipeline (pandas + Ray Core; migrated from PySpark in 10.5) | Complete |
 | 3 | Telemanom model drop-in | Complete |
 | 4 | Ray parallel training | Complete |
 | 5 | Ray Tune HPO | Complete |

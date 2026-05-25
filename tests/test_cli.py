@@ -1001,7 +1001,7 @@ class TestDriftCommands:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
-        from spacecraft_telemetry.core.config import MonitoringConfig, Settings, SparkConfig
+        from spacecraft_telemetry.core.config import MonitoringConfig, PreprocessingConfig, Settings
 
         mission = "TEST-Mission"
         channel = "ch_1"
@@ -1012,7 +1012,7 @@ class TestDriftCommands:
         # Use Settings() defaults — test.yaml has feature_windows=[3, 5] which
         # doesn't match MONITORING_FEATURE_COLS (built from [10, 50, 100]).
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
             monitoring=MonitoringConfig(reference_profiles_dir=tmp_path / "profiles"),
         )
@@ -1031,11 +1031,11 @@ class TestDriftCommands:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """drift batch fails with FileNotFoundError when channel data is absent."""
-        from spacecraft_telemetry.core.config import Settings, SparkConfig
+        from spacecraft_telemetry.core.config import PreprocessingConfig, Settings
 
         mission = "TEST-Mission"
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             mlflow=Settings().mlflow.model_copy(
                 update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
             ),

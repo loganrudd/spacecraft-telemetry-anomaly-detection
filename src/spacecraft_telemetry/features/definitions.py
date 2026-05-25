@@ -143,8 +143,7 @@ def _build_registry(windows: list[int]) -> list[FeatureDefinition]:
     return defs
 
 
-# Default windows match SparkConfig.feature_windows default — [10, 50, 100].
-# If SparkConfig is changed, update this list too.
+# Default windows match PreprocessingConfig.feature_windows default — [10, 50, 100].
 _DEFAULT_WINDOWS: list[int] = [10, 50, 100]
 
 FEATURE_DEFINITIONS: list[FeatureDefinition] = _build_registry(_DEFAULT_WINDOWS)

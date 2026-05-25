@@ -237,24 +237,17 @@ def explore(
 
 
 # ---------------------------------------------------------------------------
-# spark group
+# preprocess group
 # ---------------------------------------------------------------------------
 
 
 @main.group()
-def spark() -> None:
-    """PySpark preprocessing pipeline commands."""
+def preprocess() -> None:
+    """Pandas + Ray preprocessing pipeline commands."""
 
 
-@spark.command("preprocess")
+@preprocess.command("run")
 @click.option("--mission", required=True, help="Mission name to preprocess (e.g. ESA-Mission1).")
-@click.option(
-    "--sample-fraction",
-    type=float,
-    default=None,
-    show_default=True,
-    help="Ignored — reads from sample_data_dir (already sampled in ingest phase).",
-)
 @click.option(
     "--train-fraction",
     type=float,
@@ -272,47 +265,52 @@ def spark() -> None:
     default=None,
     help="Optional single channel to preprocess (overrides --subsystem).",
 )
+@click.option(
+    "--no-parallel",
+    is_flag=True,
+    default=False,
+    help="Run sequentially (no Ray fan-out). Useful for local debugging.",
+)
 @click.pass_context
-def spark_preprocess(
+def preprocess_run(
     ctx: click.Context,
     mission: str,
-    sample_fraction: float | None,
     train_fraction: float | None,
     subsystem: str | None,
     channel: str | None,
+    no_parallel: bool,
 ) -> None:
-    """Run the Spark preprocessing pipeline for one mission.
+    """Run the preprocessing pipeline for one mission.
 
     Reads channel Parquet files from sample_data_dir/{mission}/channels/,
-    processes them (null-fill → gap-detect → normalize → label → features + series),
-    and writes partitioned Parquet to spark.processed_data_dir/{mission}/.
+    processes them (null-fill → gap-detect → normalize → label → series),
+    and writes partitioned Parquet to preprocess.processed_data_dir/{mission}/.
 
     Examples:
 
-        # Default settings (train_fraction=0.8)
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1
+        # Default settings (train_fraction=0.8, Ray fan-out)
+        spacecraft-telemetry preprocess run --mission ESA-Mission1
 
         # Only preprocess channels belonging to subsystem_6
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --subsystem subsystem_6
+        spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
 
-        # Only preprocess a single channel
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --channel channel_22
+        # Only preprocess a single channel, no Ray
+        spacecraft-telemetry preprocess run --mission ESA-Mission1 --channel channel_22 --no-parallel
     """
     from pathlib import Path
 
-    from spacecraft_telemetry.spark.pipeline import run_preprocessing
-    from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
+    from spacecraft_telemetry.preprocess.pipeline import run_preprocessing
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
 
-    # Apply CLI overrides to SparkConfig.
-    spark_overrides: dict[str, object] = {}
+    # Apply CLI overrides to PreprocessingConfig.
+    overrides: dict[str, object] = {}
     if train_fraction is not None:
-        spark_overrides["train_fraction"] = train_fraction
-    if spark_overrides:
+        overrides["train_fraction"] = train_fraction
+    if overrides:
         settings = settings.model_copy(
-            update={"spark": settings.spark.model_copy(update=spark_overrides)}
+            update={"preprocess": settings.preprocess.model_copy(update=overrides)}
         )
 
     # Resolve channel filter: explicit channel > subsystem > all.
@@ -326,19 +324,18 @@ def spark_preprocess(
         channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
 
     log.info(
-        "spark.preprocess.start",
+        "preprocess.run.start",
         mission=mission,
-        train_fraction=settings.spark.train_fraction,
+        train_fraction=settings.preprocess.train_fraction,
         channel=channel,
         subsystem=subsystem,
         channels=channels,
+        parallel=not no_parallel,
     )
 
-    session = create_spark_session(settings.spark)
-    try:
-        summary = run_preprocessing(session, settings, mission, channels=channels)
-    finally:
-        stop_spark_session(session)
+    summary = run_preprocessing(
+        settings, mission, channels=channels, parallel=not no_parallel
+    )
 
     click.echo(f"Mission           : {mission}")
     click.echo(f"Channels processed: {summary['channels_processed']}")
@@ -403,7 +400,7 @@ def model_train(
 ) -> None:
     """Train a TelemanomLSTM on a single telemetry channel.
 
-    Reads per-timestep series Parquet from spark.processed_data_dir/{mission}/train/
+    Reads per-timestep series Parquet from preprocess.processed_data_dir/{mission}/train/
     and writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
     Windows are constructed on-the-fly by the DataLoader (Plan 002.5).
 
@@ -457,7 +454,7 @@ def model_score(
     """Score a trained model against its test split and persist metrics.
 
     Loads model artifacts from model.artifacts_dir/{mission}/{channel}/ and
-    reads test Parquet from spark.processed_data_dir/{mission}/test/.
+    reads test Parquet from preprocess.processed_data_dir/{mission}/test/.
     Writes errors.npy, threshold.json, metrics.json to the artifacts dir.
 
     Examples:
@@ -598,7 +595,7 @@ def _resolve_ray_channels(
     if not channel_list:
         raise click.ClickException(
             f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry spark preprocess` first, "
+            "Run `spacecraft-telemetry preprocess run` first, "
             "or pass --channels / --channels-from explicitly."
         )
     if subsystem is not None:
@@ -1192,7 +1189,7 @@ def drift_batch_mission(
     if not channels:
         raise click.ClickException(
             f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry spark preprocess` first."
+            "Run `spacecraft-telemetry preprocess run` first."
         )
     if max_channels is not None:
         channels = channels[:max_channels]

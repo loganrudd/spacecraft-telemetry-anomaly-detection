@@ -15,10 +15,8 @@ logging:
   level: DEBUG
   format: console
 
-spark:
+preprocess:
   processed_data_dir: data/processed
-  driver_memory: "3072m"
-  num_cores: 8
   train_fraction: 0.8
   normalization: z-score
   gap_multiplier: 3.0

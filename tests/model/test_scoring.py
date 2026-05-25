@@ -322,7 +322,7 @@ def _override_settings_for_scoring(
     """Return a Settings copy pointing at tmp_path directories."""
     return base.model_copy(  # type: ignore[attr-defined]
         update={
-            "spark": base.spark.model_copy(  # type: ignore[attr-defined]
+            "preprocess": base.preprocess.model_copy(  # type: ignore[attr-defined]
                 update={"processed_data_dir": processed_dir}
             ),
             "model": base.model.model_copy(  # type: ignore[attr-defined]

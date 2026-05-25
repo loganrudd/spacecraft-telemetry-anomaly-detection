@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from spacecraft_telemetry.core.config import MonitoringConfig, Settings, SparkConfig
+from spacecraft_telemetry.core.config import MonitoringConfig, PreprocessingConfig, Settings
 from spacecraft_telemetry.evidently_monitoring.reference import (
     MONITORING_FEATURE_COLS,
     build_reference_profile,
@@ -192,9 +192,9 @@ class TestComputeFeatureDataframeFailures:
 
     def test_mismatched_feature_windows_raises_value_error(self) -> None:
         """feature_windows that don't match MONITORING_FEATURE_COLS raise ValueError."""
-        from spacecraft_telemetry.core.config import SparkConfig
+        from spacecraft_telemetry.core.config import PreprocessingConfig
 
-        settings = Settings(spark=SparkConfig(feature_windows=[5, 20]))
+        settings = Settings(preprocess=PreprocessingConfig(feature_windows=[5, 20]))
         with pytest.raises(ValueError, match="feature_windows"):
             compute_feature_dataframe(_make_series_df(300), settings)
 
@@ -273,20 +273,20 @@ class TestReferenceProfilePath:
 class TestBuildReferenceProfile:
     def test_returns_monitoring_cols(self, tmp_path: Path) -> None:
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
-        settings = Settings(spark=SparkConfig(processed_data_dir=tmp_path))
+        settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert list(df.columns) == MONITORING_FEATURE_COLS
 
     def test_no_nans_in_output(self, tmp_path: Path) -> None:
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
-        settings = Settings(spark=SparkConfig(processed_data_dir=tmp_path))
+        settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert not df.isnull().any().any()
 
     def test_caps_at_reference_sample_rows(self, tmp_path: Path) -> None:
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=10),
         )
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
@@ -295,7 +295,7 @@ class TestBuildReferenceProfile:
     def test_does_not_sample_when_under_cap(self, tmp_path: Path) -> None:
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=5000),
         )
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
@@ -306,7 +306,7 @@ class TestBuildReferenceProfile:
         """Two calls with same settings must return identical sampled rows."""
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=50),
         )
         df1 = build_reference_profile(settings, _MISSION, _CHANNEL)
@@ -314,12 +314,12 @@ class TestBuildReferenceProfile:
         pd.testing.assert_frame_equal(df1, df2)
 
     def test_missing_channel_raises_file_not_found(self, tmp_path: Path) -> None:
-        settings = Settings(spark=SparkConfig(processed_data_dir=tmp_path))
+        settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         with pytest.raises(FileNotFoundError):
             build_reference_profile(settings, _MISSION, "nonexistent_channel")
 
     def test_index_is_zero_based_sequential(self, tmp_path: Path) -> None:
         _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
-        settings = Settings(spark=SparkConfig(processed_data_dir=tmp_path))
+        settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert list(df.index) == list(range(len(df)))

@@ -43,7 +43,7 @@ def _override_settings(
         model_updates.update(model_overrides)
     return base.model_copy(
         update={
-            "spark": base.spark.model_copy(
+            "preprocess": base.preprocess.model_copy(
                 update={"processed_data_dir": processed_dir}
             ),
             "model": base.model.model_copy(update=model_updates),

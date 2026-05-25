@@ -1,30 +1,29 @@
-# RayJob — Ray Tune HPO for scoring parameters on GKE Autopilot.
+# RayJob — pandas + Ray Core preprocessing for all channels on GKE Autopilot.
 #
-# Environment variables required before applying (cloud_tune.sh sets these):
+# Environment variables required before applying (cloud_preprocess.sh sets these):
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (e.g. us-central1)
-#   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
-#   MISSION      Mission name (default: ESA-Mission2)
+#   MISSION      Mission name (default: ESA-Mission1)
 #
 # Apply via:
-#   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
+#   envsubst < deploy/ray/cluster_preprocess.yaml | kubectl apply -f -
 #
 # Sizing rationale:
-#   Tune trials are pure-numpy scoring (Plan 005) — no GPU needed.
-#   n1-standard-4 CPU workers are ~5× cheaper than T4 nodes for this workload.
-#   Head: 1 vCPU / 2 GiB — lightweight Tune driver + MLflow logging.
-#   Workers: 2 vCPU / 4 GiB each, max 4 concurrent (one trial per CPU).
+#   Preprocessing is CPU-bound pandas + PyArrow — no GPU needed.
+#   One Ray task per channel; each task reads ~50-200 MB and writes ~20-80 MB.
+#   Head: 1 vCPU / 2 GiB — lightweight driver (channel fan-out + normalization params).
+#   Workers: 2 vCPU / 4 GiB each, autoscale 0-10 (one channel per vCPU pair).
+#   Spot workers for ~70% cost savings; max_retries=3 on tasks handles preemption.
 
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: spacecraft-tune
+  name: spacecraft-preprocess
   namespace: ray
 spec:
   entrypoint: >-
-    spacecraft-telemetry --env cloud ray tune
-    --mission ${MISSION:-ESA-Mission2}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION:-ESA-Mission2}/channels.txt
+    spacecraft-telemetry --env cloud preprocess run
+    --mission ${MISSION:-ESA-Mission1}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -45,12 +44,10 @@ spec:
               env:
                 - name: SPACECRAFT_ENV
                   value: cloud
-                - name: SPACECRAFT_MLFLOW__TRACKING_URI
-                  value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                   value: gs://${PROJECT_ID}-processed-data
-                - name: MLFLOW_ARTIFACTS_DESTINATION
-                  value: gs://${PROJECT_ID}-artifacts/mlflow
+                - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                  value: gs://${PROJECT_ID}-raw-data/sample
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
               resources:
@@ -83,12 +80,10 @@ spec:
                 env:
                   - name: SPACECRAFT_ENV
                     value: cloud
-                  - name: SPACECRAFT_MLFLOW__TRACKING_URI
-                    value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                     value: gs://${PROJECT_ID}-processed-data
-                  - name: MLFLOW_ARTIFACTS_DESTINATION
-                    value: gs://${PROJECT_ID}-artifacts/mlflow
+                  - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                    value: gs://${PROJECT_ID}-raw-data/sample
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
                 resources:

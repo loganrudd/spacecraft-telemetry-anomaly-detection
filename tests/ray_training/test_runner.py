@@ -27,7 +27,7 @@ def test_discover_channels_finds_channel(tmp_path) -> None:
 
     settings = settings.model_copy(
         update={
-            "spark": settings.spark.model_copy(
+            "preprocess": settings.preprocess.model_copy(
                 update={"processed_data_dir": str(processed_dir)}
             )
         }
@@ -61,7 +61,7 @@ def test_discover_channels_ignores_non_channel_dirs(tmp_path) -> None:
 
     settings = settings.model_copy(
         update={
-            "spark": settings.spark.model_copy(
+            "preprocess": settings.preprocess.model_copy(
                 update={"processed_data_dir": str(processed_dir)}
             )
         }
@@ -207,7 +207,10 @@ def test_score_all_channels_tuned_configs_requires_subsystem_map(
         update={
             "data": pretrained_channel.data.model_copy(
                 update={"raw_data_dir": tmp_path / "raw"}
-            )
+            ),
+            "preprocess": pretrained_channel.preprocess.model_copy(
+                update={"processed_data_dir": tmp_path / "processed"}
+            ),
         }
     )
     tuned = {"subsystem_1": {"threshold_z": 2.5}}
@@ -231,7 +234,7 @@ def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
     rel = Path("some/relative/path")
     settings = settings.model_copy(
         update={
-            "spark": settings.spark.model_copy(update={"processed_data_dir": rel}),
+            "preprocess": settings.preprocess.model_copy(update={"processed_data_dir": rel}),
             "model": settings.model.model_copy(update={"artifacts_dir": rel}),
             "data": settings.data.model_copy(update={"raw_data_dir": rel}),
         }
@@ -239,6 +242,6 @@ def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
 
     result = _with_abs_paths(settings)
 
-    assert result.spark.processed_data_dir.is_absolute(), "processed_data_dir should be absolute"
+    assert result.preprocess.processed_data_dir.is_absolute(), "processed_data_dir should be absolute"
     assert result.model.artifacts_dir.is_absolute(), "artifacts_dir should be absolute"
     assert result.data.raw_data_dir.is_absolute(), "raw_data_dir should be absolute"
