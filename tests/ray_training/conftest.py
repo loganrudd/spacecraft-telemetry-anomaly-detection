@@ -62,7 +62,7 @@ def _write_series_split(
 def ray_series_parquet(tmp_path_factory: pytest.TempPathFactory) -> Settings:
     """Write minimal Parquet for one channel and return Settings pointing to it.
 
-    Returns a test Settings object whose spark.processed_data_dir and
+    Returns a test Settings object whose preprocess.processed_data_dir and
     model.artifacts_dir point into the tmp directory.  Keeps the fixture
     scoped to the session so the file is written once across all Ray tests.
     """
@@ -85,19 +85,24 @@ def ray_series_parquet(tmp_path_factory: pytest.TempPathFactory) -> Settings:
             segment_id=0,
         )
 
-    # Also write normalization_params.json (needed by score_channel).
+    # Also write normalization_params.json and channel_subsystems.json.
     norm_dir = base / _MISSION
     norm_dir.mkdir(parents=True, exist_ok=True)
     import json
     (norm_dir / "normalization_params.json").write_text(
         json.dumps({_CHANNEL: {"mean": 0.0, "std": 1.0}})
     )
+    metadata_dir = norm_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({_CHANNEL: "subsystem_1"})
+    )
 
     artifacts_dir = tmp_path_factory.mktemp("ray_models")
 
     settings = test_cfg.model_copy(
         update={
-            "spark": test_cfg.spark.model_copy(
+            "preprocess": test_cfg.preprocess.model_copy(
                 update={"processed_data_dir": base}
             ),
             "model": test_cfg.model.model_copy(

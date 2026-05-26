@@ -23,9 +23,8 @@ jobs:
 
       - name: Install dependencies
         # ml: torch + ray (heavy but tested — skipping ray in CI hides regressions)
-        # spark: pyspark — ubuntu-latest ships Java 17 which satisfies PySpark 4.x
         # pip cache (setup-python cache: pip above) keeps repeat runs fast
-        run: pip install -e ".[dev,serving,tracking,gcp,spark,ml]"
+        run: pip install -e ".[dev,serving,tracking,gcp,ml]"
 
       - name: Run fast tests
         run: pytest -m "not slow" --cov=spacecraft_telemetry --cov-report=xml -q

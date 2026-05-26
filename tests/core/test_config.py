@@ -12,8 +12,8 @@ from spacecraft_telemetry.core.config import (
     MlflowConfig,
     ModelConfig,
     MonitoringConfig,
+    PreprocessingConfig,
     Settings,
-    SparkConfig,
     TuneConfig,
     load_settings,
 )
@@ -33,7 +33,7 @@ data:
 logging:
   level: DEBUG
   format: console
-spark:
+preprocess:
   train_fraction: 0.8
 """
 
@@ -101,40 +101,37 @@ class TestLoggingConfig:
 
 
 # ---------------------------------------------------------------------------
-# SparkConfig
+# PreprocessingConfig
 # ---------------------------------------------------------------------------
 
 
-class TestSparkConfig:
+class TestPreprocessingConfig:
     def test_defaults(self) -> None:
-        cfg = SparkConfig()
-        # window_size and prediction_horizon live on ModelConfig since Plan 002.5
+        cfg = PreprocessingConfig()
         assert cfg.train_fraction == 0.8
         assert cfg.normalization == "z-score"
         assert cfg.gap_multiplier == 3.0
         assert cfg.feature_windows == [10, 50, 100]
-        assert cfg.driver_memory == "1536m"
-        assert cfg.num_cores == 2
 
     def test_train_fraction_zero_invalid(self) -> None:
         with pytest.raises(ValueError, match="train_fraction"):
-            SparkConfig(train_fraction=0.0)
+            PreprocessingConfig(train_fraction=0.0)
 
     def test_train_fraction_one_invalid(self) -> None:
         with pytest.raises(ValueError, match="train_fraction"):
-            SparkConfig(train_fraction=1.0)
+            PreprocessingConfig(train_fraction=1.0)
 
     def test_train_fraction_valid_range(self) -> None:
-        cfg = SparkConfig(train_fraction=0.7)
+        cfg = PreprocessingConfig(train_fraction=0.7)
         assert cfg.train_fraction == 0.7
 
     def test_invalid_normalization_raises(self) -> None:
         with pytest.raises(ValueError, match="normalization"):
-            SparkConfig(normalization="l2")  # type: ignore[arg-type]
+            PreprocessingConfig(normalization="l2")  # type: ignore[arg-type]
 
     def test_min_max_normalization_rejected(self) -> None:
         with pytest.raises((ValueError, Exception)):
-            SparkConfig(normalization="min-max")  # type: ignore[arg-type]
+            PreprocessingConfig(normalization="min-max")  # type: ignore[arg-type]
 
     def test_window_size_zero_invalid(self) -> None:
         # window_size moved to ModelConfig in Plan 002.5
@@ -143,18 +140,18 @@ class TestSparkConfig:
 
     def test_gap_multiplier_zero_invalid(self) -> None:
         with pytest.raises(ValueError, match="gap_multiplier"):
-            SparkConfig(gap_multiplier=0.0)
+            PreprocessingConfig(gap_multiplier=0.0)
 
     def test_feature_windows_empty_invalid(self) -> None:
         with pytest.raises(ValueError, match="feature_windows"):
-            SparkConfig(feature_windows=[])
+            PreprocessingConfig(feature_windows=[])
 
     def test_feature_windows_zero_entry_invalid(self) -> None:
         with pytest.raises(ValueError, match="feature_windows"):
-            SparkConfig(feature_windows=[10, 0])
+            PreprocessingConfig(feature_windows=[10, 0])
 
     def test_custom_feature_windows(self) -> None:
-        cfg = SparkConfig(feature_windows=[5, 20])
+        cfg = PreprocessingConfig(feature_windows=[5, 20])
         assert cfg.feature_windows == [5, 20]
 
 
@@ -217,13 +214,13 @@ class TestLoadSettings:
         # SPACECRAFT_ENV must not linger after load_settings returns
         assert "SPACECRAFT_ENV" not in os.environ
 
-    def test_spark_config_present_with_defaults(self) -> None:
+    def test_preprocess_config_present_with_defaults(self) -> None:
         settings = Settings()
         # window_size moved to ModelConfig in Plan 002.5
         assert settings.model.window_size == 250
-        assert settings.spark.train_fraction == 0.8
-        assert settings.spark.normalization == "z-score"
-        assert settings.spark.feature_windows == [10, 50, 100]
+        assert settings.preprocess.train_fraction == 0.8
+        assert settings.preprocess.normalization == "z-score"
+        assert settings.preprocess.feature_windows == [10, 50, 100]
 
     def test_settings_direct_construction(self) -> None:
         settings = Settings(

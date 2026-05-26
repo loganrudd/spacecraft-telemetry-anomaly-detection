@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 try:
                     values, _seg, anom, timestamps = await asyncio.to_thread(
                         load_series_parquet,
-                        settings.spark.processed_data_dir,
+                        settings.preprocess.processed_data_dir,
                         settings.api.mission,
                         ch,
                         "test",
@@ -145,7 +145,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                          if settings.api.subsystem else "whole mission")
                 loading.error = (
                     f"No channels loaded for mission={settings.api.mission!r} ({scope}). "
-                    "Train and score at least one channel first."
+                    "Train, score, and promote at least one channel first "
+                    "(make model-train → make model-score → make mlflow-promote)."
                 )
                 log.error("api.lifespan.startup.no_engines", error=loading.error)
                 loading.is_complete = True

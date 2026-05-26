@@ -147,7 +147,7 @@ async def telemetry_stream(
         structlog.contextvars.bind_contextvars(channel_id=channel)
         engine = state.engines[channel]
         async for ts, val, anom_true in replay_channel(
-            state.settings.spark.processed_data_dir,
+            state.settings.preprocess.processed_data_dir,
             state.mission,
             channel,
             speed=speed,
@@ -226,7 +226,7 @@ async def drift_stream(
         drift_event_count = 0
 
         async for _ts, val, _anom in replay_channel(
-            state.settings.spark.processed_data_dir,
+            state.settings.preprocess.processed_data_dir,
             state.mission,
             channel,
             speed=speed,

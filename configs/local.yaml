@@ -8,17 +8,15 @@ data:
     - ESA-Mission1
     - ESA-Mission2
     - ESA-Mission3
-  sample_fraction: .01
-  sample_channels: 100 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
+  sample_fraction: 1.0
+  sample_channels: 1 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
   level: DEBUG
   format: console
 
-spark:
+preprocess:
   processed_data_dir: data/processed
-  driver_memory: "3072m"
-  num_cores: 8
   train_fraction: 0.8
   normalization: z-score
   gap_multiplier: 3.0

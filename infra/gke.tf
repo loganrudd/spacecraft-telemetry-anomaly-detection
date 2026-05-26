@@ -17,6 +17,20 @@ resource "google_container_cluster" "ray" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Limit metrics collection to system components only (node/pod health).
+  # Managed Prometheus cannot be disabled on Autopilot 1.25+ — but restricting
+  # enable_components prevents workload-level metric ingestion, which is the
+  # expensive part. Observability is handled by MLflow + Evidently instead.
+  monitoring_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+  }
+
+  # Suppress workload logs (Ray worker verbosity); retain system component logs
+  # for node/pod lifecycle events only.
+  logging_config {
+    enable_components = ["SYSTEM_COMPONENTS"]
+  }
+
   # Allow `terraform destroy` without manual cluster deletion.
   deletion_protection = false
 

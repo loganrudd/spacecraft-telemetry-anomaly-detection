@@ -1,13 +1,13 @@
 """MLflow Model Registry helpers — model-type-agnostic.
 
 register_pytorch_model: log a PyTorch model artifact and create a ModelVersion.
-promote:                transition a version to Staging / Production / Archived.
-latest_uri:             return the models:/{name}/{stage} URI for loading.
+promote:                set the @champion alias on a version (MLflow 3.x pattern).
+latest_uri:             return the models:/{name}@champion URI for loading.
 
-Stage-based registry (transition_model_version_stage) is used rather than
-MLflow 3.x aliases because the CLI and serving layer use the
-``models:/{name}/{stage}`` URI format.  Migrate to
-``set_registered_model_alias`` when upgrading to MLflow 4.x removes stages.
+MLflow 3.x removed stage-based transitions (Staging/Production/Archived) in
+favour of aliases.  The @champion alias marks the version that is active in
+production.  Load it via models:/{name}@champion or
+client.get_model_version_by_alias(name, "champion").
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from spacecraft_telemetry.core.logging import get_logger
 
 log = get_logger(__name__)
 
+CHAMPION_ALIAS = "champion"
+
 
 def register_pytorch_model(
     *,
@@ -31,8 +33,8 @@ def register_pytorch_model(
     """Log a PyTorch model artifact and register it in the Model Registry.
 
     Logging goes through mlflow.pytorch.log_model (never manual torch.save).
-    The new ModelVersion is queryable via ``models:/{name}/{stage}`` after
-    promote() assigns a stage.
+    The new ModelVersion is queryable via models:/{name}@champion after
+    promote() sets the alias.
 
     Must be called inside an open_run() context so there is an active run for
     the artifact to attach to.
@@ -44,7 +46,7 @@ def register_pytorch_model(
 
     Returns:
         The first mlflow.entities.model_registry.ModelVersion created for this
-        run, or the raw ModelInfo if the version search returns nothing.
+        run, or None if the version search returns nothing.
     """
     mlflow.pytorch.log_model(
         pytorch_model=model,
@@ -55,8 +57,6 @@ def register_pytorch_model(
     versions = client.search_model_versions(f"name='{name}' and run_id='{run_id}'")
     if versions:
         return versions[0]
-    # No ModelVersion found for this run — return None rather than silently
-    # returning a version from a different concurrent run.
     return None
 
 
@@ -64,45 +64,39 @@ def promote(
     *,
     name: str,
     version: int | None = None,
-    stage: str,
 ) -> None:
-    """Transition a registered model version to the target stage.
+    """Set the @champion alias on a registered model version.
+
+    The @champion alias is the MLflow 3.x replacement for the Production stage.
+    Only one version holds @champion at a time — setting it on a new version
+    automatically removes it from the previous one.
 
     Args:
         name:    Registered model name.
         version: Version number to promote.  When None, resolves to the highest
-                 non-Archived version.
-        stage:   One of "Staging", "Production", "Archived".
+                 registered version.
 
     Raises:
-        ValueError: If no promotable version exists for ``name``.
+        ValueError: If no versions exist for ``name``.
     """
     client = mlflow.tracking.MlflowClient()
     if version is None:
-        candidates = [
-            v for v in client.search_model_versions(f"name='{name}'")
-            if v.current_stage != "Archived"
-        ]
+        candidates = client.search_model_versions(f"name='{name}'")
         if not candidates:
             raise ValueError(
-                f"No promotable versions found for registered model {name!r}. "
+                f"No versions found for registered model {name!r}. "
                 "Train at least one channel before promoting."
             )
         version = max(int(v.version) for v in candidates)
 
-    client.transition_model_version_stage(
-        name=name,
-        version=str(version),
-        stage=stage,
-    )
-    log.info("mlflow.registry.promoted", name=name, version=version, stage=stage)
+    client.set_registered_model_alias(name, CHAMPION_ALIAS, str(version))
+    log.info("mlflow.registry.promoted", name=name, version=version, alias=CHAMPION_ALIAS)
 
 
-def latest_uri(name: str, stage: str = "Production") -> str:
-    """Return the models:/{name}/{stage} URI for mlflow.pytorch.load_model.
+def latest_uri(name: str) -> str:
+    """Return the models:/{name}@champion URI for mlflow.pytorch.load_model.
 
     Args:
-        name:  Registered model name.
-        stage: Stage to load from (default "Production").
+        name: Registered model name.
     """
-    return f"models:/{name}/{stage}"
+    return f"models:/{name}@{CHAMPION_ALIAS}"

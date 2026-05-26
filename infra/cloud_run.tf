@@ -127,7 +127,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       env {
-        name  = "SPACECRAFT_SPARK__PROCESSED_DATA_DIR"
+        name  = "SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR"
         value = "gs://${var.project_id}-processed-data"
       }
 

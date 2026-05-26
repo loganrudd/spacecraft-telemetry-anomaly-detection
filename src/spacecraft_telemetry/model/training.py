@@ -126,7 +126,7 @@ def train_channel(
 
     _data_hash: str | None = None
     with suppress(Exception):
-        _data_hash = training_data_hash(settings.spark.processed_data_dir, mission, channel)
+        _data_hash = training_data_hash(settings.preprocess.processed_data_dir, mission, channel)
 
     _exp = experiment_name(cfg.model_type, "training", mission)
     _tags = common_tags(
@@ -227,7 +227,7 @@ def train_channel(
 
         # Log normalization params for this channel (sourced from Spark output).
         _norm_src = (
-            Path(settings.spark.processed_data_dir) / mission / "normalization_params.json"
+            Path(settings.preprocess.processed_data_dir) / mission / "normalization_params.json"
         )
         _all_norm = json.loads(_norm_src.read_bytes())
         log_dict(_all_norm[channel], "normalization_params.json")

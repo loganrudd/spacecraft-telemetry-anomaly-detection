@@ -51,10 +51,10 @@ _TUNABLE_SCORING_FIELDS = frozenset(
 
 
 def discover_channels(settings: Settings, mission: str) -> list[str]:
-    """Return sorted channel IDs found in the Spark train output for a mission.
+    """Return sorted channel IDs found in the preprocessed train output for a mission.
 
     Scans:
-        {spark.processed_data_dir}/{mission}/train/mission_id={mission}/channel_id=*/
+        {preprocess.processed_data_dir}/{mission}/train/mission_id={mission}/channel_id=*/
 
     Returns an empty list (not an exception) if no channels have been preprocessed
     yet — lets the caller print a clear "no channels found" message rather than
@@ -71,7 +71,7 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
         Sorted list of channel ID strings.
     """
     base = (
-        Path(str(settings.spark.processed_data_dir))
+        Path(str(settings.preprocess.processed_data_dir))
         / mission
         / "train"
         / f"mission_id={mission}"
@@ -100,10 +100,10 @@ def _with_abs_paths(settings: Settings) -> Settings:
     """
     return settings.model_copy(
         update={
-            "spark": settings.spark.model_copy(
+            "preprocess": settings.preprocess.model_copy(
                 update={
                     "processed_data_dir": Path(
-                        str(settings.spark.processed_data_dir)
+                        str(settings.preprocess.processed_data_dir)
                     ).resolve()
                 }
             ),
@@ -255,7 +255,7 @@ def score_all_channels(
         ch_to_sub = load_channel_subsystem_map(abs_settings, mission)
         if not ch_to_sub:
             processed_map_path = (
-                Path(str(abs_settings.spark.processed_data_dir))
+                Path(str(abs_settings.preprocess.processed_data_dir))
                 / mission
                 / "metadata"
                 / "channel_subsystems.json"

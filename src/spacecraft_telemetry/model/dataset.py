@@ -199,7 +199,7 @@ def make_dataloaders(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "train"
+        settings.preprocess.processed_data_dir, mission, channel, "train"
     )
     all_indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -270,7 +270,7 @@ def make_test_dataloader(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, timestamps = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -320,7 +320,7 @@ def load_window_labels(
     """
     cfg = settings.model
     _, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
