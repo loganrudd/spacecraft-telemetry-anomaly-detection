@@ -3,7 +3,7 @@ env: cloud
 # GCS paths are set via env vars in deployment (Phase 10):
 #   SPACECRAFT_DATA__RAW_DATA_DIR=gs://{project}-raw-data
 #   SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://{project}-processed/sample
-#   SPACECRAFT_SPARK__PROCESSED_DATA_DIR=gs://{project}-processed
+#   SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://{project}-processed
 #   SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR=gs://{project}-artifacts/reference_profiles
 #   SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR=gs://{project}-artifacts/reference_profiles
 #   SPACECRAFT_MLFLOW__TRACKING_URI=https://{mlflow-cloud-run}.run.app
@@ -48,18 +48,17 @@ model:
   threshold_window: 250
   threshold_z: 3.0
   threshold_min_anomaly_len: 3
-  num_workers: 4
+  num_workers: 0  # 4 channels packed per GPU pod (num_gpus_per_task=0.25) × 4 vCPUs — avoid DataLoader oversubscription
   inference_batch_size: 256
 
 ray:
-  num_cpus: 8
   num_gpus_per_task: 0.25
   max_retries: 3
   address: auto
 
 tune:
   num_samples: 50
-  max_concurrent_trials: 8
+  max_concurrent_trials: 4
   parallel_subsystems: true
   max_parallel_subsystems: 4
   hpo_eval_fraction: 0.6

@@ -64,7 +64,7 @@ spec:
       - groupName: gpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 6 # 6 x 4 = 24 concurrent models training => ~5 batches at 3 min per batch/model = ~15 min total train time
+        maxReplicas: 4 # 4 x 4 = 16 concurrent models training => ~7 batches at 3 min per batch/model = ~21 min total train time (capped by PREEMPTIBLE_NVIDIA_T4_GPUS quota = 4)
         rayStartParams: {}
         template:
           metadata:
