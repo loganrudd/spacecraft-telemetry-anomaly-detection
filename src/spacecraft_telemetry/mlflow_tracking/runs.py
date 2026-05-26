@@ -24,6 +24,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import mlflow
+import mlflow.exceptions
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
@@ -166,7 +167,7 @@ def open_run(
         yield _run
     finally:
         if _run is not None:
-            with suppress(Exception):
+            with suppress(mlflow.exceptions.MlflowException, OSError, ConnectionError):
                 mlflow.end_run()
 
 

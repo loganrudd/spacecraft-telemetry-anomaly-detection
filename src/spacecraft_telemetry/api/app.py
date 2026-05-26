@@ -31,7 +31,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
+import mlflow.exceptions
 import torch
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -55,8 +57,78 @@ from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import load_model_for_scoring, load_scoring_params
 
 # Maximum concurrent MLflow model loads during lifespan startup.  Unbounded
-# gather causes OOM or MLflow throttling at whole-mission scale (300+ channels).
+# gather causes OOM or MLflow throttling at whole-mission scale (100+ channels).
 _LIFESPAN_LOAD_CONCURRENCY = 8
+
+# Exceptions that indicate a transient or expected channel-load failure (missing
+# model, registry unavailable, network blip).  Programming errors (TypeError,
+# AttributeError, KeyError) are intentionally excluded so they propagate loudly.
+_CHANNEL_LOAD_ERRORS = (
+    mlflow.exceptions.MlflowException,
+    OSError,
+    FileNotFoundError,
+    ConnectionError,
+    TimeoutError,
+    RuntimeError,
+)
+
+
+async def _load_engine(
+    ch: str,
+    settings: Settings,
+    device: torch.device,
+    sem: asyncio.Semaphore,
+    loading: LoadingState,
+    log: Any,
+) -> tuple[str, ChannelInferenceEngine | None]:
+    """Load LSTM model + scoring params for one channel; returns None on expected failure."""
+    async with sem:
+        try:
+            name = registered_model_name("telemanom", settings.api.mission, ch)
+            model, window_size = await asyncio.to_thread(
+                load_model_for_scoring, name, device, settings.mlflow.tracking_uri
+            )
+            model.eval()
+            params = await asyncio.to_thread(
+                load_scoring_params,
+                channel=ch,
+                mission=settings.api.mission,
+                tracking_uri=settings.mlflow.tracking_uri,
+            )
+            engine = ChannelInferenceEngine(
+                mission=settings.api.mission,
+                channel=ch,
+                model=model,
+                window_size=window_size,
+                params=params,
+                device=device,
+            )
+            log.info("api.lifespan.channel.loaded", channel=ch, window_size=window_size)
+            loading.channels_ready += 1
+            return ch, engine
+        except _CHANNEL_LOAD_ERRORS as exc:
+            log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
+            return ch, None
+        finally:
+            loading.channels_done += 1
+
+
+async def _load_drift_ref(
+    ch: str,
+    settings: Settings,
+    sem: asyncio.Semaphore,
+    log: Any,
+) -> tuple[str, object]:
+    """Load Evidently reference profile for one channel; returns None when missing."""
+    async with sem:
+        prof_path = reference_profile_path(settings, settings.api.mission, ch)
+        try:
+            ref = await asyncio.to_thread(load_reference_profile, prof_path)
+            log.info("api.lifespan.drift_reference.loaded", channel=ch)
+            return ch, ref
+        except FileNotFoundError:
+            log.warning("api.lifespan.drift_reference.missing", channel=ch)
+            return ch, None
 
 
 @asynccontextmanager
@@ -85,43 +157,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     loading = LoadingState(channels_total=len(resolved))
     app.state.loading_state = loading
-
-    _load_sem = asyncio.Semaphore(_LIFESPAN_LOAD_CONCURRENCY)
-
-    async def _load_engine(ch: str) -> tuple[str, ChannelInferenceEngine | None]:
-        async with _load_sem:
-            try:
-                name = registered_model_name("telemanom", settings.api.mission, ch)
-                model, window_size = await asyncio.to_thread(
-                    load_model_for_scoring, name, device, settings.mlflow.tracking_uri
-                )
-                model.eval()
-                params = await asyncio.to_thread(
-                    load_scoring_params,
-                    channel=ch,
-                    mission=settings.api.mission,
-                    tracking_uri=settings.mlflow.tracking_uri,
-                )
-                engine = ChannelInferenceEngine(
-                    mission=settings.api.mission,
-                    channel=ch,
-                    model=model,
-                    window_size=window_size,
-                    params=params,
-                    device=device,
-                )
-                log.info("api.lifespan.channel.loaded", channel=ch, window_size=window_size)
-                loading.channels_ready += 1
-                return ch, engine
-            except Exception as exc:
-                log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
-                return ch, None
-            finally:
-                loading.channels_done += 1
+    sem = asyncio.Semaphore(_LIFESPAN_LOAD_CONCURRENCY)
 
     async def _background_load() -> None:
         try:
-            engine_results = await asyncio.gather(*[_load_engine(ch) for ch in resolved])
+            engine_results = await asyncio.gather(
+                *[_load_engine(ch, settings, device, sem, loading, log) for ch in resolved]
+            )
             engines: dict[str, ChannelInferenceEngine] = {
                 ch: eng for ch, eng in engine_results if eng is not None
             }
@@ -137,7 +179,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         "test",
                     )
                     replay_data[ch] = (values, anom, timestamps)
-                except Exception as exc:
+                except (OSError, FileNotFoundError, ValueError) as exc:
                     log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
 
             if not engines:
@@ -154,18 +196,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             drift_references: dict[str, object] = {}
             if settings.drift.enabled:
-                async def _load_drift_ref(ch: str) -> tuple[str, object]:
-                    async with _load_sem:
-                        prof_path = reference_profile_path(settings, settings.api.mission, ch)
-                        try:
-                            ref = await asyncio.to_thread(load_reference_profile, prof_path)
-                            log.info("api.lifespan.drift_reference.loaded", channel=ch)
-                            return ch, ref
-                        except FileNotFoundError:
-                            log.warning("api.lifespan.drift_reference.missing", channel=ch)
-                            return ch, None
-
-                for ch, ref in await asyncio.gather(*[_load_drift_ref(ch) for ch in engines]):
+                for ch, ref in await asyncio.gather(
+                    *[_load_drift_ref(ch, settings, sem, log) for ch in engines]
+                ):
                     if ref is not None:
                         drift_references[ch] = ref
             else:
