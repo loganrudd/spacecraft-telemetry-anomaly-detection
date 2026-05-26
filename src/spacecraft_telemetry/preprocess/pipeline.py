@@ -69,7 +69,7 @@ def _preprocess_channel(
         "telemetry_timestamp", "value_normalized",
         "channel_id", "mission_id", "segment_id", "is_anomaly",
     ]
-    series_df = labeled[[c for c in series_cols if c in labeled.columns]]
+    series_df = labeled[series_cols]
 
     train_series, test_series = temporal_train_test_split(
         series_df, train_fraction=settings.preprocess.train_fraction

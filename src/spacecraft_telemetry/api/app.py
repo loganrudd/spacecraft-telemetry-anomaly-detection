@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 replay_data=MappingProxyType(replay_data),
                 startup_monotonic_ns=time.monotonic_ns(),
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
-                drift_references=drift_references,
+                drift_references=MappingProxyType(drift_references),
             )
             log.info("api.lifespan.startup.complete", channels_loaded=sorted(engines.keys()))
 

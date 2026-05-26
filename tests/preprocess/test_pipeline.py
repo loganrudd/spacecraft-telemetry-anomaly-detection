@@ -155,13 +155,19 @@ class TestRunPreprocessingOutputData:
         assert "is_anomaly" in train_df.columns
 
     def test_some_rows_are_anomalous(self, settings) -> None:
-        # The labels fixture marks rows 10-14, 40-44, 70-74 as anomalous.
+        # Labels use half-open intervals [start, end): rows 10-13, 40-43, 70-73
+        # (4 rows per segment x 3 segments = 12 total).  All fall in train
+        # (train_fraction=0.8 on 100 rows, cutoff after row 79).
         run_preprocessing(settings, "ESA-Mission1", parallel=False)
         out = Path(str(settings.preprocess.processed_data_dir))
         train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
         test_df = _read_partition(out, "ESA-Mission1", "test", "channel_1")
-        combined = pd.concat([train_df, test_df])
-        assert combined["is_anomaly"].any()
+        combined = pd.concat([train_df, test_df]).reset_index(drop=True)
+        assert combined["is_anomaly"].sum() == 12
+        # Verify anomalous rows fall at the expected offsets within the combined series.
+        anomalous_positions = combined.index[combined["is_anomaly"]].tolist()
+        expected = [10, 11, 12, 13, 40, 41, 42, 43, 70, 71, 72, 73]
+        assert anomalous_positions == expected
 
 
 # ---------------------------------------------------------------------------

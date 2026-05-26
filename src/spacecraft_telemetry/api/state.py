@@ -67,7 +67,9 @@ class AppState:
     # drift.enabled is True.  Values are pd.DataFrame (typed Any to avoid
     # importing pandas from state.py).  Each drift stream request creates its
     # own per-request RollingDriftMonitor from these immutable profiles.
-    drift_references: dict[str, Any] = field(default_factory=dict)
+    drift_references: MappingProxyType[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     @property
     def channels_loaded(self) -> list[str]:

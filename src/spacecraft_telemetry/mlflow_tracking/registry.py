@@ -50,7 +50,7 @@ def register_pytorch_model(
     """
     mlflow.pytorch.log_model(
         pytorch_model=model,
-        artifact_path="model",
+        name="model",
         registered_model_name=name,
     )
     client = mlflow.tracking.MlflowClient()

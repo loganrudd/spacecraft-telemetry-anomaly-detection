@@ -78,12 +78,12 @@ def load_series_parquet(
         for f in parquet_files
     ]
     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
-    df = table.to_pandas().sort_values("telemetry_timestamp").reset_index(drop=True)
+    table = table.sort_by("telemetry_timestamp")
 
-    values = df["value_normalized"].to_numpy(dtype=np.float32)   # (N,)
-    segment_ids = df["segment_id"].to_numpy(dtype=np.int32)       # (N,)
-    is_anomaly = df["is_anomaly"].to_numpy(dtype=bool)            # (N,)
-    timestamps = df["telemetry_timestamp"].to_numpy()             # (N,) datetime64[ns]
+    values = table.column("value_normalized").to_numpy(zero_copy_only=False).astype(np.float32)
+    segment_ids = table.column("segment_id").to_numpy(zero_copy_only=False).astype(np.int32)
+    is_anomaly = table.column("is_anomaly").to_numpy(zero_copy_only=False).astype(bool)
+    timestamps = table.column("telemetry_timestamp").to_numpy(zero_copy_only=False)
 
     return values, segment_ids, is_anomaly, timestamps
 

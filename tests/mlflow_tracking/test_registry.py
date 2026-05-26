@@ -64,7 +64,7 @@ class TestRegisterPytorchModel:
 
         mock_log.assert_called_once()
         kwargs = mock_log.call_args.kwargs
-        assert kwargs["artifact_path"] == "model"
+        assert kwargs["name"] == "model"
         assert kwargs["registered_model_name"] == model_name
         assert kwargs["pytorch_model"] is fake_model
 
