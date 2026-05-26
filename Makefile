@@ -264,6 +264,7 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 		-target=kubernetes_namespace.ray \
 		-target=helm_release.kuberay_operator \
 		-auto-approve
+	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
 cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after training.
 	terraform -chdir=infra destroy \
