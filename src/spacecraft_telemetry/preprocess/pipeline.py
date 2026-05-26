@@ -13,15 +13,15 @@ used by unit tests to avoid Ray cold-start cost.
 from __future__ import annotations
 
 import json
-import shutil
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import ray
+from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.paths import absolutize_if_local, to_upath
 from spacecraft_telemetry.preprocess.io import read_channel, read_labels, write_series
 from spacecraft_telemetry.preprocess.transforms import (
     detect_gaps,
@@ -43,15 +43,15 @@ def _preprocess_channel(
     settings: Settings,
     mission: str,
     channel: str,
-    train_out: Path,
-    test_out: Path,
+    train_out: UPath,
+    test_out: UPath,
     labels_df: pd.DataFrame | None,
 ) -> dict[str, Any]:
     """Preprocess a single channel and write train/test Parquet partitions.
 
     Returns a result dict for the caller to accumulate into the pipeline summary.
     """
-    data_dir = Path(str(settings.data.sample_data_dir))
+    data_dir = to_upath(settings.data.sample_data_dir)
     channel_path = data_dir / mission / "channels" / f"{channel}.parquet"
 
     raw_df = read_channel(channel_path, channel, mission)
@@ -100,7 +100,7 @@ def _preprocess_channel_remote(
     settings: Settings,
     mission: str,
     channel: str,
-    train_out_str: str,
+    train_out_str: str,  # serialized as str across Ray boundary; reconstructed as UPath
     test_out_str: str,
     labels_df: pd.DataFrame | None,
 ) -> dict[str, Any]:
@@ -113,7 +113,7 @@ def _preprocess_channel_remote(
     """
     return _preprocess_channel(
         settings, mission, channel,
-        Path(train_out_str), Path(test_out_str),
+        UPath(train_out_str), UPath(test_out_str),
         labels_df,
     )
 
@@ -154,8 +154,8 @@ def run_preprocessing(
         FileNotFoundError: If no channel Parquet files found.
     """
     cfg = settings.preprocess
-    data_dir = Path(str(settings.data.sample_data_dir))
-    output_dir = Path(str(cfg.processed_data_dir))
+    data_dir = to_upath(settings.data.sample_data_dir)
+    output_dir = to_upath(cfg.processed_data_dir)
 
     channel_dir = data_dir / mission / "channels"
     labels_path = data_dir / mission / "labels.csv"
@@ -182,11 +182,12 @@ def run_preprocessing(
         labels_df = read_labels(labels_path)
 
     # Clear output dirs: re-runs must not accumulate duplicates.
+    # Use the underlying fsspec fs.rm() so this works for both local and gs://.
     train_out = output_dir / mission / "train"
     test_out = output_dir / mission / "test"
     for out_dir in (train_out, test_out):
         if out_dir.exists():
-            shutil.rmtree(out_dir)
+            out_dir.fs.rm(str(out_dir), recursive=True)
 
     log.info(
         "pipeline.start",
@@ -219,9 +220,19 @@ def run_preprocessing(
                 mission=mission,
             )
 
-    params_path = output_dir / mission / "normalization_params.json"
-    params_path.parent.mkdir(parents=True, exist_ok=True)
+    mission_out = output_dir / mission
+    mission_out.mkdir(parents=True, exist_ok=True)
+
+    params_path = mission_out / "normalization_params.json"
     params_path.write_text(json.dumps(normalization_params, indent=2))
+
+    # Write a channels.txt manifest consumed by --channels-from in cloud-train/tune.
+    successful_channels = [
+        r["channel_id"] for r in results if r["train_rows"] > 0
+    ]
+    channels_txt = mission_out / "channels.txt"
+    channels_txt.write_text("\n".join(successful_channels) + "\n")
+    log.info("pipeline.channels_manifest", path=str(channels_txt), n=len(successful_channels))
 
     summary: dict[str, int] = {
         "channels_processed": len(channel_list),
@@ -237,8 +248,8 @@ def _run_sequential(
     settings: Settings,
     mission: str,
     channels: list[str],
-    train_out: Path,
-    test_out: Path,
+    train_out: UPath,
+    test_out: UPath,
     labels_df: pd.DataFrame | None,
 ) -> list[dict[str, Any]]:
     results = []
@@ -254,23 +265,24 @@ def _run_parallel(
     settings: Settings,
     mission: str,
     channels: list[str],
-    train_out: Path,
-    test_out: Path,
+    train_out: UPath,
+    test_out: UPath,
     labels_df: pd.DataFrame | None,
 ) -> list[dict[str, Any]]:
-    # Resolve relative paths before passing to Ray workers.
+    # Resolve relative local paths to absolute before ray.put() — Ray workers
+    # run from Ray's session dir. Cloud URIs (gs://) pass through unchanged.
     abs_settings = settings.model_copy(
         update={
             "preprocess": settings.preprocess.model_copy(
                 update={
-                    "processed_data_dir": Path(
-                        str(settings.preprocess.processed_data_dir)
-                    ).resolve()
+                    "processed_data_dir": absolutize_if_local(
+                        settings.preprocess.processed_data_dir
+                    )
                 }
             ),
             "data": settings.data.model_copy(
                 update={
-                    "sample_data_dir": Path(str(settings.data.sample_data_dir)).resolve()
+                    "sample_data_dir": absolutize_if_local(settings.data.sample_data_dir)
                 }
             ),
         }
@@ -279,8 +291,8 @@ def _run_parallel(
     labels_ref = ray.put(labels_df) if labels_df is not None else None
     settings_ref = ray.put(abs_settings)
 
-    abs_train_out = str(train_out.resolve())
-    abs_test_out = str(test_out.resolve())
+    abs_train_out = str(absolutize_if_local(train_out))
+    abs_test_out = str(absolutize_if_local(test_out))
 
     futures = [
         _preprocess_channel_remote.remote(

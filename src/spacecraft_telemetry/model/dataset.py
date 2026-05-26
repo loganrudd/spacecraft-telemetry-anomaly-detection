@@ -22,12 +22,14 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as _TorchDataset
+from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.paths import to_upath
 
 
 def load_series_parquet(
-    processed_dir: Path,
+    processed_dir: Path | UPath | str,
     mission: str,
     channel: str,
     split: Literal["train", "test"],
@@ -53,7 +55,7 @@ def load_series_parquet(
             Parquet files.
     """
     partition_dir = (
-        Path(processed_dir) / mission / split
+        to_upath(processed_dir) / mission / split
         / f"mission_id={mission}" / f"channel_id={channel}"
     )
     if not partition_dir.exists():
@@ -70,7 +72,7 @@ def load_series_parquet(
 
     tables = [
         pq.read_table(
-            f,
+            str(f),
             columns=["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"],
         )
         for f in parquet_files

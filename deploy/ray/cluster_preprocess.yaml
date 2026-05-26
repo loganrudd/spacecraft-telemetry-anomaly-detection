@@ -47,7 +47,7 @@ spec:
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                   value: gs://${PROJECT_ID}-processed-data
                 - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
-                  value: gs://${PROJECT_ID}-raw-data/sample
+                  value: gs://${PROJECT_ID}-sample-data
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
               resources:
@@ -83,7 +83,7 @@ spec:
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                     value: gs://${PROJECT_ID}-processed-data
                   - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
-                    value: gs://${PROJECT_ID}-raw-data/sample
+                    value: gs://${PROJECT_ID}-sample-data
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
                 resources:

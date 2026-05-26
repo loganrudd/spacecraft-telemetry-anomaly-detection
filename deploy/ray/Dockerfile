@@ -3,8 +3,10 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # gcc is required to build some Ray/PyTorch C extensions on slim base.
+# wget is required by KubeRay's default head-pod readiness/liveness probes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

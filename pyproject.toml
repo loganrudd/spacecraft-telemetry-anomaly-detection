@@ -19,6 +19,8 @@ dependencies = [
     "pandas>=2.0",
     "rich>=13.0",
     "click>=8.0",
+    "universal-pathlib>=0.2",
+    "fsspec>=2024.2",
 ]
 
 [project.optional-dependencies]
@@ -82,5 +84,5 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*"]
+module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*"]
 ignore_missing_imports = true

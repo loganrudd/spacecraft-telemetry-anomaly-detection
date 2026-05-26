@@ -10,19 +10,19 @@ evidently_monitoring/reference.py — none of those files change.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from upath import UPath
 
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.preprocess.schemas import SERIES_FILE_SCHEMA
 
 log = get_logger(__name__)
 
 
-def read_channel(path: Path, channel_id: str, mission_id: str) -> pd.DataFrame:
+def read_channel(path: UPath, channel_id: str, mission_id: str) -> pd.DataFrame:
     """Read a raw channel Parquet file and return a standardised DataFrame.
 
     Raw files written by ingest/sample.py have:
@@ -38,7 +38,7 @@ def read_channel(path: Path, channel_id: str, mission_id: str) -> pd.DataFrame:
     Raises:
         ValueError: If either expected column is absent from the file.
     """
-    df = pd.read_parquet(path)
+    df = pd.read_parquet(str(path))
 
     # Promote DatetimeIndex to a regular column named "datetime".
     if isinstance(df.index, pd.DatetimeIndex):
@@ -74,7 +74,7 @@ def read_channel(path: Path, channel_id: str, mission_id: str) -> pd.DataFrame:
     return df[["telemetry_timestamp", "value", "channel_id", "mission_id"]]
 
 
-def read_labels(path: Path) -> pd.DataFrame:
+def read_labels(path: UPath) -> pd.DataFrame:
     """Read a labels CSV and return a standardised DataFrame.
 
     Raw CSV has columns: ID, Channel, StartTime, EndTime
@@ -87,7 +87,7 @@ def read_labels(path: Path) -> pd.DataFrame:
         start_time   datetime64[us, UTC]
         end_time     datetime64[us, UTC]
     """
-    df = pd.read_csv(path)
+    df = pd.read_csv(str(path))
     df = df.rename(columns={"ID": "anomaly_id", "Channel": "channel_id"})
 
     def _parse_ts(series: pd.Series) -> pd.Series:
@@ -102,7 +102,7 @@ def read_labels(path: Path) -> pd.DataFrame:
     return df[["anomaly_id", "channel_id", "start_time", "end_time"]]
 
 
-def write_series(df: pd.DataFrame, output_path: Path) -> None:
+def write_series(df: pd.DataFrame, output_path: UPath) -> None:
     """Write per-timestep series data to a Hive partition directory.
 
     Each call writes exactly one channel's data. The partition path is derived
@@ -123,7 +123,7 @@ def write_series(df: pd.DataFrame, output_path: Path) -> None:
     mission_id = str(df["mission_id"].iloc[0])
     channel_id = str(df["channel_id"].iloc[0])
 
-    partition_dir = output_path / f"mission_id={mission_id}" / f"channel_id={channel_id}"
+    partition_dir = to_upath(output_path) / f"mission_id={mission_id}" / f"channel_id={channel_id}"
     partition_dir.mkdir(parents=True, exist_ok=True)
 
     out_df = (
@@ -133,7 +133,7 @@ def write_series(df: pd.DataFrame, output_path: Path) -> None:
     )
 
     table = pa.Table.from_pandas(out_df, schema=SERIES_FILE_SCHEMA, preserve_index=False)
-    pq.write_table(table, partition_dir / "part.parquet")
+    pq.write_table(table, str(partition_dir / "part.parquet"))
 
     log.info(
         "write_series",
