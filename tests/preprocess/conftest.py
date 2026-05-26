@@ -8,6 +8,7 @@ The pipeline_input_dir layout mirrors what ingest/sample.py produces:
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pandas as pd
@@ -166,3 +167,68 @@ def settings(pipeline_input_dir: Path, tmp_path: Path):
             feature_windows=[10],
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Class-scoped pipeline fixture — run once per class, shared across methods
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class PipelineResult:
+    summary: dict
+    out_dir: Path
+
+
+@pytest.fixture(scope="class")
+def pipeline_result(tmp_path_factory: pytest.TempPathFactory) -> PipelineResult:
+    """Run the preprocessing pipeline once per test class; reuse results across methods.
+
+    Identical input data to sample_channel_pd / labels_pd / pipeline_input_dir.
+    Using tmp_path_factory (class-scoped compatible) instead of tmp_path.
+    """
+    from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+    from spacecraft_telemetry.preprocess.pipeline import run_preprocessing
+
+    base = tmp_path_factory.mktemp("pipeline_cls")
+    mission = "ESA-Mission1"
+    channels_dir = base / "input" / mission / "channels"
+    channels_dir.mkdir(parents=True)
+
+    index = pd.date_range(start="2000-01-01", periods=100, freq="90s", name="datetime")
+    values = pd.array([float(i % 10) * 0.1 for i in range(100)], dtype="float32")
+    _write_parquet_micros(
+        pd.DataFrame({"channel_1": values}, index=index),
+        channels_dir / "channel_1.parquet",
+    )
+
+    base_ts = pd.Timestamp("2000-01-01")
+    pd.DataFrame(
+        {
+            "ID": ["id_1", "id_1", "id_2"],
+            "Channel": ["channel_1", "channel_1", "channel_1"],
+            "StartTime": [
+                (base_ts + pd.Timedelta(seconds=90 * 10)).isoformat() + "Z",
+                (base_ts + pd.Timedelta(seconds=90 * 40)).isoformat() + "Z",
+                (base_ts + pd.Timedelta(seconds=90 * 70)).isoformat() + "Z",
+            ],
+            "EndTime": [
+                (base_ts + pd.Timedelta(seconds=90 * 14)).isoformat() + "Z",
+                (base_ts + pd.Timedelta(seconds=90 * 44)).isoformat() + "Z",
+                (base_ts + pd.Timedelta(seconds=90 * 74)).isoformat() + "Z",
+            ],
+        }
+    ).to_csv(base / "input" / mission / "labels.csv", index=False)
+
+    out_dir = base / "output"
+    out_dir.mkdir()
+    s = Settings(
+        data=DataConfig(sample_data_dir=base / "input"),
+        preprocess=PreprocessingConfig(
+            processed_data_dir=out_dir,
+            train_fraction=0.8,
+            feature_windows=[10],
+        ),
+    )
+    summary = run_preprocessing(s, mission, parallel=False)
+    return PipelineResult(summary=summary, out_dir=out_dir)

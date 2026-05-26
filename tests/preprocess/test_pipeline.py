@@ -38,77 +38,44 @@ def _read_partition(base: Path, mission: str, split: str, channel: str) -> pd.Da
 
 
 class TestRunPreprocessingHappyPath:
-    def test_returns_summary_dict(self, settings) -> None:
-        summary = run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        assert isinstance(summary, dict)
+    def test_returns_summary_dict(self, pipeline_result) -> None:
+        assert isinstance(pipeline_result.summary, dict)
 
-    def test_summary_has_expected_keys(self, settings) -> None:
-        summary = run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        assert set(summary.keys()) == {
+    def test_summary_has_expected_keys(self, pipeline_result) -> None:
+        assert set(pipeline_result.summary.keys()) == {
             "channels_processed", "rows_in", "train_rows", "test_rows"
         }
 
-    def test_channels_processed_equals_one(self, settings) -> None:
-        summary = run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        assert summary["channels_processed"] == 1
+    def test_channels_processed_equals_one(self, pipeline_result) -> None:
+        assert pipeline_result.summary["channels_processed"] == 1
 
-    def test_row_counts_add_up(self, settings) -> None:
-        summary = run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        assert summary["train_rows"] + summary["test_rows"] == summary["rows_in"]
+    def test_row_counts_add_up(self, pipeline_result) -> None:
+        s = pipeline_result.summary
+        assert s["train_rows"] + s["test_rows"] == s["rows_in"]
 
-    def test_train_split_directory_created(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        train_dir = (
-            Path(str(settings.preprocess.processed_data_dir))
-            / "ESA-Mission1" / "train"
-        )
-        assert train_dir.is_dir()
+    def test_train_split_directory_created(self, pipeline_result) -> None:
+        assert (pipeline_result.out_dir / "ESA-Mission1" / "train").is_dir()
 
-    def test_test_split_directory_created(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        test_dir = (
-            Path(str(settings.preprocess.processed_data_dir))
-            / "ESA-Mission1" / "test"
-        )
-        assert test_dir.is_dir()
+    def test_test_split_directory_created(self, pipeline_result) -> None:
+        assert (pipeline_result.out_dir / "ESA-Mission1" / "test").is_dir()
 
-    def test_partition_dirs_created(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
-        train_partition = (
-            out / "ESA-Mission1" / "train"
-            / "mission_id=ESA-Mission1" / "channel_id=channel_1"
-        )
-        test_partition = (
-            out / "ESA-Mission1" / "test"
-            / "mission_id=ESA-Mission1" / "channel_id=channel_1"
-        )
-        assert train_partition.is_dir()
-        assert test_partition.is_dir()
+    def test_partition_dirs_created(self, pipeline_result) -> None:
+        out = pipeline_result.out_dir
+        ch = "channel_id=channel_1"
+        assert (out / "ESA-Mission1" / "train" / "mission_id=ESA-Mission1" / ch).is_dir()
+        assert (out / "ESA-Mission1" / "test" / "mission_id=ESA-Mission1" / ch).is_dir()
 
-    def test_normalization_params_json_written(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        params_path = (
-            Path(str(settings.preprocess.processed_data_dir))
-            / "ESA-Mission1" / "normalization_params.json"
-        )
+    def test_normalization_params_json_written(self, pipeline_result) -> None:
+        params_path = pipeline_result.out_dir / "ESA-Mission1" / "normalization_params.json"
         assert params_path.exists()
 
-    def test_normalization_params_has_channel_key(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        params_path = (
-            Path(str(settings.preprocess.processed_data_dir))
-            / "ESA-Mission1" / "normalization_params.json"
-        )
+    def test_normalization_params_has_channel_key(self, pipeline_result) -> None:
+        params_path = pipeline_result.out_dir / "ESA-Mission1" / "normalization_params.json"
         params = json.loads(params_path.read_text())
         assert "channel_1" in params
 
-    def test_normalization_params_contains_mean_and_std(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        params_path = (
-            Path(str(settings.preprocess.processed_data_dir))
-            / "ESA-Mission1" / "normalization_params.json"
-        )
+    def test_normalization_params_contains_mean_and_std(self, pipeline_result) -> None:
+        params_path = pipeline_result.out_dir / "ESA-Mission1" / "normalization_params.json"
         params = json.loads(params_path.read_text())
         ch = params["channel_1"]
         assert "mean" in ch and "std" in ch
@@ -122,52 +89,40 @@ class TestRunPreprocessingHappyPath:
 
 
 class TestRunPreprocessingOutputData:
-    def test_train_rows_sorted_by_timestamp(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
-        train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
+    def test_train_rows_sorted_by_timestamp(self, pipeline_result) -> None:
+        train_df = _read_partition(pipeline_result.out_dir, "ESA-Mission1", "train", "channel_1")
         diffs = train_df["telemetry_timestamp"].diff().iloc[1:]
         assert (diffs >= pd.Timedelta(0)).all()
 
-    def test_train_before_test_temporally(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
+    def test_train_before_test_temporally(self, pipeline_result) -> None:
+        out = pipeline_result.out_dir
         train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
         test_df = _read_partition(out, "ESA-Mission1", "test", "channel_1")
         assert train_df["telemetry_timestamp"].max() < test_df["telemetry_timestamp"].min()
 
-    def test_value_normalized_is_float32(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
-        train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
+    def test_value_normalized_is_float32(self, pipeline_result) -> None:
+        train_df = _read_partition(pipeline_result.out_dir, "ESA-Mission1", "train", "channel_1")
         assert train_df["value_normalized"].dtype == np.float32
 
-    def test_segment_id_is_int32(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
-        train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
+    def test_segment_id_is_int32(self, pipeline_result) -> None:
+        train_df = _read_partition(pipeline_result.out_dir, "ESA-Mission1", "train", "channel_1")
         assert train_df["segment_id"].dtype == np.int32
 
-    def test_is_anomaly_present(self, settings) -> None:
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
-        train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
+    def test_is_anomaly_present(self, pipeline_result) -> None:
+        train_df = _read_partition(pipeline_result.out_dir, "ESA-Mission1", "train", "channel_1")
         assert "is_anomaly" in train_df.columns
 
-    def test_some_rows_are_anomalous(self, settings) -> None:
+    def test_some_rows_are_anomalous(self, pipeline_result) -> None:
         # Labels use half-open intervals [start, end): rows 10-13, 40-43, 70-73
         # (4 rows per segment x 3 segments = 12 total).  All fall in train
         # (train_fraction=0.8 on 100 rows, cutoff after row 79).
-        run_preprocessing(settings, "ESA-Mission1", parallel=False)
-        out = Path(str(settings.preprocess.processed_data_dir))
+        out = pipeline_result.out_dir
         train_df = _read_partition(out, "ESA-Mission1", "train", "channel_1")
         test_df = _read_partition(out, "ESA-Mission1", "test", "channel_1")
         combined = pd.concat([train_df, test_df]).reset_index(drop=True)
         assert combined["is_anomaly"].sum() == 12
-        # Verify anomalous rows fall at the expected offsets within the combined series.
         anomalous_positions = combined.index[combined["is_anomaly"]].tolist()
-        expected = [10, 11, 12, 13, 40, 41, 42, 43, 70, 71, 72, 73]
-        assert anomalous_positions == expected
+        assert anomalous_positions == [10, 11, 12, 13, 40, 41, 42, 43, 70, 71, 72, 73]
 
 
 # ---------------------------------------------------------------------------
