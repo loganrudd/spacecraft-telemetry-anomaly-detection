@@ -242,6 +242,8 @@ def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
 
     result = _with_abs_paths(settings)
 
-    assert result.preprocess.processed_data_dir.is_absolute(), "processed_data_dir should be absolute"
+    assert result.preprocess.processed_data_dir.is_absolute(), (
+        "processed_data_dir should be absolute"
+    )
     assert result.model.artifacts_dir.is_absolute(), "artifacts_dir should be absolute"
     assert result.data.raw_data_dir.is_absolute(), "raw_data_dir should be absolute"

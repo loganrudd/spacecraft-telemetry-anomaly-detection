@@ -22,7 +22,6 @@ import json
 import sys
 from pathlib import Path
 
-
 MODEL_TYPE = "telemanom"
 DEFAULT_MISSION = "ESA-Mission2"
 WINDOW_SIZE = 250
@@ -62,6 +61,8 @@ def register_channel(
 
     from spacecraft_telemetry.mlflow_tracking.conventions import (
         experiment_name as exp_name,
+    )
+    from spacecraft_telemetry.mlflow_tracking.conventions import (
         registered_model_name as reg_name,
     )
 

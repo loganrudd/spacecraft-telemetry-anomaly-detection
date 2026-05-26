@@ -996,7 +996,11 @@ class TestDriftCommands:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
-        from spacecraft_telemetry.core.config import MonitoringConfig, PreprocessingConfig, Settings
+        from spacecraft_telemetry.core.config import (
+            MonitoringConfig,
+            PreprocessingConfig,
+            Settings,
+        )
 
         mission = "TEST-Mission"
         channel = "ch_1"

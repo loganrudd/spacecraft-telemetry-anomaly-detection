@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from spacecraft_telemetry.preprocess.transforms import (
     detect_gaps,
@@ -14,7 +13,6 @@ from spacecraft_telemetry.preprocess.transforms import (
     normalize,
     temporal_train_test_split,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -243,7 +241,7 @@ class TestTemporalTrainTestSplit:
 
     def test_train_fraction_80_approx(self) -> None:
         df = _make_channel_df(n=100)
-        train, test = temporal_train_test_split(df, train_fraction=0.8)
+        train, _test = temporal_train_test_split(df, train_fraction=0.8)
         # Allow ±2 rows — cutoff falls on a timestamp boundary.
         assert 78 <= len(train) <= 82
 
@@ -292,7 +290,6 @@ class TestLabelTimesteps:
 
     def test_timestamps_inside_interval_are_anomalous(self) -> None:
         df = _make_channel_df(n=20)
-        base = pd.Timestamp("2000-01-01", tz="UTC")
         # Row 2 is at 00:03:00, row 4 is at 00:06:00.
         labels = _make_labels_df(
             segments=[("2000-01-01T00:03:00Z", "2000-01-01T00:06:01Z")]

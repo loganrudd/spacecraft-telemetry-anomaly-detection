@@ -188,14 +188,16 @@ def load_model_for_scoring(
     if require_champion:
         try:
             mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
-        except MlflowException:
+        except MlflowException as err:
             raise RuntimeError(
                 f"No @champion alias set for model {name!r}. "
                 "Run 'make mlflow-promote MISSION=... CHANNEL=...' before serving."
-            )
+            ) from err
     else:
         mv = max(versions, key=lambda v: int(v.version))
 
+    if mv.run_id is None:
+        raise RuntimeError(f"Model version for {name!r} has no associated run.")
     run_id = mv.run_id
     model = mlflow_pytorch.load_model(  # type: ignore[no-untyped-call]
         f"runs:/{run_id}/model",

@@ -295,7 +295,8 @@ def preprocess_run(
         spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
 
         # Only preprocess a single channel, no Ray
-        spacecraft-telemetry preprocess run --mission ESA-Mission1 --channel channel_22 --no-parallel
+        spacecraft-telemetry preprocess run --mission ESA-Mission1 \
+            --channel channel_22 --no-parallel
     """
     from pathlib import Path
 

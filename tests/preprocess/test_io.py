@@ -6,13 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from spacecraft_telemetry.preprocess.io import read_channel, read_labels, write_series
 from spacecraft_telemetry.preprocess.schemas import SERIES_FILE_SCHEMA
-
 
 # ---------------------------------------------------------------------------
 # read_channel

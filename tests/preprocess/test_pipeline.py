@@ -16,7 +16,6 @@ import pytest
 
 from spacecraft_telemetry.preprocess.pipeline import run_preprocessing
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

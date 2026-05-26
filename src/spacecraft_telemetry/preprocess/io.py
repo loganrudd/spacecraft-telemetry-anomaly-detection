@@ -10,7 +10,6 @@ evidently_monitoring/reference.py — none of those files change.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pandas as pd

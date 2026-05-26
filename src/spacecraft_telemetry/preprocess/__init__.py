@@ -27,13 +27,13 @@ from spacecraft_telemetry.preprocess.transforms import (
 )
 
 __all__ = [
-    "run_preprocessing",
+    "detect_gaps",
+    "handle_nulls",
+    "label_timesteps",
+    "normalize",
     "read_channel",
     "read_labels",
-    "write_series",
-    "handle_nulls",
-    "detect_gaps",
-    "normalize",
+    "run_preprocessing",
     "temporal_train_test_split",
-    "label_timesteps",
+    "write_series",
 ]

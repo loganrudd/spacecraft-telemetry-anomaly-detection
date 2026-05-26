@@ -102,7 +102,7 @@ def _preprocess_channel_remote(
     channel: str,
     train_out_str: str,
     test_out_str: str,
-    labels_df: "pd.DataFrame | None",
+    labels_df: pd.DataFrame | None,
 ) -> dict[str, Any]:
     """Ray remote wrapper around _preprocess_channel.
 
