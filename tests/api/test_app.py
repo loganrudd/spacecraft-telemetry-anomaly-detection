@@ -268,7 +268,7 @@ class TestLifespanBranchCoverage:
             assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-c"}
 
     def test_per_channel_error_is_skipped(self, mocker, _lifespan_patches) -> None:
-        """A channel that fails to load is warned+skipped; others still boot."""
+        """A channel that fails to load is skipped; the service boots with the rest."""
         import torch
 
         mocker.patch(
@@ -299,8 +299,14 @@ class TestLifespanBranchCoverage:
             )}
         )
         app = create_app(settings)
-        with TestClient(app):
+        with TestClient(app) as client:
             _wait_for_ready(app)
             loaded = set(app.state.app_state.engines.keys())
+            resp = client.get("/health")
         assert "ch-good" in loaded
         assert "ch-bad" not in loaded
+        # Partial load must surface as degraded, not ok.
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["missing"] == ["ch-bad"]

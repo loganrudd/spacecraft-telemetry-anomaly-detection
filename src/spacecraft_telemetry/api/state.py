@@ -63,6 +63,7 @@ class AppState:
     replay_data: MappingProxyType[str, Any]  # values: ReplayData
     startup_monotonic_ns: int
     mlflow_tracking_uri: str
+    resolved_channels: list[str] = field(default_factory=list)  # all channels attempted
     # Reference profiles for drift monitoring — populated only when
     # drift.enabled is True.  Values are pd.DataFrame (typed Any to avoid
     # importing pandas from state.py).  Each drift stream request creates its

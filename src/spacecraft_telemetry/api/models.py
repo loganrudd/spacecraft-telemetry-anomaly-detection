@@ -38,6 +38,7 @@ class HealthResponse(BaseModel):
     channels_loaded: list[str] = []
     channels_total: int = 0    # target channel count (set once channels are resolved)
     channels_ready: int = 0    # successfully loaded so far (== len(channels_loaded) when ok)
+    missing: list[str] = []    # channels that failed to load (non-empty → status=degraded)
     channel_subsystems: dict[str, str] = {}
     uptime_s: float = 0.0
     mlflow_tracking_uri: str = ""

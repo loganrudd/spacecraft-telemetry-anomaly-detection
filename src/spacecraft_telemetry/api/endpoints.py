@@ -123,15 +123,18 @@ async def health(request: Request) -> JSONResponse:
         )
 
     loaded = set(app_state.channels_loaded)
+    missing = sorted(set(app_state.resolved_channels) - loaded)
     n = len(loaded)
+    status = "degraded" if missing else "ok"
     return JSONResponse(
         content=HealthResponse(
-            status="ok",
+            status=status,
             mission=app_state.mission,
             subsystem=app_state.subsystem,
             channels_loaded=app_state.channels_loaded,
-            channels_total=n,
+            channels_total=len(app_state.resolved_channels) or n,
             channels_ready=n,
+            missing=missing,
             channel_subsystems={
                 ch: sub
                 for ch, sub in app_state.channel_subsystem_map.items()
