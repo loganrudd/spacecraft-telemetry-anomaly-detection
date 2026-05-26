@@ -22,7 +22,10 @@ resource "google_cloud_run_v2_service" "mlflow" {
     service_account = google_service_account.mlflow.email
 
     scaling {
-      min_instance_count = 0
+      # min=1 keeps one warm instance (cpu_idle=false default: request-based CPU
+      # billing only, ~$8-10/mo).  Removes container-start latency from the API
+      # cold-start chain; the API depends_on this service at Terraform level.
+      min_instance_count = 1
       max_instance_count = 2
     }
 
