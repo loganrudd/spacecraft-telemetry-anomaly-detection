@@ -333,9 +333,16 @@ def preprocess_run(
         parallel=not no_parallel,
     )
 
-    summary = run_preprocessing(
-        settings, mission, channels=channels, parallel=not no_parallel
-    )
+    parallel = not no_parallel
+    if parallel:
+        with _ray_session(settings):
+            summary = run_preprocessing(
+                settings, mission, channels=channels, parallel=True
+            )
+    else:
+        summary = run_preprocessing(
+            settings, mission, channels=channels, parallel=False
+        )
 
     click.echo(f"Mission           : {mission}")
     click.echo(f"Channels processed: {summary['channels_processed']}")
@@ -975,34 +982,28 @@ def mlflow_group() -> None:
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest non-archived version.",
-)
-@click.option(
-    "--stage",
-    required=True,
-    type=click.Choice(["Staging", "Production", "Archived"]),
-    help="Target stage for the model version.",
+    help="Model version number. Defaults to latest version.",
 )
 @click.pass_context
-def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
-    """Promote a registered model version to Staging, Production, or Archived."""
+def mlflow_promote(ctx: click.Context, name: str, model_version: int | None) -> None:
+    """Set the @champion alias on a model version, marking it ready to serve."""
     import mlflow
 
-    from spacecraft_telemetry.mlflow_tracking.registry import promote
+    from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
 
     try:
-        promote(name=name, version=model_version, stage=stage)
+        promote(name=name, version=model_version)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    resolved_version = model_version if model_version is not None else "(latest non-archived)"
+    resolved_version = model_version if model_version is not None else "(latest)"
     click.echo(f"Model         : {name}")
     click.echo(f"Version       : {resolved_version}")
-    click.echo(f"Stage         : {stage}")
+    click.echo(f"Alias         : @{CHAMPION_ALIAS}")
     click.echo(f"Tracking URI  : {tracking_uri}")
 
 

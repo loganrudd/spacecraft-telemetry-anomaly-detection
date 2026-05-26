@@ -102,14 +102,15 @@ def _preprocess_channel_remote(
     channel: str,
     train_out_str: str,
     test_out_str: str,
-    labels_ref: "ray.ObjectRef[pd.DataFrame] | None",
+    labels_df: "pd.DataFrame | None",
 ) -> dict[str, Any]:
     """Ray remote wrapper around _preprocess_channel.
 
-    Receives the labels DataFrame via ObjectRef to avoid re-serialising it
-    for each task (ray.put() in the driver shares one copy).
+    Ray auto-dereferences ObjectRef arguments before calling the function body,
+    so labels_df arrives as an actual DataFrame (not an ObjectRef). The ray.put()
+    in the driver still avoids per-task re-serialisation — one copy in the object
+    store is fetched by each worker transparently.
     """
-    labels_df: pd.DataFrame | None = ray.get(labels_ref) if labels_ref is not None else None
     return _preprocess_channel(
         settings, mission, channel,
         Path(train_out_str), Path(test_out_str),
@@ -278,10 +279,13 @@ def _run_parallel(
     labels_ref = ray.put(labels_df) if labels_df is not None else None
     settings_ref = ray.put(abs_settings)
 
+    abs_train_out = str(train_out.resolve())
+    abs_test_out = str(test_out.resolve())
+
     futures = [
         _preprocess_channel_remote.remote(
             settings_ref, mission, channel,
-            str(train_out), str(test_out),
+            abs_train_out, abs_test_out,
             labels_ref,
         )
         for channel in channels

@@ -38,7 +38,7 @@ Completed:
 - Ray Tune HPO over scoring parameters per subsystem
 - MLflow experiment tracking (training, scoring, HPO experiments per mission)
 - MLflow model registry with `telemanom-{mission}-{channel}` naming convention
-- `mlflow promote` CLI for Staging → Production stage transitions
+- `mlflow promote` CLI sets the `@champion` alias on a model version (MLflow 3.x)
 - Evidently batch drift detection (14 features: `value_normalized` + rolling stats)
 - Drift reports (HTML) logged as MLflow artifacts; per-feature metrics logged per run
 - `drift batch` CLI: build reference profile → run report → log to MLflow
@@ -105,8 +105,8 @@ make ray-score MISSION=ESA-Mission1 TUNED_CONFIGS=models/ESA-Mission1/tuned_conf
 # 5) Inspect experiments and registered models
 make mlflow-server                      # opens at http://localhost:5001
 
-# 6) Promote a model to Production
-make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_1 STAGE=Production
+# 6) Promote a model — sets the @champion alias, required before serving
+make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22
 
 # 7) Run drift monitoring for a single channel
 #    Builds reference profile from train split, compares to test split,
@@ -117,7 +117,7 @@ uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel
 uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
 
 # 9) Start the FastAPI serving layer (separate terminal)
-#    Loads all scored models for the configured subsystem (default: subsystem_6)
+#    Only loads channels with a @champion alias — promote before starting.
 make serve
 # or with overrides:
 uv run spacecraft-telemetry --env local api serve --subsystem subsystem_6 --reload
@@ -217,7 +217,7 @@ expected behaviour.
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Repo scaffold + data ingestion | Complete |
-| 2 | Preprocessing pipeline (pandas + Ray Core; migrated from PySpark in 10.5) | Complete |
+| 2 | Preprocessing pipeline | Complete |
 | 3 | Telemanom model drop-in | Complete |
 | 4 | Ray parallel training | Complete |
 | 5 | Ray Tune HPO | Complete |

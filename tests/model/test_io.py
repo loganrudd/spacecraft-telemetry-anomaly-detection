@@ -149,6 +149,10 @@ def test_load_model_for_scoring_returns_model_and_window_size(_mlflow_uri: str) 
             registered_model_name="test-model",
         )
 
+    # Set @champion alias — load_model_for_scoring only serves the champion version.
+    client = mlflow.MlflowClient(_mlflow_uri)
+    client.set_registered_model_alias("test-model", "champion", "1")
+
     device = torch.device("cpu")
     loaded_model, window_size = load_model_for_scoring("test-model", device, _mlflow_uri)
     assert window_size == 20
@@ -166,6 +170,53 @@ def test_load_model_for_scoring_raises_when_no_version(_mlflow_uri: str) -> None
     mlflow.set_tracking_uri(_mlflow_uri)
     with pytest.raises(RuntimeError, match="No registered versions found"):
         load_model_for_scoring("nonexistent-model", torch.device("cpu"), _mlflow_uri)
+
+
+def test_load_model_for_scoring_raises_when_not_promoted(_mlflow_uri: str) -> None:
+    """load_model_for_scoring raises RuntimeError when no version is in Production."""
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, window_size=20)
+    model = build_model(cfg)
+
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-training-unpromoted")
+    with mlflow.start_run():
+        mlflow.log_param("window_size", str(cfg.window_size))
+        mlflow.pytorch.log_model(
+            pytorch_model=model,
+            artifact_path="model",
+            registered_model_name="test-model-unpromoted",
+        )
+    # Deliberately not promoting — should raise with a helpful message.
+    with pytest.raises(RuntimeError, match="No @champion alias"):
+        load_model_for_scoring("test-model-unpromoted", torch.device("cpu"), _mlflow_uri)
+
+
+def test_load_model_for_scoring_without_champion_loads_latest(_mlflow_uri: str) -> None:
+    """require_champion=False loads the latest version even without @champion alias."""
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, window_size=20)
+    model = build_model(cfg)
+
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-training-no-promote")
+    with mlflow.start_run():
+        mlflow.log_param("window_size", str(cfg.window_size))
+        mlflow.pytorch.log_model(
+            pytorch_model=model,
+            artifact_path="model",
+            registered_model_name="test-model-no-promote",
+        )
+    # No promotion — but require_champion=False should succeed.
+    loaded_model, window_size = load_model_for_scoring(
+        "test-model-no-promote", torch.device("cpu"), _mlflow_uri, require_champion=False
+    )
+    assert window_size == 20
+    assert loaded_model is not None
 
 
 # ---------------------------------------------------------------------------

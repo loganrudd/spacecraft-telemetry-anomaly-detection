@@ -13,11 +13,12 @@ RUN := $(UV) run
         preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-server mlflow-ui mlflow-promote \
+        mlflow-server mlflow-ui mlflow-promote cloud-deploy \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
+        cloud-up cloud-down \
         cloud-preprocess cloud-train cloud-tune \
         seed-reference-profiles \
         smoke-cloud \
@@ -140,10 +141,19 @@ TUNED_CONFIGS ?=
 mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
 
-mlflow-promote:   ## Promote a registered model to STAGE (MISSION=…, CHANNEL=…, STAGE=Production)
+mlflow-promote:   ## Set @champion alias on latest model version (MISSION=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry mlflow promote \
-		--name telemanom-$(MISSION)-$(CHANNEL) \
-		--stage $(STAGE)
+		--name telemanom-$(MISSION)-$(CHANNEL)
+
+cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
+	$(eval _API_IMAGE := $(shell gcloud run services describe api \
+		--region $(REGION) --project $(PROJECT_ID) \
+		--format='value(spec.template.spec.containers[0].image)' 2>/dev/null))
+	@if [ -z "$(_API_IMAGE)" ]; then echo "ERROR: Cloud Run service 'api' not found. Run terraform apply first."; exit 1; fi
+	gcloud run deploy api \
+		--image $(_API_IMAGE) \
+		--region $(REGION) \
+		--project $(PROJECT_ID)
 
 # ---------------------------------------------------------------------------
 # Housekeeping
@@ -234,6 +244,38 @@ tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
 	cd infra && terraform destroy \
 		-var="project_id=$(PROJECT_ID)" \
 		-var="billing_account=$(BILLING_ACCOUNT)"
+
+# ---------------------------------------------------------------------------
+# Cloud session lifecycle — run cloud-up before training, cloud-down after
+# ---------------------------------------------------------------------------
+# cloud-up:   starts Cloud SQL + provisions GKE + installs KubeRay (~10 min)
+# cloud-down: stops Cloud SQL + destroys GKE to eliminate idle billing
+# GKE Autopilot workers scale to zero between jobs, but Cloud SQL charges
+# for uptime — stop it when not actively training or demoing.
+
+cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preprocess/train/tune.
+	gcloud sql instances patch mlflow-pg --activation-policy=ALWAYS --quiet
+	@echo "Cloud SQL starting — allow ~60s before submitting jobs"
+	terraform -chdir=infra apply \
+		-target=google_container_cluster.ray \
+		-auto-approve
+	terraform -chdir=infra apply \
+		-target=kubernetes_namespace.ray_system \
+		-target=kubernetes_namespace.ray \
+		-target=helm_release.kuberay_operator \
+		-auto-approve
+
+cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after training.
+	terraform -chdir=infra destroy \
+		-target=helm_release.kuberay_operator \
+		-target=kubernetes_namespace.ray_system \
+		-target=kubernetes_namespace.ray \
+		-auto-approve
+	terraform -chdir=infra destroy \
+		-target=google_container_cluster.ray \
+		-auto-approve
+	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --quiet
+	@echo "Cloud SQL stopped. GKE destroyed."
 
 # ---------------------------------------------------------------------------
 # GCP one-time operations (Phase 10 — M6)
