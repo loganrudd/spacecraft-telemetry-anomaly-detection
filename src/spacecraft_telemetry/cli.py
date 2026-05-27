@@ -979,19 +979,48 @@ def mlflow_group() -> None:
 @mlflow_group.command("promote")
 @click.option(
     "--name",
-    required=True,
-    help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1).",
+    default=None,
+    help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1). "
+         "Mutually exclusive with --mission/--channels-from.",
+)
+@click.option(
+    "--mission",
+    default=None,
+    help="Mission name. Used with --channels-from to promote all channels in bulk.",
+)
+@click.option(
+    "--channels-from",
+    default=None,
+    help="Path to channels.txt (local or gs://). Promotes telemanom-{MISSION}-{channel} "
+         "for every channel in the file. Requires --mission.",
 )
 @click.option(
     "--version",
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest version.",
+    help="Model version number. Defaults to latest version. Ignored with --channels-from.",
 )
 @click.pass_context
-def mlflow_promote(ctx: click.Context, name: str, model_version: int | None) -> None:
-    """Set the @champion alias on a model version, marking it ready to serve."""
+def mlflow_promote(
+    ctx: click.Context,
+    name: str | None,
+    mission: str | None,
+    channels_from: str | None,
+    model_version: int | None,
+) -> None:
+    """Set the @champion alias on a model version, marking it ready to serve.
+
+    Single-model form:
+
+        spacecraft-telemetry mlflow promote --name telemanom-ESA-Mission2-channel_1
+
+    Bulk form (all channels in a mission):
+
+        spacecraft-telemetry --env cloud mlflow promote \\
+            --mission ESA-Mission2 \\
+            --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
+    """
     import mlflow
 
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
@@ -999,6 +1028,36 @@ def mlflow_promote(ctx: click.Context, name: str, model_version: int | None) -> 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
+
+    if channels_from is not None:
+        if mission is None:
+            raise click.ClickException("--mission is required when using --channels-from.")
+        if name is not None:
+            raise click.ClickException("--name and --channels-from are mutually exclusive.")
+
+        channel_list = _read_channels_from_file(channels_from)
+        ok, failed = 0, []
+        for channel in channel_list:
+            model_name = f"telemanom-{mission}-{channel}"
+            try:
+                promote(name=model_name, version=None)
+                ok += 1
+            except ValueError as exc:
+                failed.append((channel, str(exc)))
+
+        click.echo(f"Mission       : {mission}")
+        click.echo(f"Promoted      : {ok}/{len(channel_list)}")
+        click.echo(f"Alias         : @{CHAMPION_ALIAS}")
+        click.echo(f"Tracking URI  : {tracking_uri}")
+        if failed:
+            click.echo(f"Failed ({len(failed)}):")
+            for ch, reason in failed:
+                click.echo(f"  {ch}: {reason}")
+            raise SystemExit(1)
+        return
+
+    if name is None:
+        raise click.ClickException("Provide either --name or --mission + --channels-from.")
 
     try:
         promote(name=name, version=model_version)

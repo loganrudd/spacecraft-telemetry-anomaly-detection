@@ -13,7 +13,7 @@ RUN := $(UV) run
         preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-server mlflow-ui mlflow-promote cloud-deploy \
+        mlflow-server mlflow-ui mlflow-promote mlflow-promote-all cloud-deploy \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
@@ -141,9 +141,14 @@ TUNED_CONFIGS ?=
 mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
 
-mlflow-promote:   ## Set @champion alias on latest model version (MISSION=…, CHANNEL=…)
+mlflow-promote:   ## Set @champion alias on one model (MISSION=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry mlflow promote \
 		--name telemanom-$(MISSION)-$(CHANNEL)
+
+mlflow-promote-all: ## Promote @champion for all channels in channels.txt (PROJECT_ID=…, MISSION=…)
+	$(RUN) spacecraft-telemetry --env cloud mlflow promote \
+		--mission $(MISSION) \
+		--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt
 
 cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
 	$(eval _API_IMAGE := $(shell gcloud run services describe api \
