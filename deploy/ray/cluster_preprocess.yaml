@@ -3,7 +3,7 @@
 # Environment variables required before applying (cloud_preprocess.sh sets these):
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (e.g. us-central1)
-#   MISSION      Mission name (default: ESA-Mission1)
+#   MISSION      Mission name (e.g. ESA-Mission2)
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_preprocess.yaml | kubectl apply -f -
@@ -23,7 +23,7 @@ metadata:
 spec:
   entrypoint: >-
     spacecraft-telemetry --env cloud preprocess run
-    --mission ${MISSION:-ESA-Mission1}
+    --mission ${MISSION}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -69,7 +69,7 @@ spec:
                       | grep success &&
                       wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
                       | grep success
-                initialDelaySeconds: 120
+                initialDelaySeconds: 180
                 periodSeconds: 30
                 timeoutSeconds: 20
                 failureThreshold: 5

@@ -507,9 +507,13 @@ def _ray_session(settings: Settings) -> Any:
     import ray
 
     _pythonpath = os.pathsep.join(p for p in sys.path if p)
+    # num_cpus is only valid when starting a new local cluster.
+    # Passing it when connecting to an existing cluster (address="auto" or
+    # a host:port) raises ValueError.
+    _is_new_local = settings.ray.address in (None, "local")
     ray.init(
         address=settings.ray.address,
-        num_cpus=settings.ray.num_cpus,
+        **( {"num_cpus": settings.ray.num_cpus} if _is_new_local else {}),
         ignore_reinit_error=True,
         runtime_env={"env_vars": {
             "PYTHONPATH": _pythonpath,

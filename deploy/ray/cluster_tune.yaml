@@ -23,8 +23,8 @@ metadata:
 spec:
   entrypoint: >-
     spacecraft-telemetry --env cloud ray tune
-    --mission ${MISSION:-ESA-Mission2}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION:-ESA-Mission2}/channels.txt
+    --mission ${MISSION}
+    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -70,7 +70,7 @@ spec:
                       | grep success &&
                       wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
                       | grep success
-                initialDelaySeconds: 120
+                initialDelaySeconds: 180
                 periodSeconds: 30
                 timeoutSeconds: 20
                 failureThreshold: 5
