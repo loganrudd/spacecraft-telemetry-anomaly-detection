@@ -13,6 +13,7 @@ used by unit tests to avoid Ray cold-start cost.
 from __future__ import annotations
 
 import json
+import resource
 from typing import Any
 
 import pandas as pd
@@ -92,6 +93,12 @@ def _preprocess_channel(
     write_series(train_series, train_out)
     del train_series
     write_series(test_series, test_out)
+
+    # ru_maxrss unit: KB on Linux (GKE workers), bytes on macOS.
+    # Values over 1 billion are bytes (macOS); otherwise kilobytes (Linux).
+    _rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    _peak_mb = _rss_raw / 1024 / 1024 if _rss_raw > 1_000_000_000 else _rss_raw / 1024
+    log.info("pipeline.channel.peak_rss_mb", channel_id=channel, peak_rss_mb=round(_peak_mb, 1))
 
     return {
         "channel_id": channel,
