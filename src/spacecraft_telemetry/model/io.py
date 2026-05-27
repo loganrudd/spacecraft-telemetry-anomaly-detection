@@ -137,41 +137,68 @@ def load_model_for_scoring(
     name: str,
     device: torch.device,
     tracking_uri: str,
+    *,
+    require_champion: bool = True,
 ) -> tuple[TelemanomLSTM, int]:
-    """Load the latest registered PyTorch model from MLflow for scoring.
+    """Load a PyTorch model from MLflow for scoring.
 
-    Finds the highest version number registered for ``name``, loads the model
-    artifact from the run that produced it, and reads ``window_size`` from the
-    run's logged params.
+    When ``require_champion=True`` (the default, used by the FastAPI serving
+    layer), only the version tagged with the ``@champion`` alias is accepted.
+    This gates serving behind an explicit promotion step.
+
+    When ``require_champion=False`` (used by the training pipeline's
+    score_channel), the most recently registered version is loaded.  This avoids
+    a chicken-and-egg problem: you need to score a model to decide whether to
+    promote it, but the promotion gate must not block scoring itself.
+
+    After promoting a new version, redeploy the serving layer to pick it up:
+    - Cloud: make cloud-deploy
+    - Local: restart make serve
 
     Args:
-        name:         Registered model name from registered_model_name().
-        device:       Torch device to map the model weights to.
-        tracking_uri: MLflow tracking server URI.
+        name:             Registered model name from registered_model_name().
+        device:           Torch device to map the model weights to.
+        tracking_uri:     MLflow tracking server URI.
+        require_champion: If True, raise unless @champion alias is set.
+                          If False, load the latest registered version.
 
     Returns:
         (model, window_size) — reconstructed TelemanomLSTM and the sequence
         length the model was trained on.
 
     Raises:
-        RuntimeError: If no registered version exists for ``name``.
+        RuntimeError: If no registered versions exist, or (when
+            require_champion=True) no @champion alias is set.
     """
     import mlflow
     import mlflow.pytorch as mlflow_pytorch
+    from mlflow.exceptions import MlflowException
+
+    from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS
 
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+
     versions = client.search_model_versions(f"name='{name}'")
     if not versions:
         raise RuntimeError(
             f"No registered versions found for model {name!r}. "
-            "Run 'model train' for this channel before scoring."
+            "Run 'model train' for this channel before serving."
         )
-    latest = max(versions, key=lambda v: int(v.version))
-    run_id = latest.run_id
-    if run_id is None:
-        raise RuntimeError(
-            f"Latest version of {name!r} has no associated run_id."
-        )
+
+    if require_champion:
+        try:
+            mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+        except MlflowException as err:
+            raise RuntimeError(
+                f"No @champion alias set for model {name!r}. "
+                "Run 'make mlflow-promote MISSION=... CHANNEL=...' before serving."
+            ) from err
+    else:
+        mv = max(versions, key=lambda v: int(v.version))
+
+    if mv.run_id is None:
+        raise RuntimeError(f"Model version for {name!r} has no associated run.")
+    run_id = mv.run_id
     model = mlflow_pytorch.load_model(  # type: ignore[no-untyped-call]
         f"runs:/{run_id}/model",
         map_location=device,

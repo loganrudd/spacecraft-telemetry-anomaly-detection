@@ -242,9 +242,11 @@ def score_channel(
         configure_mlflow(settings)
 
     # Load model from MLflow registry (single source of truth post-A1 pivot).
+    # require_champion=False: scoring is a training-pipeline step, not serving;
+    # we need to score a model before deciding whether to promote it.
     name = registered_model_name(cfg.model_type, mission, channel)
     model, saved_window_size = load_model_for_scoring(
-        name, device, settings.mlflow.tracking_uri
+        name, device, settings.mlflow.tracking_uri, require_champion=False
     )
     if cfg.window_size != saved_window_size:
         raise ValueError(

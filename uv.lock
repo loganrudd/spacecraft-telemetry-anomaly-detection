@@ -2521,6 +2521,15 @@ parquet = [
 ]
 
 [[package]]
+name = "pathlib-abc"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/cb/448649d7f25d228bf0be3a04590ab7afa77f15e056f8fa976ed05ec9a78f/pathlib_abc-0.5.2.tar.gz", hash = "sha256:fcd56f147234645e2c59c7ae22808b34c364bb231f685ddd9f96885aed78a94c", size = 33342, upload-time = "2025-10-10T18:37:20.524Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/29/c028a0731e202035f0e2e0bfbf1a3e46ad6c628cbb17f6f1cc9eea5d9ff1/pathlib_abc-0.5.2-py3-none-any.whl", hash = "sha256:4c9d94cf1b23af417ce7c0417b43333b06a106c01000b286c99de230d95eefbb", size = 19070, upload-time = "2025-10-10T18:37:19.437Z" },
+]
+
+[[package]]
 name = "pathspec"
 version = "1.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2977,15 +2986,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
 ]
-
-[[package]]
-name = "pyspark"
-version = "4.1.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "py4j" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/19/bf/58ee13add151469c25825b7125bbf62c3bdcec05eec4d458fcb5c5516066/pyspark-4.1.1.tar.gz", hash = "sha256:77f78984aa84fbe865c717dd37b49913b4e5c97d76ef6824f932f1aefa6621ec", size = 455359625, upload-time = "2026-01-09T09:38:38.28Z" }
 
 [[package]]
 name = "pytest"
@@ -3616,6 +3616,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "fsspec" },
     { name = "httpx" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -3624,6 +3625,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "structlog" },
+    { name = "universal-pathlib" },
 ]
 
 [package.optional-dependencies]
@@ -3638,7 +3640,11 @@ dev = [
 ]
 gcp = [
     { name = "gcsfs" },
+    { name = "google-auth" },
     { name = "google-cloud-storage" },
+]
+inference = [
+    { name = "torch" },
 ]
 ml = [
     { name = "hyperopt" },
@@ -3650,9 +3656,6 @@ serving = [
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-spark = [
-    { name = "pyspark" },
-]
 tracking = [
     { name = "evidently" },
     { name = "mlflow" },
@@ -3663,7 +3666,9 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "evidently", marker = "extra == 'tracking'", specifier = ">=0.4,<1" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.110" },
+    { name = "fsspec", specifier = ">=2024.2" },
     { name = "gcsfs", marker = "extra == 'gcp'", specifier = ">=2024.2" },
+    { name = "google-auth", marker = "extra == 'gcp'", specifier = ">=2.30" },
     { name = "google-cloud-storage", marker = "extra == 'gcp'", specifier = ">=2.10" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hyperopt", marker = "extra == 'ml'", specifier = ">=0.2.7" },
@@ -3675,7 +3680,6 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=15.0" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pydantic-settings", specifier = ">=2.0,<3" },
-    { name = "pyspark", marker = "extra == 'spark'", specifier = ">=4.1,<5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
@@ -3685,10 +3689,12 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "structlog", specifier = ">=24.0" },
+    { name = "torch", marker = "extra == 'inference'", specifier = ">=2.0" },
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0" },
+    { name = "universal-pathlib", specifier = ">=0.2" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'serving'", specifier = ">=0.29" },
 ]
-provides-extras = ["spark", "ml", "serving", "tracking", "gcp", "dev"]
+provides-extras = ["inference", "ml", "serving", "tracking", "gcp", "dev"]
 
 [[package]]
 name = "sqlalchemy"
@@ -4029,6 +4035,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/da/e9ae98133336e7c0d50b43626c3f2327937cecfa354d844e02ac17379ed1/ujson-5.12.0-graalpy312-graalpy250_312_native-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:6c0aed6a4439994c9666fb8a5b6c4eac94d4ef6ddc95f9b806a599ef83547e3b", size = 54518, upload-time = "2026-03-11T22:19:15.4Z" },
     { url = "https://files.pythonhosted.org/packages/58/10/978d89dded6bb1558cd46ba78f4351198bd2346db8a8ee1a94119022ce40/ujson-5.12.0-graalpy312-graalpy250_312_native-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:efae5df7a8cc8bdb1037b0f786b044ce281081441df5418c3a0f0e1f86fe7bb3", size = 55736, upload-time = "2026-03-11T22:19:16.496Z" },
     { url = "https://files.pythonhosted.org/packages/80/25/1df8e6217c92e57a1266bf5be750b1dddc126ee96e53fe959d5693503bc6/ujson-5.12.0-graalpy312-graalpy250_312_native-win_amd64.whl", hash = "sha256:8712b61eb1b74a4478cfd1c54f576056199e9f093659334aeb5c4a6b385338e5", size = 44615, upload-time = "2026-03-11T22:19:17.53Z" },
+]
+
+[[package]]
+name = "universal-pathlib"
+version = "0.3.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fsspec" },
+    { name = "pathlib-abc" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/6e/d997a70ee8f4c61f9a7e2f4f8af721cf072a3326848fc881b05187e52558/universal_pathlib-0.3.10.tar.gz", hash = "sha256:4487cbc90730a48cfb64f811d99e14b6faed6d738420cd5f93f59f48e6930bfb", size = 261110, upload-time = "2026-02-22T14:40:58.87Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/1a/5d9a402b39ec892d856bbdd9db502ff73ce28cdf4aff72eb1ce1d6843506/universal_pathlib-0.3.10-py3-none-any.whl", hash = "sha256:dfaf2fb35683d2eb1287a3ed7b215e4d6016aa6eaf339c607023d22f90821c66", size = 83528, upload-time = "2026-02-22T14:40:57.316Z" },
 ]
 
 [[package]]

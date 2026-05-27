@@ -36,10 +36,27 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from spacecraft_telemetry.api.models import HealthResponse, StreamQueryParams
-from spacecraft_telemetry.api.state import AppState
+from spacecraft_telemetry.api.state import AppState, LoadingState
 from spacecraft_telemetry.api.streaming import drift_stream, telemetry_stream
 
 router = APIRouter()
+
+
+def _get_ready_state(request: Request) -> AppState:
+    """Return AppState when engines are loaded, or raise 503 while loading."""
+    app_state: AppState | None = getattr(request.app.state, "app_state", None)
+    if app_state is not None:
+        return app_state
+    loading: LoadingState | None = getattr(request.app.state, "loading_state", None)
+    if loading and not loading.error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Service loading: {loading.channels_ready}/{loading.channels_total} "
+                "channels ready — try again in a moment"
+            ),
+        )
+    raise HTTPException(status_code=503, detail="Service unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -49,35 +66,82 @@ router = APIRouter()
 
 @router.get("/health")
 async def health(request: Request) -> JSONResponse:
-    """Return service health.
+    """Return service health and loading progress.
 
-    Returns 200 with loaded channel list when at least one engine is ready.
-    Returns 503 when no engines are loaded (e.g. degraded startup or
-    all channels failed to load).
+    Always returns 200 so the container passes liveness checks while models
+    are loading.  Callers should inspect ``status``:
+
+    * ``"loading"``  — background task in progress; use channels_ready /
+                       channels_total to drive a progress bar.
+    * ``"ok"``       — all engines ready; channels_loaded is the full list.
+    * ``"degraded"`` — loading finished but no engines could be loaded.
     """
-    state: AppState = request.app.state.app_state
-    if not state.channels_loaded:
+    app_state: AppState | None = getattr(request.app.state, "app_state", None)
+    loading: LoadingState | None = getattr(request.app.state, "loading_state", None)
+    settings = request.app.state.settings
+
+    if app_state is None:
+        if loading is None:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "detail": "not initialized"},
+            )
+        if loading.error:
+            return JSONResponse(
+                status_code=503,
+                content=HealthResponse(
+                    status="degraded",
+                    mission=settings.api.mission,
+                    subsystem=settings.api.subsystem,
+                    channels_total=loading.channels_total,
+                    channels_ready=loading.channels_ready,
+                    uptime_s=loading.uptime_seconds(),
+                ).model_dump(),
+            )
+        return JSONResponse(
+            content=HealthResponse(
+                status="loading",
+                mission=settings.api.mission,
+                subsystem=settings.api.subsystem,
+                channels_total=loading.channels_total,
+                channels_ready=loading.channels_ready,
+                uptime_s=loading.uptime_seconds(),
+            ).model_dump(),
+        )
+
+    if not app_state.channels_loaded:
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "degraded",
-                "detail": "no channels loaded",
-            },
+            content=HealthResponse(
+                status="degraded",
+                mission=app_state.mission,
+                subsystem=app_state.subsystem,
+                channels_total=loading.channels_total if loading else 0,
+                uptime_s=app_state.uptime_seconds(),
+                mlflow_tracking_uri=app_state.mlflow_tracking_uri,
+            ).model_dump(),
         )
-    loaded = set(state.channels_loaded)
+
+    loaded = set(app_state.channels_loaded)
+    missing = sorted(set(app_state.resolved_channels) - loaded)
+    n = len(loaded)
+    status = "degraded" if missing else "ok"
     return JSONResponse(
         content=HealthResponse(
-            status="ok",
-            mission=state.mission,
-            subsystem=state.subsystem,
-            channels_loaded=state.channels_loaded,
+            status=status,
+            mission=app_state.mission,
+            subsystem=app_state.subsystem,
+            channels_loaded=app_state.channels_loaded,
+            channels_total=len(app_state.resolved_channels) or n,
+            channels_ready=n,
+            missing=missing,
             channel_subsystems={
                 ch: sub
-                for ch, sub in state.channel_subsystem_map.items()
+                for ch, sub in app_state.channel_subsystem_map.items()
                 if ch in loaded
             },
-            uptime_s=state.uptime_seconds(),
-            mlflow_tracking_uri=state.mlflow_tracking_uri,
+            uptime_s=app_state.uptime_seconds(),
+            mlflow_tracking_uri=app_state.mlflow_tracking_uri,
         ).model_dump(),
     )
 
@@ -104,7 +168,7 @@ async def stream(
         data: {"timestamp": ..., "channel": "A-1", ...}
 
     """
-    state: AppState = request.app.state.app_state
+    state = _get_ready_state(request)
     effective_speed = params.speed or state.settings.api.replay_speed_default
 
     selected = (
@@ -154,7 +218,7 @@ async def stream_drift(
     Returns 503 when drift monitoring is disabled or no reference profiles were
     loaded at startup.  Returns 400 for unknown channel names.
     """
-    state: AppState = request.app.state.app_state
+    state = _get_ready_state(request)
 
     if not state.drift_references:
         raise HTTPException(

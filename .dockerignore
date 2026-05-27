@@ -1,0 +1,103 @@
+# Keep the build context small: most of the repo is dev-only or large data.
+# What stays: pyproject.toml, README.md, src/, configs/, frontend/{src,index.html,
+# package*.json,vite.config.ts,tsconfig*.json}.
+
+# ---------------------------------------------------------------------------
+# VCS + IDE
+# ---------------------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# ---------------------------------------------------------------------------
+# Python build / cache / virtualenvs
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+.tox/
+.nox/
+uv.lock
+
+# ---------------------------------------------------------------------------
+# Tests + docs + plans — not needed in the serving image
+# ---------------------------------------------------------------------------
+tests/
+docs/
+scripts/
+notebooks/
+*.ipynb
+
+# ---------------------------------------------------------------------------
+# Data + model artifacts — Phase 10 fetches these from GCS at runtime
+# ---------------------------------------------------------------------------
+data/
+mlruns/
+mlartifacts/
+mlflow*.db
+models/
+monitoring/
+*.parquet
+*.npy
+*.pkl
+*.pickle
+*.zip
+*.tar
+*.tar.gz
+
+# ---------------------------------------------------------------------------
+# Frontend artifacts — Stage 1 builds these fresh; never copy the laptop's
+# node_modules or stale dist/ into the build context.
+# ---------------------------------------------------------------------------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Infra / deployment configs that are not part of the runtime image
+# ---------------------------------------------------------------------------
+infra/
+deploy/
+
+# ---------------------------------------------------------------------------
+# Environment / secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+*.pem
+*.key
+service-account*.json
+gcp-key*.json
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+Users/
+spark-warehouse/
+derby.log
+metastore_db/
+.claude/
+CLAUDE.md
+Dockerfile
+.dockerignore
+Makefile

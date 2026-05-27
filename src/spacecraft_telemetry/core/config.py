@@ -49,10 +49,10 @@ class DataConfig(BaseModel):
         return v
 
 
-class SparkConfig(BaseModel):
+class PreprocessingConfig(BaseModel):
+    """Config for the pandas + Ray Core preprocessing pipeline."""
+
     processed_data_dir: Path = Path("data/processed")
-    driver_memory: str = "1536m"
-    num_cores: int = 2
     train_fraction: float = 0.8
     normalization: Literal["z-score"] = "z-score"
     gap_multiplier: float = 3.0
@@ -63,13 +63,6 @@ class SparkConfig(BaseModel):
     def train_fraction_in_range(cls, v: float) -> float:
         if not 0 < v < 1.0:
             raise ValueError(f"train_fraction must be in (0, 1), got {v}")
-        return v
-
-    @field_validator("num_cores")
-    @classmethod
-    def positive_int(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"must be >= 1, got {v}")
         return v
 
     @field_validator("gap_multiplier")
@@ -359,6 +352,10 @@ class ApiConfig(BaseModel):
     # CORS allowed origins — empty list disables CORS middleware entirely.
     # Populate in local.yaml for Vite dev server; set prod origin in cloud.yaml.
     cors_allowed_origins: list[str] = []
+    # Filesystem path to a built dashboard bundle (e.g. frontend/dist) to serve at /.
+    # When set and the directory exists, create_app mounts it via StaticFiles(html=True)
+    # so the SPA shares the API origin (no CORS). None = serve API only.
+    static_dir: str | None = None
 
     @field_validator("port")
     @classmethod
@@ -425,7 +422,7 @@ class Settings(BaseSettings):
     env: str = "local"
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
-    spark: SparkConfig = SparkConfig()
+    preprocess: PreprocessingConfig = PreprocessingConfig()
     model: ModelConfig = ModelConfig()
     ray: RayConfig = RayConfig()
     tune: TuneConfig = TuneConfig()

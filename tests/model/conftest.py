@@ -190,6 +190,13 @@ def tiny_series_parquet(tmp_path: Path) -> SeriesParquetFixture:
     norm_file.parent.mkdir(parents=True, exist_ok=True)
     norm_file.write_text(json.dumps({_CHANNEL: {"mean": 0.0, "std": 1.0}}))
 
+    # channel_subsystems.json — needed for the subsystem MLflow tag.
+    metadata_dir = processed_dir / _MISSION / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({_CHANNEL: "subsystem_1"})
+    )
+
     return SeriesParquetFixture(
         processed_dir=processed_dir,
         mission=_MISSION,

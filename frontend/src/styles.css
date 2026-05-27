@@ -74,6 +74,67 @@ button {
   color: var(--fg-muted);
 }
 
+/* ── Loading screen ─────────────────────────────────────────────── */
+.app__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: var(--bg);
+}
+
+.app__loading-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem 2.5rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 280px;
+}
+
+.app__loading-mission {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+
+.app__loading-title {
+  font-size: 1rem;
+  color: var(--fg);
+}
+
+.app__loading-track {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.app__loading-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.app__loading-label {
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
+.app__loading-error {
+  font-size: 0.8rem;
+  color: var(--danger);
+  text-align: center;
+  max-width: 260px;
+  line-height: 1.5;
+}
+
 .app__charts--comfortable {
   display: flex;
   flex-direction: column;

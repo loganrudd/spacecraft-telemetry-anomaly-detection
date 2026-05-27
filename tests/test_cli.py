@@ -852,7 +852,7 @@ class TestMlflowCli:
         result = runner.invoke(main, ["--env=test", "mlflow", "promote", "--help"])
         assert result.exit_code == 0
         assert "--name" in result.output
-        assert "--stage" in result.output
+        assert "--stage" not in result.output
 
     def test_mlflow_ui_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["--env=test", "mlflow", "ui", "--help"])
@@ -862,7 +862,7 @@ class TestMlflowCli:
     def test_mlflow_promote_resolves_latest_version(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        """promote without --version resolves the latest non-archived version."""
+        """promote without --version resolves the latest version and sets @champion."""
         from unittest.mock import MagicMock
 
         settings = load_settings("test").model_copy(
@@ -875,7 +875,6 @@ class TestMlflowCli:
 
         mock_version = MagicMock()
         mock_version.version = "3"
-        mock_version.current_stage = "None"
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
@@ -884,7 +883,7 @@ class TestMlflowCli:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [mock_version]
-            mock_client.transition_model_version_stage.return_value = None
+            mock_client.set_registered_model_alias.return_value = None
 
             result = runner.invoke(
                 main,
@@ -893,21 +892,18 @@ class TestMlflowCli:
                     "mlflow",
                     "promote",
                     "--name=telemanom-ESA-Mission1-channel_1",
-                    "--stage=Production",
                 ],
             )
 
         assert result.exit_code == 0, result.output
-        mock_client.transition_model_version_stage.assert_called_once_with(
-            name="telemanom-ESA-Mission1-channel_1",
-            version="3",
-            stage="Production",
+        mock_client.set_registered_model_alias.assert_called_once_with(
+            "telemanom-ESA-Mission1-channel_1", "champion", "3"
         )
 
     def test_mlflow_promote_no_versions_errors(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        """promote should fail with a clear message when no non-archived versions exist."""
+        """promote should fail with a clear message when no versions exist."""
         from unittest.mock import MagicMock
 
         settings = load_settings("test").model_copy(
@@ -933,12 +929,11 @@ class TestMlflowCli:
                     "mlflow",
                     "promote",
                     "--name=telemanom-ESA-Mission1-channel_1",
-                    "--stage=Production",
                 ],
             )
 
         assert result.exit_code != 0
-        assert "No promotable versions" in result.output
+        assert "No versions found" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +996,11 @@ class TestDriftCommands:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
-        from spacecraft_telemetry.core.config import MonitoringConfig, Settings, SparkConfig
+        from spacecraft_telemetry.core.config import (
+            MonitoringConfig,
+            PreprocessingConfig,
+            Settings,
+        )
 
         mission = "TEST-Mission"
         channel = "ch_1"
@@ -1012,7 +1011,7 @@ class TestDriftCommands:
         # Use Settings() defaults — test.yaml has feature_windows=[3, 5] which
         # doesn't match MONITORING_FEATURE_COLS (built from [10, 50, 100]).
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
             monitoring=MonitoringConfig(reference_profiles_dir=tmp_path / "profiles"),
         )
@@ -1031,11 +1030,11 @@ class TestDriftCommands:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         """drift batch fails with FileNotFoundError when channel data is absent."""
-        from spacecraft_telemetry.core.config import Settings, SparkConfig
+        from spacecraft_telemetry.core.config import PreprocessingConfig, Settings
 
         mission = "TEST-Mission"
         settings = Settings(
-            spark=SparkConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             mlflow=Settings().mlflow.model_copy(
                 update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
             ),

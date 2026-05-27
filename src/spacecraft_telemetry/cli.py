@@ -237,24 +237,17 @@ def explore(
 
 
 # ---------------------------------------------------------------------------
-# spark group
+# preprocess group
 # ---------------------------------------------------------------------------
 
 
 @main.group()
-def spark() -> None:
-    """PySpark preprocessing pipeline commands."""
+def preprocess() -> None:
+    """Pandas + Ray preprocessing pipeline commands."""
 
 
-@spark.command("preprocess")
+@preprocess.command("run")
 @click.option("--mission", required=True, help="Mission name to preprocess (e.g. ESA-Mission1).")
-@click.option(
-    "--sample-fraction",
-    type=float,
-    default=None,
-    show_default=True,
-    help="Ignored — reads from sample_data_dir (already sampled in ingest phase).",
-)
 @click.option(
     "--train-fraction",
     type=float,
@@ -272,47 +265,53 @@ def spark() -> None:
     default=None,
     help="Optional single channel to preprocess (overrides --subsystem).",
 )
+@click.option(
+    "--no-parallel",
+    is_flag=True,
+    default=False,
+    help="Run sequentially (no Ray fan-out). Useful for local debugging.",
+)
 @click.pass_context
-def spark_preprocess(
+def preprocess_run(
     ctx: click.Context,
     mission: str,
-    sample_fraction: float | None,
     train_fraction: float | None,
     subsystem: str | None,
     channel: str | None,
+    no_parallel: bool,
 ) -> None:
-    """Run the Spark preprocessing pipeline for one mission.
+    """Run the preprocessing pipeline for one mission.
 
     Reads channel Parquet files from sample_data_dir/{mission}/channels/,
-    processes them (null-fill → gap-detect → normalize → label → features + series),
-    and writes partitioned Parquet to spark.processed_data_dir/{mission}/.
+    processes them (null-fill → gap-detect → normalize → label → series),
+    and writes partitioned Parquet to preprocess.processed_data_dir/{mission}/.
 
     Examples:
 
-        # Default settings (train_fraction=0.8)
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1
+        # Default settings (train_fraction=0.8, Ray fan-out)
+        spacecraft-telemetry preprocess run --mission ESA-Mission1
 
         # Only preprocess channels belonging to subsystem_6
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --subsystem subsystem_6
+        spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
 
-        # Only preprocess a single channel
-        spacecraft-telemetry spark preprocess --mission ESA-Mission1 --channel channel_22
+        # Only preprocess a single channel, no Ray
+        spacecraft-telemetry preprocess run --mission ESA-Mission1 \
+            --channel channel_22 --no-parallel
     """
     from pathlib import Path
 
-    from spacecraft_telemetry.spark.pipeline import run_preprocessing
-    from spacecraft_telemetry.spark.session import create_spark_session, stop_spark_session
+    from spacecraft_telemetry.preprocess.pipeline import run_preprocessing
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
 
-    # Apply CLI overrides to SparkConfig.
-    spark_overrides: dict[str, object] = {}
+    # Apply CLI overrides to PreprocessingConfig.
+    overrides: dict[str, object] = {}
     if train_fraction is not None:
-        spark_overrides["train_fraction"] = train_fraction
-    if spark_overrides:
+        overrides["train_fraction"] = train_fraction
+    if overrides:
         settings = settings.model_copy(
-            update={"spark": settings.spark.model_copy(update=spark_overrides)}
+            update={"preprocess": settings.preprocess.model_copy(update=overrides)}
         )
 
     # Resolve channel filter: explicit channel > subsystem > all.
@@ -326,19 +325,25 @@ def spark_preprocess(
         channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
 
     log.info(
-        "spark.preprocess.start",
+        "preprocess.run.start",
         mission=mission,
-        train_fraction=settings.spark.train_fraction,
+        train_fraction=settings.preprocess.train_fraction,
         channel=channel,
         subsystem=subsystem,
         channels=channels,
+        parallel=not no_parallel,
     )
 
-    session = create_spark_session(settings.spark)
-    try:
-        summary = run_preprocessing(session, settings, mission, channels=channels)
-    finally:
-        stop_spark_session(session)
+    parallel = not no_parallel
+    if parallel:
+        with _ray_session(settings):
+            summary = run_preprocessing(
+                settings, mission, channels=channels, parallel=True
+            )
+    else:
+        summary = run_preprocessing(
+            settings, mission, channels=channels, parallel=False
+        )
 
     click.echo(f"Mission           : {mission}")
     click.echo(f"Channels processed: {summary['channels_processed']}")
@@ -403,7 +408,7 @@ def model_train(
 ) -> None:
     """Train a TelemanomLSTM on a single telemetry channel.
 
-    Reads per-timestep series Parquet from spark.processed_data_dir/{mission}/train/
+    Reads per-timestep series Parquet from preprocess.processed_data_dir/{mission}/train/
     and writes model artifacts to model.artifacts_dir/{mission}/{channel}/.
     Windows are constructed on-the-fly by the DataLoader (Plan 002.5).
 
@@ -457,7 +462,7 @@ def model_score(
     """Score a trained model against its test split and persist metrics.
 
     Loads model artifacts from model.artifacts_dir/{mission}/{channel}/ and
-    reads test Parquet from spark.processed_data_dir/{mission}/test/.
+    reads test Parquet from preprocess.processed_data_dir/{mission}/test/.
     Writes errors.npy, threshold.json, metrics.json to the artifacts dir.
 
     Examples:
@@ -547,29 +552,59 @@ def _filter_channels_by_subsystem(
     return filtered
 
 
+def _read_channels_from_file(path: str) -> list[str]:
+    """Read channel IDs from a local or GCS text file, one per line.
+
+    Uses fsspec so ``gs://`` URIs work transparently when gcsfs is installed.
+    """
+    import fsspec
+
+    with fsspec.open(path, "r") as fh:
+        return [line.strip() for line in fh if line.strip()]
+
+
 def _resolve_ray_channels(
     settings: Settings,
     mission: str,
     channels: str | None,
     subsystem: str | None = None,
+    channels_from: str | None = None,
 ) -> list[str]:
     """Resolve the channel list for a Ray command from CLI flags.
 
-    Precedence: explicit ``--channels`` CSV > ``discover_channels()`` filtered
-    by optional ``--subsystem``.  Raises ``click.ClickException`` when
-    ``discover_channels`` returns nothing (pipeline not yet run).
+    Precedence:
+    1. ``--channels`` CSV — highest priority (explicit override)
+    2. ``--channels-from`` file (local or gs://) — cloud-friendly alternative to discovery
+    3. ``discover_channels()`` filtered by optional ``--subsystem`` — local fallback
+
+    Raises ``click.ClickException`` when discovery returns nothing (pipeline not yet run).
     """
     from spacecraft_telemetry.ray_training import discover_channels
 
     if channels is not None:
         return [c.strip() for c in channels.split(",") if c.strip()]
 
+    if channels_from is not None:
+        try:
+            channel_list = _read_channels_from_file(channels_from)
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to read channels from {channels_from!r}: {exc}"
+            ) from exc
+        if not channel_list:
+            raise click.ClickException(f"No channel IDs found in {channels_from!r}.")
+        if subsystem is not None:
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
+        return channel_list
+
     channel_list = discover_channels(settings, mission)
     if not channel_list:
         raise click.ClickException(
             f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry spark preprocess` first, "
-            "or pass --channels explicitly."
+            "Run `spacecraft-telemetry preprocess run` first, "
+            "or pass --channels / --channels-from explicitly."
         )
     if subsystem is not None:
         channel_list = _filter_channels_by_subsystem(
@@ -591,6 +626,13 @@ def ray_group() -> None:
     help="Comma-separated channel IDs to train. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line. "
+    "Required when processed-data lives on GCS (discover_channels is local-only).",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to filter channels (e.g. subsystem_1).",
@@ -606,14 +648,15 @@ def ray_train(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     max_channels: int | None,
 ) -> None:
     """Train channels in parallel using Ray Core.
 
     Trains all discovered channels by default. Discovers channels by scanning
-    the Spark processed-data directory unless --channels is supplied explicitly
-    (required for gs:// artifact stores).
+    the Spark processed-data directory unless --channels or --channels-from is
+    supplied (required when processed data lives on GCS).
 
     Examples:
 
@@ -623,10 +666,10 @@ def ray_train(
         # Smoke test: only first 3 channels
         spacecraft-telemetry ray train --mission ESA-Mission1 --max-channels 3
 
-        # Cloud: explicit channel list (gs:// scan not supported)
+        # Cloud: read channel list from GCS
         spacecraft-telemetry --env cloud ray train \\
-            --mission ESA-Mission1 \\
-            --channels channel_1,channel_2,channel_3
+            --mission ESA-Mission2 \\
+            --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
     """
     from spacecraft_telemetry.ray_training import train_all_channels
 
@@ -634,7 +677,9 @@ def ray_train(
     log = get_logger(__name__)
 
     with _ray_session(settings):
-        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
+        channel_list = _resolve_ray_channels(
+            settings, mission, channels, subsystem, channels_from
+        )
 
         log.info(
             "ray.train.start",
@@ -673,6 +718,12 @@ def ray_train(
     help="Comma-separated channel IDs to score. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line.",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to filter channels (e.g. subsystem_1).",
@@ -694,6 +745,7 @@ def ray_score(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
@@ -727,7 +779,9 @@ def ray_score(
         log.info("ray.score.tuned_configs_loaded", path=str(tuned_configs))
 
     with _ray_session(settings):
-        channel_list = _resolve_ray_channels(settings, mission, channels, subsystem)
+        channel_list = _resolve_ray_channels(
+            settings, mission, channels, subsystem, channels_from
+        )
 
         log.info(
             "ray.score.start",
@@ -771,6 +825,12 @@ def ray_score(
     help="Comma-separated channel IDs to tune. Defaults to all discovered channels.",
 )
 @click.option(
+    "--channels-from",
+    default=None,
+    metavar="PATH",
+    help="Path to a text file (local or gs://) with one channel ID per line.",
+)
+@click.option(
     "--subsystem",
     default=None,
     help="Optional subsystem name to tune a single group (e.g. subsystem_1).",
@@ -792,6 +852,7 @@ def ray_tune(
     ctx: click.Context,
     mission: str,
     channels: str | None,
+    channels_from: str | None,
     subsystem: str | None,
     num_samples: int | None,
     overwrite_existing: bool,
@@ -836,7 +897,9 @@ def ray_tune(
         # For tune, don't apply the subsystem filter at discovery time —
         # run_all_sweeps groups by subsystem internally; run_hpo_sweep
         # applies _filter_channels_by_subsystem below when subsystem is given.
-        channel_list = _resolve_ray_channels(tune_settings, mission, channels)
+        channel_list = _resolve_ray_channels(
+            tune_settings, mission, channels, channels_from=channels_from
+        )
 
         log.info(
             "ray.tune.start",
@@ -920,34 +983,28 @@ def mlflow_group() -> None:
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest non-archived version.",
-)
-@click.option(
-    "--stage",
-    required=True,
-    type=click.Choice(["Staging", "Production", "Archived"]),
-    help="Target stage for the model version.",
+    help="Model version number. Defaults to latest version.",
 )
 @click.pass_context
-def mlflow_promote(ctx: click.Context, name: str, model_version: int | None, stage: str) -> None:
-    """Promote a registered model version to Staging, Production, or Archived."""
+def mlflow_promote(ctx: click.Context, name: str, model_version: int | None) -> None:
+    """Set the @champion alias on a model version, marking it ready to serve."""
     import mlflow
 
-    from spacecraft_telemetry.mlflow_tracking.registry import promote
+    from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
 
     settings: Settings = ctx.obj["settings"]
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
 
     try:
-        promote(name=name, version=model_version, stage=stage)
+        promote(name=name, version=model_version)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    resolved_version = model_version if model_version is not None else "(latest non-archived)"
+    resolved_version = model_version if model_version is not None else "(latest)"
     click.echo(f"Model         : {name}")
     click.echo(f"Version       : {resolved_version}")
-    click.echo(f"Stage         : {stage}")
+    click.echo(f"Alias         : @{CHAMPION_ALIAS}")
     click.echo(f"Tracking URI  : {tracking_uri}")
 
 
@@ -1134,7 +1191,7 @@ def drift_batch_mission(
     if not channels:
         raise click.ClickException(
             f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry spark preprocess` first."
+            "Run `spacecraft-telemetry preprocess run` first."
         )
     if max_channels is not None:
         channels = channels[:max_channels]

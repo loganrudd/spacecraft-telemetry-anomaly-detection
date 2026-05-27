@@ -22,12 +22,14 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as _TorchDataset
+from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.paths import to_upath
 
 
 def load_series_parquet(
-    processed_dir: Path,
+    processed_dir: Path | UPath | str,
     mission: str,
     channel: str,
     split: Literal["train", "test"],
@@ -53,7 +55,7 @@ def load_series_parquet(
             Parquet files.
     """
     partition_dir = (
-        Path(processed_dir) / mission / split
+        to_upath(processed_dir) / mission / split
         / f"mission_id={mission}" / f"channel_id={channel}"
     )
     if not partition_dir.exists():
@@ -70,18 +72,18 @@ def load_series_parquet(
 
     tables = [
         pq.read_table(
-            f,
+            str(f),
             columns=["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"],
         )
         for f in parquet_files
     ]
     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
-    df = table.to_pandas().sort_values("telemetry_timestamp").reset_index(drop=True)
+    table = table.sort_by("telemetry_timestamp")
 
-    values = df["value_normalized"].to_numpy(dtype=np.float32)   # (N,)
-    segment_ids = df["segment_id"].to_numpy(dtype=np.int32)       # (N,)
-    is_anomaly = df["is_anomaly"].to_numpy(dtype=bool)            # (N,)
-    timestamps = df["telemetry_timestamp"].to_numpy()             # (N,) datetime64[ns]
+    values = table.column("value_normalized").to_numpy(zero_copy_only=False).astype(np.float32)
+    segment_ids = table.column("segment_id").to_numpy(zero_copy_only=False).astype(np.int32)
+    is_anomaly = table.column("is_anomaly").to_numpy(zero_copy_only=False).astype(bool)
+    timestamps = table.column("telemetry_timestamp").to_numpy(zero_copy_only=False)
 
     return values, segment_ids, is_anomaly, timestamps
 
@@ -199,7 +201,7 @@ def make_dataloaders(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "train"
+        settings.preprocess.processed_data_dir, mission, channel, "train"
     )
     all_indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -270,7 +272,7 @@ def make_test_dataloader(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, timestamps = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -320,7 +322,7 @@ def load_window_labels(
     """
     cfg = settings.model
     _, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.spark.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test"
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,

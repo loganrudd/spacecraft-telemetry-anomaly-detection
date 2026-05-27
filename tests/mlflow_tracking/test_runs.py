@@ -5,11 +5,16 @@ Uses a per-test SQLite store (mlflow_uri fixture from conftest).
 
 from __future__ import annotations
 
+import os
+from collections.abc import Generator
+from unittest.mock import MagicMock
+
 import mlflow
 import pytest
 
 from spacecraft_telemetry.core.config import load_settings
 from spacecraft_telemetry.mlflow_tracking.runs import (
+    _install_id_token_auth,
     configure_mlflow,
     log_artifact_bytes,
     log_metrics_final,
@@ -150,3 +155,64 @@ class TestLogHelpers:
     def test_log_artifact_bytes_noop_without_active_run(self, mlflow_uri: str) -> None:
         assert mlflow.active_run() is None
         log_artifact_bytes(b"data", "file.bin")  # must not raise
+
+
+class TestInstallIdTokenAuth:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self) -> Generator[None, None, None]:
+        from spacecraft_telemetry.mlflow_tracking import runs
+
+        runs._token_cache.clear()
+        yield
+        runs._token_cache.clear()
+
+    def test_noop_for_non_run_app_uri(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        _install_id_token_auth("sqlite:///mlflow.db")
+        assert "MLFLOW_TRACKING_TOKEN" not in os.environ
+
+    def test_noop_for_http_non_run_app_uri(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        _install_id_token_auth("http://localhost:5000")
+        assert "MLFLOW_TRACKING_TOKEN" not in os.environ
+
+    def test_sets_token_for_run_app_uri(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        import google.auth.transport.requests as gtr
+        import google.oauth2.id_token as gid
+
+        monkeypatch.setattr(gtr, "Request", MagicMock())
+        monkeypatch.setattr(gid, "fetch_id_token", lambda *_: "test-id-token")
+
+        _install_id_token_auth("https://mlflow-xxxx-uc.a.run.app")
+
+        assert os.environ.get("MLFLOW_TRACKING_TOKEN") == "test-id-token"
+
+    def test_token_not_refetched_within_cache_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        import google.auth.transport.requests as gtr
+        import google.oauth2.id_token as gid
+
+        monkeypatch.setattr(gtr, "Request", MagicMock())
+        fetch_mock = MagicMock(return_value="cached-token")
+        monkeypatch.setattr(gid, "fetch_id_token", fetch_mock)
+
+        uri = "https://mlflow-xxxx-uc.a.run.app"
+        _install_id_token_auth(uri)
+        _install_id_token_auth(uri)
+
+        fetch_mock.assert_called_once()
+
+    def test_silently_skips_on_import_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import sys
+
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        # Simulate google-auth not installed by removing modules from sys.modules.
+        # Python raises ImportError when it finds None in sys.modules for a name.
+        monkeypatch.setitem(sys.modules, "google.auth.transport.requests", None)
+
+        _install_id_token_auth("https://mlflow-xxxx-uc.a.run.app")  # must not raise
+
+        assert "MLFLOW_TRACKING_TOKEN" not in os.environ

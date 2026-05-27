@@ -12,11 +12,13 @@ export type TelemetryEvent = {
 };
 
 export type HealthResponse = {
-  status: "ok" | "degraded";
+  status: "ok" | "degraded" | "loading";
   mission: string;
   subsystem: string | null;
   channels_loaded: string[];
-  channel_subsystems: Record<string, string>; // channel_id → subsystem name
+  channels_total: number;   // target count; use for progress bar denominator
+  channels_ready: number;   // loaded so far; equals len(channels_loaded) when ok
+  channel_subsystems: Record<string, string>;
   uptime_s: number;
   mlflow_tracking_uri: string;
 };

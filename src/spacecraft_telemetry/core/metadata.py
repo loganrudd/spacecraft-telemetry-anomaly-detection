@@ -30,7 +30,7 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
 
     Lookup order:
     1) Processed metadata file:
-       {spark.processed_data_dir}/{mission}/metadata/channel_subsystems.json
+       {preprocess.processed_data_dir}/{mission}/metadata/channel_subsystems.json
     2) Raw metadata CSV fallback:
        {data.raw_data_dir}/{mission}/channels.csv
 
@@ -45,7 +45,7 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
     reads are bounded to at most one read per file per process regardless of how
     many channels that worker handles sequentially.
     """
-    processed_dir = str(Path(str(settings.spark.processed_data_dir)).resolve())
+    processed_dir = str(Path(str(settings.preprocess.processed_data_dir)).resolve())
     raw_dir = str(Path(str(settings.data.raw_data_dir)).resolve())
     return _load_cached(processed_dir, raw_dir, mission)
 

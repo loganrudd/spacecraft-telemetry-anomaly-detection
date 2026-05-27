@@ -1,0 +1,58 @@
+name: Build Ray training image
+
+# Builds and pushes the Ray training/tuning image when training-related files
+# change on main, or on demand via workflow_dispatch (e.g. before make cloud-train).
+#
+# Does NOT run training — training is operator-triggered via `make cloud-train`.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/ray/**"
+      - "src/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra image tag to apply (e.g. a release name). Leave blank for sha + latest only."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGION: us-central1
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+
+jobs:
+  build-ray:
+    name: Build and push Ray image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push Ray training image
+        run: |
+          AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
+          IMAGE="${AR_REPO}/training:${{ github.sha }}"
+          docker build -f deploy/ray/Dockerfile -t "${IMAGE}" -t "${AR_REPO}/training:latest" .
+          docker push "${IMAGE}"
+          docker push "${AR_REPO}/training:latest"
+          if [ -n "${{ inputs.tag }}" ]; then
+            docker tag "${IMAGE}" "${AR_REPO}/training:${{ inputs.tag }}"
+            docker push "${AR_REPO}/training:${{ inputs.tag }}"
+          fi
+          echo "Pushed: ${IMAGE}"

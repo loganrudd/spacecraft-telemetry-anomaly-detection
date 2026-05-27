@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 
 import pytest
@@ -11,6 +12,33 @@ from fastapi.testclient import TestClient
 from spacecraft_telemetry.api.app import create_app
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.core.config import load_settings
+
+# ---------------------------------------------------------------------------
+# Helpers for deferred background loading
+# ---------------------------------------------------------------------------
+
+def _wait_for_ready(app, timeout: float = 5.0) -> None:
+    """Block until the background load task sets app.state.app_state."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if getattr(app.state, "app_state", None) is not None:
+            return
+        time.sleep(0.02)
+    loading = getattr(app.state, "loading_state", None)
+    if loading and loading.error:
+        raise RuntimeError(f"loading failed: {loading.error}")
+    raise TimeoutError("app_state not set within timeout")
+
+
+def _wait_for_loading_done(app, timeout: float = 5.0) -> None:
+    """Block until the background load task marks is_complete (success or failure)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        loading = getattr(app.state, "loading_state", None)
+        if loading and loading.is_complete:
+            return
+        time.sleep(0.02)
+    raise TimeoutError("loading_state.is_complete not set within timeout")
 
 # ---------------------------------------------------------------------------
 # create_app
@@ -38,6 +66,39 @@ class TestCreateApp:
         app = create_app(settings)
         middleware_classes = [m.cls for m in app.user_middleware]
         assert CorrelationIdMiddleware in middleware_classes
+
+    def test_no_static_mount_when_static_dir_unset(self) -> None:
+        """Default test config has no static_dir → no dashboard mount."""
+        settings = load_settings("test")
+        assert settings.api.static_dir is None
+        app = create_app(settings)
+        assert not any(getattr(r, "name", None) == "dashboard" for r in app.routes)
+
+    def test_static_mount_serves_index_when_dir_exists(self, tmp_path) -> None:
+        """A real static_dir gets mounted at / and serves index.html."""
+        (tmp_path / "index.html").write_text("<!doctype html><title>dash</title>")
+        settings = load_settings("test").model_copy(
+            update={
+                "api": load_settings("test").api.model_copy(
+                    update={"static_dir": str(tmp_path)}
+                )
+            }
+        )
+        app = create_app(settings)
+        # Mount registered with the documented name.
+        assert any(getattr(r, "name", None) == "dashboard" for r in app.routes)
+
+    def test_static_dir_missing_does_not_raise(self, tmp_path) -> None:
+        """A configured-but-missing static_dir logs a warning, does not crash."""
+        settings = load_settings("test").model_copy(
+            update={
+                "api": load_settings("test").api.model_copy(
+                    update={"static_dir": str(tmp_path / "does-not-exist")}
+                )
+            }
+        )
+        app = create_app(settings)
+        assert not any(getattr(r, "name", None) == "dashboard" for r in app.routes)
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +161,11 @@ class TestCorrelationIdMiddleware:
 
 
 class TestLifespanFailure:
-    def test_lifespan_raises_when_no_channels(self, tmp_path) -> None:
-        """create_app() instantiation is fine; lifespan raises on empty registry."""
+    def test_no_channels_results_in_degraded_health(self, tmp_path) -> None:
+        """When no channel models are registered, background load records an error
+        and /health returns 503 degraded (lifespan no longer raises)."""
         settings = load_settings("test")
-        # Use a fresh empty database — mlflow.test.db may have accumulated
-        # models from previous training runs and is not hermetic for this test.
+        # Fresh empty DB — hermetic; no models registered.
         settings = settings.model_copy(
             update={
                 "mlflow": settings.mlflow.model_copy(
@@ -113,8 +174,12 @@ class TestLifespanFailure:
             }
         )
         app = create_app(settings)
-        with pytest.raises(RuntimeError), TestClient(app, raise_server_exceptions=True):
-            pass  # pragma: no cover
+        with TestClient(app, raise_server_exceptions=False) as client:
+            _wait_for_loading_done(app)
+            assert app.state.loading_state.error is not None
+            resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.json()["status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +247,7 @@ class TestLifespanBranchCoverage:
         )
         app = create_app(settings)
         with TestClient(app):
+            _wait_for_ready(app)
             assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-b"}
 
     def test_subsystem_filter_selects_matching_channels(self, mocker, _lifespan_patches) -> None:
@@ -198,12 +264,12 @@ class TestLifespanBranchCoverage:
         )
         app = create_app(settings)
         with TestClient(app):
+            _wait_for_ready(app)
             assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-c"}
 
     def test_per_channel_error_is_skipped(self, mocker, _lifespan_patches) -> None:
-        """A channel that fails to load is warned+skipped; others still boot."""
+        """A channel that fails to load is skipped; the service boots with the rest."""
         import torch
-
 
         mocker.patch(
             "spacecraft_telemetry.api.app.load_channel_subsystem_map",
@@ -233,7 +299,14 @@ class TestLifespanBranchCoverage:
             )}
         )
         app = create_app(settings)
-        with TestClient(app):
+        with TestClient(app) as client:
+            _wait_for_ready(app)
             loaded = set(app.state.app_state.engines.keys())
+            resp = client.get("/health")
         assert "ch-good" in loaded
         assert "ch-bad" not in loaded
+        # Partial load must surface as degraded, not ok.
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["missing"] == ["ch-bad"]

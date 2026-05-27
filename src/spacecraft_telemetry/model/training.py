@@ -19,7 +19,6 @@ import copy
 import json
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -28,6 +27,7 @@ import torch.nn as nn
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -126,7 +126,7 @@ def train_channel(
 
     _data_hash: str | None = None
     with suppress(Exception):
-        _data_hash = training_data_hash(settings.spark.processed_data_dir, mission, channel)
+        _data_hash = training_data_hash(settings.preprocess.processed_data_dir, mission, channel)
 
     _exp = experiment_name(cfg.model_type, "training", mission)
     _tags = common_tags(
@@ -225,9 +225,10 @@ def train_channel(
             "epochs_run": len(train_losses),
         })
 
-        # Log normalization params for this channel (sourced from Spark output).
+        # Log normalization params for this channel.
         _norm_src = (
-            Path(settings.spark.processed_data_dir) / mission / "normalization_params.json"
+            to_upath(settings.preprocess.processed_data_dir)
+            / mission / "normalization_params.json"
         )
         _all_norm = json.loads(_norm_src.read_bytes())
         log_dict(_all_norm[channel], "normalization_params.json")

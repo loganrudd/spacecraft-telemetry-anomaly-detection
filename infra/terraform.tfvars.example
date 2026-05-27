@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and fill in project_id and billing_account.
+# terraform.tfvars is gitignored — never commit it.
+
+project_id      = "your-gcp-project-id"
+billing_account = "XXXXXX-XXXXXX-XXXXXX"
+
+# Defaults below are set by variables.tf; override here only if needed.
+# region             = "us-central1"
+# github_repo        = "loganrudd/spacecraft-telemetry-anomaly-detection"
+# notification_email = "loganrudd@gmail.com"
+
+# Cloud Run api sizing — defaults confirmed by M1.5 profiling (18s / 586 MiB at 100ch).
+# api_cpu            = "2"
+# api_memory         = "2Gi"
+# api_min_instances  = 0
+# api_cpu_idle       = false

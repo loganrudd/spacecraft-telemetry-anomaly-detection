@@ -76,9 +76,19 @@ docs/PLANNING_MODE_GUIDE.md
 # GCP credentials
 *.json
 !package.json
+!package-lock.json
 !tsconfig.json
 !pyrightconfig.json
 
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Terraform
+infra/.terraform/
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/terraform.tfstate.*.backup
+infra/terraform.tfvars
+infra/.terraform.tfstate.lock.info
+# infra/.terraform.lock.hcl is committed — it pins provider versions

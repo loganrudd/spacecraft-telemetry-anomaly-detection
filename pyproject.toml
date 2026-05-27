@@ -19,11 +19,13 @@ dependencies = [
     "pandas>=2.0",
     "rich>=13.0",
     "click>=8.0",
+    "universal-pathlib>=0.2",
+    "fsspec>=2024.2",
 ]
 
 [project.optional-dependencies]
-spark = [
-    "pyspark>=4.1,<5",
+inference = [
+    "torch>=2.0",
 ]
 ml = [
     "torch>=2.0",
@@ -42,6 +44,7 @@ tracking = [
 gcp = [
     "google-cloud-storage>=2.10",
     "gcsfs>=2024.2",
+    "google-auth>=2.30",
 ]
 dev = [
     "pytest>=8.0",
@@ -81,5 +84,5 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*"]
+module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*"]
 ignore_missing_imports = true

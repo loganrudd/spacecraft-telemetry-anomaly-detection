@@ -8,20 +8,20 @@ SUBSYSTEM     ?=
 UV := uv
 RUN := $(UV) run
 
-# Auto-detect JDK 21 for PySpark (macOS Homebrew path).
-# Override by setting JAVA_HOME externally (e.g. on Linux CI).
-JAVA_HOME_21 ?= $(shell brew --prefix openjdk@21 2>/dev/null)
-# Prepended to commands that need JDK 21; empty string if not found (tests skip gracefully).
-_SPARK_ENV   := $(if $(JAVA_HOME_21),JAVA_HOME=$(JAVA_HOME_21))
-
 .PHONY: help setup test test-all lint format typecheck \
         download-sample explore \
-        spark-test spark-preprocess \
+        preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-server mlflow-ui mlflow-promote \
+        mlflow-server mlflow-ui mlflow-promote cloud-deploy \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
+        docker-build docker-build-ray docker-run-local \
+        tf-init tf-plan tf-apply tf-destroy \
+        cloud-up cloud-down \
+        cloud-preprocess cloud-train cloud-tune \
+        seed-reference-profiles \
+        smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
 
 help:          ## Show this help message
@@ -32,21 +32,18 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + spark + tracking + ml)
-	$(UV) sync --extra dev --extra spark --extra tracking --extra ml
+setup:         ## Install all dependency groups (dev + tracking + ml)
+	$(UV) sync --extra dev --extra tracking --extra ml
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-test:          ## Run fast tests (Spark tests skip automatically if JDK 21 absent)
-	$(_SPARK_ENV) $(RUN) pytest -m "not slow" -q
+test:          ## Run fast tests
+	$(RUN) pytest -m "not slow" -q
 
 test-all:      ## Run the full test suite including slow tests
-	$(_SPARK_ENV) $(RUN) pytest -q
-
-spark-test:    ## Run only PySpark tests (requires JDK 21 — brew install openjdk@21)
-	$(_SPARK_ENV) $(RUN) pytest tests/spark/ -v
+	$(RUN) pytest -q
 
 # ---------------------------------------------------------------------------
 # Code quality
@@ -78,11 +75,11 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 		--mission $(MISSION)
 
 # ---------------------------------------------------------------------------
-# Spark preprocessing (Phase 2)
+# Preprocessing (Phase 10.5 — pandas + Ray)
 # ---------------------------------------------------------------------------
 
-spark-preprocess: ## Run Spark preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
-	$(_SPARK_ENV) $(RUN) spacecraft-telemetry spark preprocess \
+preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
+	$(RUN) spacecraft-telemetry preprocess run \
 		--mission $(MISSION) \
 		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
@@ -144,10 +141,19 @@ TUNED_CONFIGS ?=
 mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
 
-mlflow-promote:   ## Promote a registered model to STAGE (MISSION=…, CHANNEL=…, STAGE=Production)
+mlflow-promote:   ## Set @champion alias on latest model version (MISSION=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry mlflow promote \
-		--name telemanom-$(MISSION)-$(CHANNEL) \
-		--stage $(STAGE)
+		--name telemanom-$(MISSION)-$(CHANNEL)
+
+cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
+	$(eval _API_IMAGE := $(shell gcloud run services describe api \
+		--region $(REGION) --project $(PROJECT_ID) \
+		--format='value(spec.template.spec.containers[0].image)' 2>/dev/null))
+	@if [ -z "$(_API_IMAGE)" ]; then echo "ERROR: Cloud Run service 'api' not found. Run terraform apply first."; exit 1; fi
+	gcloud run deploy api \
+		--image $(_API_IMAGE) \
+		--region $(REGION) \
+		--project $(PROJECT_ID)
 
 # ---------------------------------------------------------------------------
 # Housekeeping
@@ -158,7 +164,7 @@ clean:           ## Remove build artifacts and Python caches (safe, instant)
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-clean-processed: ## Remove Spark output (data/processed/) — re-run spark-preprocess to rebuild
+clean-processed: ## Remove preprocessed data (data/processed/) — re-run preprocess to rebuild
 	rm -rf data/processed/
 
 clean-models:    ## Remove trained model artifacts (models/) — re-run model-train to rebuild
@@ -193,3 +199,123 @@ frontend-build:   ## Build the dashboard static bundle to frontend/dist/
 
 frontend-test:    ## Run dashboard unit tests (Vitest)
 	cd frontend && npm run test
+
+# ---------------------------------------------------------------------------
+# Docker (Phase 10)
+# ---------------------------------------------------------------------------
+
+IMAGE_TAG     ?= dev
+PROJECT_ID    ?=
+REGION        ?= us-central1
+AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
+
+docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
+	docker build -t st-api:$(IMAGE_TAG) .
+
+docker-build-ray:  ## Build the Ray training/tuning image locally (IMAGE_TAG=dev)
+	docker build -f deploy/ray/Dockerfile -t st-training:$(IMAGE_TAG) .
+
+docker-run-local: ## Run the API container locally against local MLflow (IMAGE_TAG=dev)
+	docker run --rm -p 8080:8080 \
+		-e SPACECRAFT_ENV=local \
+		-e SPACECRAFT_MLFLOW__TRACKING_URI=http://host.docker.internal:5001 \
+		-v "$(PWD)/models:/app/models" \
+		-v "$(PWD)/data:/app/data" \
+		st-api:$(IMAGE_TAG)
+
+# ---------------------------------------------------------------------------
+# Terraform (Phase 10)
+# ---------------------------------------------------------------------------
+
+tf-init:          ## Initialize Terraform providers (run once per checkout)
+	cd infra && terraform init
+
+tf-plan:          ## Show Terraform plan (PROJECT_ID=… BILLING_ACCOUNT=… required)
+	cd infra && terraform plan \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+tf-apply:         ## Apply Terraform changes (PROJECT_ID=… BILLING_ACCOUNT=… required)
+	cd infra && terraform apply \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
+	cd infra && terraform destroy \
+		-var="project_id=$(PROJECT_ID)" \
+		-var="billing_account=$(BILLING_ACCOUNT)"
+
+# ---------------------------------------------------------------------------
+# Cloud session lifecycle — run cloud-up before training, cloud-down after
+# ---------------------------------------------------------------------------
+# cloud-up:   starts Cloud SQL + provisions GKE + installs KubeRay (~10 min)
+# cloud-down: stops Cloud SQL + destroys GKE to eliminate idle billing
+# GKE Autopilot workers scale to zero between jobs, but Cloud SQL charges
+# for uptime — stop it when not actively training or demoing.
+
+cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preprocess/train/tune.
+	gcloud sql instances patch mlflow-pg --activation-policy=ALWAYS --async --quiet
+	@echo "Waiting for Cloud SQL to reach RUNNABLE state..."
+	@until [ "$$(gcloud sql instances describe mlflow-pg --format='value(state)' --quiet)" = "RUNNABLE" ]; do \
+		sleep 10; echo "  still waiting..."; \
+	done
+	@echo "Cloud SQL is RUNNABLE."
+	terraform -chdir=infra apply \
+		-target=google_container_cluster.ray \
+		-auto-approve
+	terraform -chdir=infra apply \
+		-target=kubernetes_namespace.ray_system \
+		-target=kubernetes_namespace.ray \
+		-target=helm_release.kuberay_operator \
+		-auto-approve
+	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
+
+cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after training.
+	terraform -chdir=infra destroy \
+		-target=helm_release.kuberay_operator \
+		-target=kubernetes_namespace.ray_system \
+		-target=kubernetes_namespace.ray \
+		-auto-approve
+	terraform -chdir=infra destroy \
+		-target=google_container_cluster.ray \
+		-auto-approve
+	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --async --quiet
+	@echo "Cloud SQL stopped. GKE destroyed."
+
+# ---------------------------------------------------------------------------
+# GCP one-time operations (Phase 10 — M6)
+# ---------------------------------------------------------------------------
+
+# MLFLOW_URL is fetched live so the Makefile works without storing it.
+_mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
+
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) \
+		./scripts/cloud_preprocess.sh
+
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		./scripts/cloud_train.sh
+
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		./scripts/cloud_tune.sh
+
+seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
+	$(RUN) python scripts/build_reference_profiles.py \
+		--env cloud \
+		--mission $(MISSION) \
+		--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt \
+		--upload gs://$(PROJECT_ID)-artifacts/reference_profiles \
+		--upload-only
+
+smoke-cloud:      ## Smoke-test the deployed API (PROJECT_ID=… REGION=…)
+	@API_URL=$$(gcloud run services describe api --region $(REGION) --project $(PROJECT_ID) \
+		--format='value(status.url)'); \
+	echo "==> GET $${API_URL}/health"; \
+	for i in 1 2 3 4 5; do \
+		STATUS=$$(curl -fsS "$${API_URL}/health" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null); \
+		[ "$$STATUS" = "ok" ] && echo "==> API status: ok" && exit 0; \
+		echo "  attempt $$i/5 — retrying in 12s..."; sleep 12; \
+	done; \
+	echo "ERROR: API did not return status=ok after 5 attempts"; exit 1

@@ -33,7 +33,7 @@ from spacecraft_telemetry.features.definitions import _DEFAULT_WINDOWS, FEATURE_
 # ---------------------------------------------------------------------------
 # value_normalized + all engineered feature columns, in the order that Evidently
 # receives them.  Column names and window sizes are derived from FEATURE_DEFINITIONS
-# (defaults: windows [10, 50, 100]) and MUST agree with settings.spark.feature_windows
+# (defaults: windows [10, 50, 100]) and MUST agree with settings.preprocess.feature_windows
 # at monitoring time.  Changing feature_windows without updating FEATURE_DEFINITIONS
 # will cause a KeyError in compute_feature_dataframe.
 
@@ -50,7 +50,7 @@ REALTIME_FEATURE_COLS: list[str] = ["value_normalized", "rate_of_change"]
 
 # Rolling windows that MONITORING_FEATURE_COLS was built from.  Sourced directly
 # from _DEFAULT_WINDOWS in features/definitions.py — the two share one definition.
-# compute_feature_dataframe validates settings.spark.feature_windows against this.
+# compute_feature_dataframe validates settings.preprocess.feature_windows against this.
 _MONITORING_WINDOWS: list[int] = sorted(_DEFAULT_WINDOWS)
 
 
@@ -60,7 +60,7 @@ def compute_feature_dataframe(
 ) -> pd.DataFrame:
     """Add rolling feature columns via pd.DataFrame.rolling().  Drops NaN warmup rows.
 
-    Window sizes come from ``settings.spark.feature_windows``.  For the output
+    Window sizes come from ``settings.preprocess.feature_windows``.  For the output
     columns to match ``MONITORING_FEATURE_COLS`` exactly, the window list must
     equal ``FEATURE_DEFINITIONS``'s default windows ``[10, 50, 100]``.
 
@@ -68,17 +68,17 @@ def compute_feature_dataframe(
         series_df: DataFrame with at least a ``value_normalized`` column.
                    ``telemetry_timestamp`` (UTC-aware) is used for rate_of_change
                    when present; falls back to a simple value diff otherwise.
-        settings: Runtime settings; ``settings.spark.feature_windows`` drives
+        settings: Runtime settings; ``settings.preprocess.feature_windows`` drives
                   which window sizes are computed.
 
     Returns:
         DataFrame with columns ``MONITORING_FEATURE_COLS``, NaN warmup rows
         dropped, index reset to 0-based sequential integers.
     """
-    windows = list(settings.spark.feature_windows)
+    windows = list(settings.preprocess.feature_windows)
     if sorted(windows) != _MONITORING_WINDOWS:
         raise ValueError(
-            f"settings.spark.feature_windows {sorted(windows)} does not match the "
+            f"settings.preprocess.feature_windows {sorted(windows)} does not match the "
             f"windows used to build MONITORING_FEATURE_COLS {_MONITORING_WINDOWS}. "
             "Update FEATURE_DEFINITIONS or set feature_windows to "
             f"{_MONITORING_WINDOWS} in your config."
@@ -143,7 +143,7 @@ def _load_channel_series(
         FileNotFoundError: If the partition directory does not exist.
     """
     partition_dir = (
-        Path(settings.spark.processed_data_dir)
+        Path(settings.preprocess.processed_data_dir)
         / mission
         / split
         / f"mission_id={mission}"
@@ -161,7 +161,7 @@ def _load_channel_series(
     df = table.to_pandas().sort_values("telemetry_timestamp")
 
     # Tail-slice before rolling: only contiguous rows needed for output.
-    max_window = max(settings.spark.feature_windows)
+    max_window = max(settings.preprocess.feature_windows)
     rows_needed = settings.monitoring.reference_sample_rows + max_window
     if len(df) > rows_needed:
         df = df.tail(rows_needed)

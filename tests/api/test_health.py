@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -60,14 +59,15 @@ class TestHealthDegraded:
 
 
 class TestHealthLifespanFailure:
-    def test_lifespan_raises_when_registry_empty(self, tmp_path) -> None:
-        """create_app lifespan raises RuntimeError when no channels load from registry."""
+    def test_no_channels_gives_degraded_health(self, tmp_path) -> None:
+        """When registry is empty, background loading records an error and
+        /health returns 503 degraded (lifespan no longer raises)."""
+        import time
+
         from spacecraft_telemetry.api.app import create_app
         from spacecraft_telemetry.core.config import load_settings
 
         settings = load_settings("test")
-        # Use a fresh empty database — mlflow.test.db may have accumulated
-        # models from previous training runs and is not hermetic for this test.
         settings = settings.model_copy(
             update={
                 "mlflow": settings.mlflow.model_copy(
@@ -76,5 +76,13 @@ class TestHealthLifespanFailure:
             }
         )
         app = create_app(settings)
-        with pytest.raises(RuntimeError), TestClient(app, raise_server_exceptions=True):
-            pass  # pragma: no cover
+        with TestClient(app, raise_server_exceptions=False) as client:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                loading = getattr(app.state, "loading_state", None)
+                if loading and loading.is_complete:
+                    break
+                time.sleep(0.02)
+            resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.json()["status"] == "degraded"

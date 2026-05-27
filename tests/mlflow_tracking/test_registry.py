@@ -21,6 +21,7 @@ import mlflow
 import pytest
 
 from spacecraft_telemetry.mlflow_tracking.registry import (
+    CHAMPION_ALIAS,
     latest_uri,
     promote,
     register_pytorch_model,
@@ -34,18 +35,15 @@ _REGISTRY_CLIENT = (
 
 
 class TestLatestUri:
-    def test_default_stage_is_production(self) -> None:
+    def test_uses_champion_alias(self) -> None:
         assert latest_uri("telemanom-ESA-Mission1-channel_1") == (
-            "models:/telemanom-ESA-Mission1-channel_1/Production"
+            "models:/telemanom-ESA-Mission1-channel_1@champion"
         )
 
-    def test_custom_stage(self) -> None:
-        assert latest_uri("my-model", stage="Staging") == "models:/my-model/Staging"
-
-    def test_uri_is_parseable(self) -> None:
+    def test_uri_uses_alias_format(self) -> None:
         uri = latest_uri("telemanom-ESA-Mission1-channel_1")
         assert uri.startswith("models:/")
-        assert "Production" in uri
+        assert "@champion" in uri
 
 
 class TestRegisterPytorchModel:
@@ -55,7 +53,6 @@ class TestRegisterPytorchModel:
         fake_model = MagicMock()
         model_name = "telemanom-ESA-Mission1-channel_1"
         fake_run_id = "abc123"
-
 
         with patch("mlflow.pytorch.log_model") as mock_log, \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
@@ -67,12 +64,11 @@ class TestRegisterPytorchModel:
 
         mock_log.assert_called_once()
         kwargs = mock_log.call_args.kwargs
-        assert kwargs["artifact_path"] == "model"
+        assert kwargs["name"] == "model"
         assert kwargs["registered_model_name"] == model_name
         assert kwargs["pytorch_model"] is fake_model
 
     def test_returns_model_version_from_registry_query(self, mlflow_uri: str) -> None:
-
         fake_version = MagicMock()
         with patch("mlflow.pytorch.log_model"), \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
@@ -86,15 +82,11 @@ class TestRegisterPytorchModel:
 
         assert result is fake_version
 
-    def test_returns_none_when_run_id_filter_empty(
-        self, mlflow_uri: str
-    ) -> None:
-
+    def test_returns_none_when_run_id_filter_empty(self, mlflow_uri: str) -> None:
         with patch("mlflow.pytorch.log_model"), \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
-            # run_id filter returns nothing — must not fall back to a different run.
             mock_client.search_model_versions.return_value = []
 
             result = register_pytorch_model(
@@ -122,17 +114,17 @@ def _create_version(name: str, run_id: str) -> None:
 
 
 class TestPromote:
-    def test_promotes_to_production(self, mlflow_uri: str) -> None:
+    def test_promotes_latest_version(self, mlflow_uri: str) -> None:
         name = "telemanom-ESA-Mission1-channel_3"
         with open_run(experiment="exp", run_name="ch", tags={}) as run:
             assert run is not None
             _create_version(name, run.info.run_id)
 
-        promote(name=name, stage="Production")
+        promote(name=name)
 
         client = mlflow.tracking.MlflowClient()
-        versions = client.get_latest_versions(name, stages=["Production"])
-        assert len(versions) == 1
+        mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+        assert mv is not None
 
     def test_promotes_explicit_version(self, mlflow_uri: str) -> None:
         name = "telemanom-ESA-Mission1-channel_4"
@@ -140,16 +132,13 @@ class TestPromote:
             assert run is not None
             _create_version(name, run.info.run_id)
 
-        promote(name=name, version=1, stage="Staging")
+        promote(name=name, version=1)
 
         client = mlflow.tracking.MlflowClient()
-        versions = client.get_latest_versions(name, stages=["Staging"])
-        assert len(versions) == 1
-        assert int(versions[0].version) == 1
+        mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+        assert int(mv.version) == 1
 
-    def test_resolves_to_latest_non_archived_when_version_omitted(
-        self, mlflow_uri: str
-    ) -> None:
+    def test_resolves_to_latest_when_version_omitted(self, mlflow_uri: str) -> None:
         name = "telemanom-ESA-Mission1-channel_5"
         with open_run(experiment="exp", run_name="ch1", tags={}) as r1:
             assert r1 is not None
@@ -158,13 +147,12 @@ class TestPromote:
             assert r2 is not None
             _create_version(name, r2.info.run_id)
 
-        promote(name=name, stage="Production")  # no version specified
+        promote(name=name)
 
         client = mlflow.tracking.MlflowClient()
-        prod = client.get_latest_versions(name, stages=["Production"])
-        assert len(prod) == 1
-        assert int(prod[0].version) == 2  # latest = 2
+        mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+        assert int(mv.version) == 2
 
     def test_raises_when_no_versions(self, mlflow_uri: str) -> None:
-        with pytest.raises(ValueError, match="No promotable versions"):
-            promote(name="telemanom-ESA-Mission1-nonexistent", stage="Production")
+        with pytest.raises(ValueError, match="No versions found"):
+            promote(name="telemanom-ESA-Mission1-nonexistent")

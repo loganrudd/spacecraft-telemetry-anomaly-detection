@@ -13,8 +13,10 @@
    ``asyncio.wait(FIRST_COMPLETED)`` and yields whichever payload arrives
    first.  This keeps latency fair across channels regardless of their
    individual tick rates.
-4. Client disconnect is detected via ``request.is_disconnected()`` at the
-   top of each merge iteration.
+4. Client disconnect is detected via a dedicated watcher task that awaits
+   the ASGI ``http.disconnect`` message and sets an ``asyncio.Event``.
+   The merge loop races its getter tasks against that event so exit is
+   push-based rather than polled on each iteration.
 5. On any exit path (disconnect, exhaustion, exception) the pump tasks are
    cancelled and awaited so no coroutines are leaked.
 
@@ -59,44 +61,76 @@ async def _merge_queues(
     """Race per-channel queues, yield payloads as they arrive, clean up on exit.
 
     Shared merge loop used by both ``telemetry_stream`` and ``drift_stream``.
-    Detects client disconnect, drains queues fairly across channels via
-    ``asyncio.wait(FIRST_COMPLETED)``, and cancels pump tasks in the finally
-    block so no coroutines are leaked regardless of how the generator is closed.
+
+    Long-lived getter design: one persistent Task per channel queue, re-armed
+    only when its result is consumed.  This avoids the per-iteration
+    create/cancel churn of the previous batch-getter approach.
+
+    A disconnect-watcher task receives ASGI messages and sets an
+    ``asyncio.Event`` on ``http.disconnect``, so exit is push-based rather
+    than polled.  The merge loop races all getter tasks against a single
+    ``disconnect.wait()`` task so disconnect latency is bounded by
+    ``asyncio.wait`` timeout (1 s), not by the next queue item.
     """
-    try:
+    disconnect = asyncio.Event()
+
+    async def _watch_disconnect() -> None:
         while True:
-            if await request.is_disconnected():
+            msg = await request.receive()
+            if msg["type"] == "http.disconnect":
+                disconnect.set()
+                return
+
+    watcher = asyncio.create_task(_watch_disconnect())
+    # One persistent getter per channel; re-armed after each consumed result.
+    getters: dict[str, asyncio.Task[bytes]] = {
+        ch: asyncio.create_task(queues[ch].get()) for ch in channels
+    }
+    disc_task: asyncio.Task[bool] = asyncio.create_task(disconnect.wait())
+
+    try:
+        while getters:
+            if disconnect.is_set():
                 break
 
-            active: dict[str, asyncio.Queue[bytes]] = {
-                ch: q
-                for ch, q in queues.items()
-                if not tasks[ch].done() or not q.empty()
-            }
-            if not active:
+            # Channels whose pump finished and queue drained will never produce
+            # another item — their getter would block forever.  Remove them now.
+            # Guard: skip getters that are already done (they hold a result not
+            # yet yielded — cancelling them would lose that last event).
+            for ch in [
+                ch for ch in list(getters)
+                if tasks[ch].done() and queues[ch].empty() and not getters[ch].done()
+            ]:
+                getters[ch].cancel()
+                del getters[ch]
+            if not getters:
                 break
 
-            getter_tasks: list[asyncio.Task[bytes]] = [
-                asyncio.create_task(q.get()) for q in active.values()
-            ]
-            done, pending = await asyncio.wait(
-                getter_tasks,
+            done, _ = await asyncio.wait(
+                [*list(getters.values()), disc_task],
                 return_when=asyncio.FIRST_COMPLETED,
                 timeout=1.0,
             )
 
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            if disc_task in done:
+                break
 
-            if not done:
-                continue
-
-            for t in done:
-                yield t.result()
+            for ch, getter in list(getters.items()):
+                if getter not in done:
+                    continue
+                yield getter.result()
+                # Re-arm if pump is still running or queue still has items.
+                if not tasks[ch].done() or not queues[ch].empty():
+                    getters[ch] = asyncio.create_task(queues[ch].get())
+                else:
+                    del getters[ch]
 
     finally:
+        for g in getters.values():
+            g.cancel()
+        disc_task.cancel()
+        watcher.cancel()
+        await asyncio.gather(*getters.values(), disc_task, watcher, return_exceptions=True)
         for pump_task in tasks.values():
             pump_task.cancel()
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -147,7 +181,7 @@ async def telemetry_stream(
         structlog.contextvars.bind_contextvars(channel_id=channel)
         engine = state.engines[channel]
         async for ts, val, anom_true in replay_channel(
-            state.settings.spark.processed_data_dir,
+            state.settings.preprocess.processed_data_dir,
             state.mission,
             channel,
             speed=speed,
@@ -226,7 +260,7 @@ async def drift_stream(
         drift_event_count = 0
 
         async for _ts, val, _anom in replay_channel(
-            state.settings.spark.processed_data_dir,
+            state.settings.preprocess.processed_data_dir,
             state.mission,
             channel,
             speed=speed,

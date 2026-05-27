@@ -3,18 +3,24 @@
 Entry point:
     app = create_app(load_settings())
 
-The lifespan handler runs at startup:
-  1. configure_mlflow  — FIRST, before any other library touches the URI
-  2. torch.set_num_threads(1)  — one process per channel; avoid BLAS oversubscription
-  3. resolve_device  — CUDA > MPS > CPU
-  4. load_channel_subsystem_map  — channel → subsystem lookup
-  5. For each channel in the configured subsystem: load LSTM + scoring params,
-     build ChannelInferenceEngine, put in eval() mode.
-  6. Attach AppState to app.state.app_state.
-  7. Raise RuntimeError if no engines loaded (hard fail — nothing to serve).
+Startup sequence (Phase 10 deferred-load design):
+  Sync (completes before the first request is accepted):
+    1. configure_mlflow  — FIRST, before any third-party library touches the URI
+    2. torch.set_num_threads(1)  — avoid BLAS oversubscription under Ray
+    3. resolve_device  — CUDA > MPS > CPU
+    4. load_channel_subsystem_map  — determines which channels to load
+    5. Resolve channel list; create LoadingState; attach to app.state.loading_state
 
-The router (endpoints.py) is wired in during create_app, so Step 7 can add
-it without modifying this file.
+  Background task (runs concurrently while the app serves requests):
+    6. Load LSTM + scoring params per channel (semaphore-limited concurrency)
+    7. Load replay Parquet for each engine
+    8. Load Evidently drift reference profiles
+    9. Attach AppState to app.state.app_state
+   10. Mark LoadingState.is_complete = True
+
+During steps 6-9, GET /health returns status="loading" with progress counters
+so the React dashboard can show a progress bar instead of a blank screen.
+SSE endpoints return 503 until app_state is set.
 """
 
 from __future__ import annotations
@@ -22,17 +28,21 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
+import mlflow.exceptions
 import torch
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.replay import ReplayData
-from spacecraft_telemetry.api.state import AppState
+from spacecraft_telemetry.api.state import AppState, LoadingState
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
@@ -47,149 +57,186 @@ from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import load_model_for_scoring, load_scoring_params
 
 # Maximum concurrent MLflow model loads during lifespan startup.  Unbounded
-# gather causes OOM or MLflow throttling at whole-mission scale (300+ channels).
+# gather causes OOM or MLflow throttling at whole-mission scale (100+ channels).
 _LIFESPAN_LOAD_CONCURRENCY = 8
+
+# Exceptions that indicate a transient or expected channel-load failure (missing
+# model, registry unavailable, network blip).  Programming errors (TypeError,
+# AttributeError, KeyError) are intentionally excluded so they propagate loudly.
+_CHANNEL_LOAD_ERRORS = (
+    mlflow.exceptions.MlflowException,
+    OSError,
+    FileNotFoundError,
+    ConnectionError,
+    TimeoutError,
+    RuntimeError,
+)
+
+
+async def _load_engine(
+    ch: str,
+    settings: Settings,
+    device: torch.device,
+    sem: asyncio.Semaphore,
+    loading: LoadingState,
+    log: Any,
+) -> tuple[str, ChannelInferenceEngine | None]:
+    """Load LSTM model + scoring params for one channel; returns None on expected failure."""
+    async with sem:
+        try:
+            name = registered_model_name("telemanom", settings.api.mission, ch)
+            model, window_size = await asyncio.to_thread(
+                load_model_for_scoring, name, device, settings.mlflow.tracking_uri
+            )
+            model.eval()
+            params = await asyncio.to_thread(
+                load_scoring_params,
+                channel=ch,
+                mission=settings.api.mission,
+                tracking_uri=settings.mlflow.tracking_uri,
+            )
+            engine = ChannelInferenceEngine(
+                mission=settings.api.mission,
+                channel=ch,
+                model=model,
+                window_size=window_size,
+                params=params,
+                device=device,
+            )
+            log.info("api.lifespan.channel.loaded", channel=ch, window_size=window_size)
+            loading.channels_ready += 1
+            return ch, engine
+        except _CHANNEL_LOAD_ERRORS as exc:
+            log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
+            return ch, None
+        finally:
+            loading.channels_done += 1
+
+
+async def _load_drift_ref(
+    ch: str,
+    settings: Settings,
+    sem: asyncio.Semaphore,
+    log: Any,
+) -> tuple[str, object]:
+    """Load Evidently reference profile for one channel; returns None when missing."""
+    async with sem:
+        prof_path = reference_profile_path(settings, settings.api.mission, ch)
+        try:
+            ref = await asyncio.to_thread(load_reference_profile, prof_path)
+            log.info("api.lifespan.drift_reference.loaded", channel=ch)
+            return ch, ref
+        except FileNotFoundError:
+            log.warning("api.lifespan.drift_reference.missing", channel=ch)
+            return ch, None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """FastAPI lifespan handler — loads all channel inference engines at startup."""
+    """FastAPI lifespan — fast sync setup, then deferred background model load."""
     settings: Settings = app.state.settings
     log = get_logger("api.lifespan")
 
-    # MLflow URI must be set first — before any third-party library runs.
-    configure_mlflow(settings)
-
+    # Sync setup — must complete before the app accepts connections.
+    configure_mlflow(settings)  # FIRST — before any third-party library touches the URI
     torch.set_num_threads(1)
     device = resolve_device(settings.model.device)
-
     channel_subsystem_map = load_channel_subsystem_map(settings, settings.api.mission)
 
     if settings.api.channels:
         resolved = list(settings.api.channels)
         log.info("api.lifespan.channels.explicit", count=len(resolved))
     elif settings.api.subsystem is not None:
-        resolved = [
-            ch for ch, sub in channel_subsystem_map.items()
-            if sub == settings.api.subsystem
-        ]
-        log.info(
-            "api.lifespan.channels.from_subsystem",
-            subsystem=settings.api.subsystem,
-            count=len(resolved),
-        )
+        resolved = [ch for ch, sub in channel_subsystem_map.items()
+                    if sub == settings.api.subsystem]
+        log.info("api.lifespan.channels.from_subsystem",
+                 subsystem=settings.api.subsystem, count=len(resolved))
     else:
         resolved = sorted(channel_subsystem_map.keys())
         log.info("api.lifespan.channels.whole_mission", count=len(resolved))
 
-    _load_sem = asyncio.Semaphore(_LIFESPAN_LOAD_CONCURRENCY)
+    loading = LoadingState(channels_total=len(resolved))
+    app.state.loading_state = loading
+    sem = asyncio.Semaphore(_LIFESPAN_LOAD_CONCURRENCY)
 
-    async def _load_engine(ch: str) -> tuple[str, ChannelInferenceEngine | None]:
-        async with _load_sem:
-            try:
-                name = registered_model_name("telemanom", settings.api.mission, ch)
-                model, window_size = await asyncio.to_thread(
-                    load_model_for_scoring, name, device, settings.mlflow.tracking_uri
-                )
-                model.eval()
-                params = await asyncio.to_thread(
-                    load_scoring_params,
-                    channel=ch,
-                    mission=settings.api.mission,
-                    tracking_uri=settings.mlflow.tracking_uri,
-                )
-                engine = ChannelInferenceEngine(
-                    mission=settings.api.mission,
-                    channel=ch,
-                    model=model,
-                    window_size=window_size,
-                    params=params,
-                    device=device,
-                )
-                log.info("api.lifespan.channel.loaded", channel=ch, window_size=window_size)
-                return ch, engine
-            except Exception as exc:
-                log.warning("api.lifespan.channel.skipped", channel=ch, error=str(exc))
-                return ch, None
-
-    engine_results = await asyncio.gather(*[_load_engine(ch) for ch in resolved])
-    engines: dict[str, ChannelInferenceEngine] = {
-        ch: eng for ch, eng in engine_results if eng is not None
-    }
-
-    replay_data: dict[str, ReplayData] = {}
-    for ch in engines:
+    async def _background_load() -> None:
         try:
-            values, _seg, anom, timestamps = await asyncio.to_thread(
-                load_series_parquet,
-                settings.spark.processed_data_dir,
-                settings.api.mission,
-                ch,
-                "test",
+            engine_results = await asyncio.gather(
+                *[_load_engine(ch, settings, device, sem, loading, log) for ch in resolved]
             )
-            replay_data[ch] = (values, anom, timestamps)
-        except Exception as exc:
-            log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
+            engines: dict[str, ChannelInferenceEngine] = {
+                ch: eng for ch, eng in engine_results if eng is not None
+            }
 
-    if not engines:
-        scope = (
-            f"subsystem={settings.api.subsystem!r}"
-            if settings.api.subsystem
-            else "whole mission"
-        )
-        raise RuntimeError(
-            f"No channels loaded for mission={settings.api.mission!r} ({scope}). "
-            "Train and score at least one channel first."
-        )
-
-    # Drift reference profiles — best-effort: missing profile logs a warning but
-    # does not prevent startup.  Drift stream returns 503 if no profiles are loaded.
-    # Per-request RollingDriftMonitor instances are created by drift_stream at
-    # connection time so there is no shared mutable state across clients.
-    drift_references: dict[str, object] = {}
-    if settings.drift.enabled:
-        async def _load_drift_reference(
-            ch: str,
-        ) -> tuple[str, object]:
-            async with _load_sem:
-                prof_path = reference_profile_path(settings, settings.api.mission, ch)
+            replay_data: dict[str, ReplayData] = {}
+            for ch in engines:
                 try:
-                    ref = await asyncio.to_thread(load_reference_profile, prof_path)
-                    log.info("api.lifespan.drift_reference.loaded", channel=ch)
-                    return ch, ref
-                except FileNotFoundError:
-                    log.warning("api.lifespan.drift_reference.missing", channel=ch)
-                    return ch, None
+                    values, _seg, anom, timestamps = await asyncio.to_thread(
+                        load_series_parquet,
+                        settings.preprocess.processed_data_dir,
+                        settings.api.mission,
+                        ch,
+                        "test",
+                    )
+                    replay_data[ch] = (values, anom, timestamps)
+                except (OSError, FileNotFoundError, ValueError) as exc:
+                    log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
 
-        ref_results = await asyncio.gather(
-            *[_load_drift_reference(ch) for ch in engines]
-        )
-        for ch, ref in ref_results:
-            if ref is not None:
-                drift_references[ch] = ref
-    else:
-        log.info("api.lifespan.drift.disabled")
+            if not engines:
+                scope = (f"subsystem={settings.api.subsystem!r}"
+                         if settings.api.subsystem else "whole mission")
+                loading.error = (
+                    f"No channels loaded for mission={settings.api.mission!r} ({scope}). "
+                    "Train, score, and promote at least one channel first "
+                    "(make model-train → make model-score → make mlflow-promote)."
+                )
+                log.error("api.lifespan.startup.no_engines", error=loading.error)
+                loading.is_complete = True
+                return
 
-    app.state.app_state = AppState(
-        settings=settings,
-        mission=settings.api.mission,
-        subsystem=settings.api.subsystem,
-        device=device,
-        engines=MappingProxyType(engines),
-        channel_subsystem_map=MappingProxyType(channel_subsystem_map),
-        replay_data=MappingProxyType(replay_data),
-        startup_monotonic_ns=time.monotonic_ns(),
-        mlflow_tracking_uri=settings.mlflow.tracking_uri,
-        drift_references=drift_references,
-    )
-    log.info(
-        "api.lifespan.startup.complete",
-        channels_loaded=sorted(engines.keys()),
-    )
+            drift_references: dict[str, object] = {}
+            if settings.drift.enabled:
+                for ch, ref in await asyncio.gather(
+                    *[_load_drift_ref(ch, settings, sem, log) for ch in engines]
+                ):
+                    if ref is not None:
+                        drift_references[ch] = ref
+            else:
+                log.info("api.lifespan.drift.disabled")
+
+            app.state.app_state = AppState(
+                settings=settings,
+                mission=settings.api.mission,
+                subsystem=settings.api.subsystem,
+                device=device,
+                engines=MappingProxyType(engines),
+                channel_subsystem_map=MappingProxyType(channel_subsystem_map),
+                replay_data=MappingProxyType(replay_data),
+                startup_monotonic_ns=time.monotonic_ns(),
+                mlflow_tracking_uri=settings.mlflow.tracking_uri,
+                drift_references=MappingProxyType(drift_references),
+                resolved_channels=resolved,
+            )
+            log.info("api.lifespan.startup.complete", channels_loaded=sorted(engines.keys()))
+
+        except asyncio.CancelledError:
+            log.info("api.lifespan.startup.cancelled")
+            raise
+        except Exception as exc:
+            loading.error = str(exc)
+            log.exception("api.lifespan.startup.failed", error=str(exc))
+        finally:
+            loading.is_complete = True
+
+    task = asyncio.create_task(_background_load())
 
     try:
         yield
     finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         log.info("api.lifespan.shutdown")
 
 
@@ -223,4 +270,21 @@ def create_app(settings: Settings) -> FastAPI:
             expose_headers=["X-Correlation-Id"],
         )
     app.include_router(endpoints.router)
+
+    # Mount the built dashboard at / when configured (Phase 10: same-origin SPA on
+    # Cloud Run). Routes registered above match first; html=True serves index.html
+    # for unknown paths so client-side routes work on refresh.
+    if settings.api.static_dir:
+        static_path = Path(settings.api.static_dir)
+        if static_path.is_dir():
+            app.mount(
+                "/",
+                StaticFiles(directory=static_path, html=True),
+                name="dashboard",
+            )
+        else:
+            get_logger("api.startup").warning(
+                "api.static_dir.missing",
+                static_dir=str(static_path),
+            )
     return app

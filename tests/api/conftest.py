@@ -117,7 +117,7 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
     """
     settings = test_settings.model_copy(
         update={
-            "spark": test_settings.spark.model_copy(
+            "preprocess": test_settings.preprocess.model_copy(
                 update={"processed_data_dir": api_parquet}
             )
         }
@@ -214,7 +214,7 @@ def running_app_with_spike(test_settings: Settings, tmp_path: Path) -> FastAPI:
     spike_parquet = tmp_path
     settings = test_settings.model_copy(
         update={
-            "spark": test_settings.spark.model_copy(
+            "preprocess": test_settings.preprocess.model_copy(
                 update={"processed_data_dir": spike_parquet}
             )
         }
@@ -279,7 +279,7 @@ def running_app_multi_ch(test_settings: Settings, tmp_path: Path) -> FastAPI:
 
     settings = test_settings.model_copy(
         update={
-            "spark": test_settings.spark.model_copy(
+            "preprocess": test_settings.preprocess.model_copy(
                 update={"processed_data_dir": tmp_path}
             )
         }
