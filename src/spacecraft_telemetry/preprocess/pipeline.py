@@ -314,15 +314,39 @@ def _run_parallel(
     abs_train_out = str(absolutize_if_local(train_out))
     abs_test_out = str(absolutize_if_local(test_out))
 
-    futures = [
-        _preprocess_channel_remote.remote(
+    # Assign per-channel memory hints based on compressed Parquet file size.
+    # Large channels (>150MB) get a 3GB hint so Ray won't co-schedule two of
+    # them on the same 4GB node (3+3>4). Small channels use no memory hint
+    # and naturally pack 2 per node, constrained by the 2-CPU worker spec.
+    channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
+    _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
+    _LARGE_MEMORY = 3 * 1024**3           # 3GB
+
+    futures = []
+    n_large = 0
+    for channel in channels:
+        try:
+            size = (channel_dir / f"{channel}.parquet").stat().st_size
+        except Exception:
+            size = _LARGE_THRESHOLD + 1   # unknown → conservative/safe default
+        is_large = size > _LARGE_THRESHOLD
+        n_large += is_large
+        task = (
+            _preprocess_channel_remote.options(memory=_LARGE_MEMORY)
+            if is_large
+            else _preprocess_channel_remote
+        )
+        futures.append(task.remote(
             settings_ref, mission, channel,
             abs_train_out, abs_test_out,
             labels_ref,
-        )
-        for channel in channels
-    ]
+        ))
 
-    log.info("pipeline.parallel.submitted", n_tasks=len(futures))
+    log.info(
+        "pipeline.parallel.submitted",
+        n_tasks=len(futures),
+        n_large=n_large,
+        n_small=len(futures) - n_large,
+    )
     results: list[dict[str, Any]] = ray.get(futures)
     return results

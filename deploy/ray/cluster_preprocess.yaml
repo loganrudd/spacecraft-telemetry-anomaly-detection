@@ -12,8 +12,8 @@
 #   Preprocessing is CPU-bound pandas + PyArrow — no GPU needed.
 #   One Ray task per channel; each task reads ~50-200 MB and writes ~20-80 MB.
 #   Head: 1 vCPU / 2 GiB — lightweight driver (channel fan-out + normalization params).
-#   Workers: 1 vCPU / 4 GiB each — pandas is single-threaded; 1 CPU matches actual
-#   usage, ensures exactly 1 task per node (no co-scheduling), and halves CPU cost.
+#   Workers: 2 vCPU / 4 GiB each — small channels pack 2 per node (both CPUs used);
+#   large channels (>150MB Parquet) get a 3GB memory hint so Ray isolates them.
 #   Spot workers for ~70% cost savings; max_retries=3 on tasks handles preemption.
 
 apiVersion: ray.io/v1
@@ -119,8 +119,8 @@ spec:
                     value: auto
                 resources:
                   requests:
-                    cpu: "1"
+                    cpu: "2"
                     memory: "4Gi"
                   limits:
-                    cpu: "1"
+                    cpu: "2"
                     memory: "4Gi"
