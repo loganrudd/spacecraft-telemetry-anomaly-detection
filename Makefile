@@ -19,7 +19,7 @@ RUN := $(UV) run
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
         cloud-up cloud-down \
-        cloud-preprocess cloud-train cloud-tune \
+        cloud-preprocess cloud-train cloud-tune cloud-score \
         seed-reference-profiles \
         smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
@@ -310,6 +310,10 @@ cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=�
 cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
 		./scripts/cloud_tune.sh
+
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=…). Run after cloud-train and again after cloud-tune.
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		./scripts/cloud_score.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
 	$(RUN) python scripts/build_reference_profiles.py \

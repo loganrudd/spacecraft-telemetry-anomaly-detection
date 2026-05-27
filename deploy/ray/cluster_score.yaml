@@ -1,32 +1,40 @@
-# RayJob — Ray Tune HPO for scoring parameters on GKE Autopilot.
+# RayJob — parallel anomaly scoring for all channels on GKE Autopilot.
 #
-# Environment variables required before applying (cloud_tune.sh sets these):
+# Environment variables required before applying (cloud_score.sh sets these):
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (e.g. us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
 #   MISSION      Mission name (e.g. ESA-Mission2)
 #
 # Apply via:
-#   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
+#   envsubst < deploy/ray/cluster_score.yaml | kubectl apply -f -
 #
 # Sizing rationale:
-#   Tune trials are pure-numpy scoring (Plan 005) — no GPU needed.
-#   n1-standard-4 CPU workers are ~5× cheaper than T4 nodes for this workload.
-#   Head: 1 vCPU / 2 GiB — lightweight Tune driver + MLflow logging.
-#   Workers: 2 vCPU / 4 GiB each, max 4 concurrent (one trial per CPU).
+#   Scoring is LSTM inference + pure-numpy anomaly scoring — CPU is sufficient.
+#   Workers: 2 vCPU / 4 GiB each, 2 tasks per node (num_cpus=1).
+#   Auto-detects tuned_configs.json in GCS (uploaded by cloud-tune).
+#   Run after cloud-train for baseline; run again after cloud-tune to confirm
+#   HPO improved anomaly detection metrics.
 
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: spacecraft-tune
+  name: spacecraft-score
   namespace: ray
 spec:
   entrypoint: >-
-    bash -c 'spacecraft-telemetry --env cloud ray tune
+    bash -c 'set -e;
+    gsutil cp gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json /tmp/tuned_configs.json 2>/dev/null || true;
+    if [ -f /tmp/tuned_configs.json ]; then
+    spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
-    && gsutil cp models/${MISSION}/tuned_configs.json
-    gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json'
+    --tuned-configs /tmp/tuned_configs.json;
+    else
+    spacecraft-telemetry --env cloud ray score
+    --mission ${MISSION}
+    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt;
+    fi'
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -96,7 +104,7 @@ spec:
       - groupName: cpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 10
+        maxReplicas: 15
         rayStartParams: {}
         template:
           metadata:
