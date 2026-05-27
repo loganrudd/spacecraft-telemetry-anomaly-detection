@@ -49,7 +49,8 @@ if $NO_WAIT; then
 fi
 
 echo "==> Waiting for RayJob to complete (timeout: 2h)..."
-kubectl wait --for=condition=Complete rayjob/spacecraft-preprocess -n ray --timeout=7200s
+kubectl wait --for=jsonpath='{.status.jobDeploymentStatus}'=Complete \
+  rayjob/spacecraft-preprocess -n ray --timeout=7200s
 
 echo "==> Job complete. Fetching tail of head-pod logs..."
 HEAD_POD=$(kubectl get pods -n ray -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
