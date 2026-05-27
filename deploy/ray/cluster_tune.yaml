@@ -60,6 +60,34 @@ spec:
                 limits:
                   cpu: "1"
                   memory: "2Gi"
+              livenessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - >-
+                      wget -T 5 -q -O- http://localhost:52365/api/local_raylet_healthz
+                      | grep success &&
+                      wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
+                      | grep success
+                initialDelaySeconds: 60
+                periodSeconds: 30
+                timeoutSeconds: 10
+                failureThreshold: 5
+              readinessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - >-
+                      wget -T 5 -q -O- http://localhost:52365/api/local_raylet_healthz
+                      | grep success &&
+                      wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
+                      | grep success
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 5
 
     workerGroupSpecs:
       - groupName: cpu-workers
