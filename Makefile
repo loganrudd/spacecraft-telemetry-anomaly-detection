@@ -267,6 +267,7 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
 		-target=helm_release.kuberay_operator \
+		-target=kubernetes_service_account.ray \
 		-auto-approve
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
