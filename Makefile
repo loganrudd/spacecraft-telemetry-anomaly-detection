@@ -143,12 +143,12 @@ mlflow-server:    ## Start MLflow tracking server — required before parallel t
 
 mlflow-promote:   ## Set @champion alias on one model (MISSION=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry mlflow promote \
-		--name telemanom-$(MISSION)-$(CHANNEL)
+		--mission $(MISSION) --channels $(CHANNEL)
 
-mlflow-promote-all: ## Promote @champion for all channels in channels.txt (PROJECT_ID=…, MISSION=…)
+mlflow-promote-all: ## Promote @champion for all channels (PROJECT_ID=…, MISSION=…, [CHANNEL=…])
 	$(RUN) spacecraft-telemetry --env cloud mlflow promote \
 		--mission $(MISSION) \
-		--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt
+		$(if $(CHANNEL),--channels $(CHANNEL),--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt)
 
 cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
 	$(eval _API_IMAGE := $(shell gcloud run services describe api \

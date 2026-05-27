@@ -981,12 +981,18 @@ def mlflow_group() -> None:
     "--name",
     default=None,
     help="Registered model name (e.g. telemanom-ESA-Mission1-channel_1). "
-         "Mutually exclusive with --mission/--channels-from.",
+         "Mutually exclusive with --mission/--channels/--channels-from.",
 )
 @click.option(
     "--mission",
     default=None,
-    help="Mission name. Used with --channels-from to promote all channels in bulk.",
+    help="Mission name. Required with --channels or --channels-from.",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs. Promotes telemanom-{MISSION}-{channel} for each. "
+         "Requires --mission.",
 )
 @click.option(
     "--channels-from",
@@ -999,21 +1005,23 @@ def mlflow_group() -> None:
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest version. Ignored with --channels-from.",
+    help="Model version number. Defaults to latest version. Ignored with --channels/--channels-from.",
 )
 @click.pass_context
 def mlflow_promote(
     ctx: click.Context,
     name: str | None,
     mission: str | None,
+    channels: str | None,
     channels_from: str | None,
     model_version: int | None,
 ) -> None:
     """Set the @champion alias on a model version, marking it ready to serve.
 
-    Single-model form:
+    Single-model form (by full name or by mission+channel):
 
         spacecraft-telemetry mlflow promote --name telemanom-ESA-Mission2-channel_1
+        spacecraft-telemetry mlflow promote --mission ESA-Mission2 --channels channel_1
 
     Bulk form (all channels in a mission):
 
@@ -1029,13 +1037,21 @@ def mlflow_promote(
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
 
-    if channels_from is not None:
-        if mission is None:
-            raise click.ClickException("--mission is required when using --channels-from.")
-        if name is not None:
-            raise click.ClickException("--name and --channels-from are mutually exclusive.")
-
+    # Resolve channel list from --channels or --channels-from.
+    channel_list: list[str] | None = None
+    if channels is not None and channels_from is not None:
+        raise click.ClickException("--channels and --channels-from are mutually exclusive.")
+    if channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+    elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
+
+    if channel_list is not None:
+        if mission is None:
+            raise click.ClickException("--mission is required when using --channels or --channels-from.")
+        if name is not None:
+            raise click.ClickException("--name is mutually exclusive with --channels/--channels-from.")
+
         ok, failed = 0, []
         for channel in channel_list:
             model_name = f"telemanom-{mission}-{channel}"
@@ -1057,7 +1073,9 @@ def mlflow_promote(
         return
 
     if name is None:
-        raise click.ClickException("Provide either --name or --mission + --channels-from.")
+        raise click.ClickException(
+            "Provide --name, or --mission with --channels or --channels-from."
+        )
 
     try:
         promote(name=name, version=model_version)
