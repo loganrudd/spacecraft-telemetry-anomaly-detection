@@ -65,7 +65,7 @@ def detect_gaps(df: pd.DataFrame, gap_multiplier: float = 3.0) -> pd.DataFrame:
     Returns:
         DataFrame with 'is_gap' and 'segment_id' columns added.
     """
-    df = df.copy().sort_values("telemetry_timestamp").reset_index(drop=True)
+    df = df.sort_values("telemetry_timestamp").reset_index(drop=True)
 
     intervals = df["telemetry_timestamp"].diff().dt.total_seconds()
     # Exclude the first row (NaN interval) from median calculation.
@@ -103,7 +103,6 @@ def normalize(
     Returns:
         (normalized_df, params) where params = {channel_id: {"mean": ..., "std": ...}}.
     """
-    df = df.copy()
     channel_id = str(df["channel_id"].iloc[0])
 
     mean = float(df["value"].mean())
@@ -173,7 +172,6 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with 'is_anomaly' (bool) column added.
     """
-    df = df.copy()
     channel_id = str(df["channel_id"].iloc[0])
 
     channel_labels = labels_df[labels_df["channel_id"] == channel_id]

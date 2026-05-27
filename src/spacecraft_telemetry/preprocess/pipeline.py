@@ -79,15 +79,18 @@ def _preprocess_channel(
         "channel_id", "mission_id", "segment_id", "is_anomaly",
     ]
     series_df = labeled[series_cols]
+    del labeled
 
     train_series, test_series = temporal_train_test_split(
         series_df, train_fraction=settings.preprocess.train_fraction
     )
+    del series_df
 
     train_count = len(train_series)
     test_count = len(test_series)
 
     write_series(train_series, train_out)
+    del train_series
     write_series(test_series, test_out)
 
     return {
