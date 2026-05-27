@@ -13,7 +13,8 @@
 #   One Ray task per channel; each task reads ~50-200 MB and writes ~20-80 MB.
 #   Head: 1 vCPU / 2 GiB — lightweight driver (channel fan-out + normalization params).
 #   Workers: 2 vCPU / 4 GiB each — small channels pack 2 per node (both CPUs used);
-#   large channels (>150MB Parquet) get a 3GB memory hint so Ray isolates them.
+#   large channels (>150MB Parquet) use num_cpus=2 to monopolize the node, and
+#   max_calls=1 on the task forces process exit so RSS is reclaimed between tasks.
 #   Spot workers for ~70% cost savings; max_retries=3 on tasks handles preemption.
 
 apiVersion: ray.io/v1

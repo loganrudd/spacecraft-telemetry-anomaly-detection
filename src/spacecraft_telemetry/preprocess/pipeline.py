@@ -114,7 +114,7 @@ def _preprocess_channel(
 # ---------------------------------------------------------------------------
 
 
-@ray.remote(num_cpus=1, max_retries=3)
+@ray.remote(num_cpus=1, max_calls=1, max_retries=3)
 def _preprocess_channel_remote(
     settings: Settings,
     mission: str,
@@ -314,13 +314,14 @@ def _run_parallel(
     abs_train_out = str(absolutize_if_local(train_out))
     abs_test_out = str(absolutize_if_local(test_out))
 
-    # Assign per-channel memory hints based on compressed Parquet file size.
-    # Large channels (>150MB) get a 3GB hint so Ray won't co-schedule two of
-    # them on the same 4GB node (3+3>4). Small channels use no memory hint
-    # and naturally pack 2 per node, constrained by the 2-CPU worker spec.
+    # Large channels (>150MB compressed Parquet, ~3GB peak RSS) get num_cpus=2
+    # so Ray monopolizes the entire 2-CPU node — no concurrent task can be
+    # scheduled alongside them. max_calls=1 on the decorator ensures the worker
+    # process exits after each task, returning all RSS to the OS before the next
+    # task starts (Python's allocator does not release memory to the OS on del).
+    # Small channels (~950MB peak) pack 2 per node naturally (both CPUs used).
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
-    _LARGE_MEMORY = 3 * 1024**3           # 3GB
 
     futures = []
     n_large = 0
@@ -332,7 +333,7 @@ def _run_parallel(
         is_large = size > _LARGE_THRESHOLD
         n_large += is_large
         task = (
-            _preprocess_channel_remote.options(memory=_LARGE_MEMORY)
+            _preprocess_channel_remote.options(num_cpus=2)
             if is_large
             else _preprocess_channel_remote
         )
