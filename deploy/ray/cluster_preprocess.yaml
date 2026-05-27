@@ -10,7 +10,7 @@
 #
 # Sizing rationale:
 #   Preprocessing is CPU-bound pandas + PyArrow — no GPU needed.
-#   One Ray task per channel; each task reads ~50-200 MB and writes ~20-80 MB.
+#   One Ray task per channel; each task reads ~50-250 MB and writes ~20-80 MB.
 #   Head: 1 vCPU / 2 GiB — lightweight driver (channel fan-out + normalization params).
 #   Workers: 4 vCPU / 6 GiB each — small channels (~950MB peak) pack 4 per node
 #   (4×950MB=3.8GB + 0.3GB Ray daemons = 4.1GB, threshold 5.7GB = 6×0.95);
@@ -34,6 +34,7 @@ spec:
 
   rayClusterSpec:
     rayVersion: "2.31.0"
+    enableInTreeAutoscaling: true
 
     headGroupSpec:
       rayStartParams:

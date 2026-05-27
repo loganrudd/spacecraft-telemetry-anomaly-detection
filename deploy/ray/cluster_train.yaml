@@ -30,6 +30,7 @@ spec:
 
   rayClusterSpec:
     rayVersion: "2.31.0"
+    enableInTreeAutoscaling: true
 
     headGroupSpec:
       rayStartParams:
