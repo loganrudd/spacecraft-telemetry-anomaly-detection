@@ -107,7 +107,7 @@ def _preprocess_channel(
 # ---------------------------------------------------------------------------
 
 
-@ray.remote(num_cpus=1, memory=3 * 1024**3, max_retries=3)
+@ray.remote(num_cpus=1, max_retries=3)
 def _preprocess_channel_remote(
     settings: Settings,
     mission: str,
