@@ -69,7 +69,7 @@ spec:
                       | grep success &&
                       wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
                       | grep success
-                initialDelaySeconds: 60
+                initialDelaySeconds: 120
                 periodSeconds: 30
                 timeoutSeconds: 20
                 failureThreshold: 5
@@ -83,10 +83,10 @@ spec:
                       | grep success &&
                       wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
                       | grep success
-                initialDelaySeconds: 30
+                initialDelaySeconds: 90
                 periodSeconds: 10
                 timeoutSeconds: 20
-                failureThreshold: 5
+                failureThreshold: 10
 
     workerGroupSpecs:
       - groupName: gpu-workers
