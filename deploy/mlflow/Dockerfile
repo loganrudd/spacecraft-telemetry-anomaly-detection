@@ -17,4 +17,5 @@ CMD mlflow server \
     --port "${PORT}" \
     --backend-store-uri "${BACKEND_STORE_URI}" \
     --default-artifact-root "${DEFAULT_ARTIFACT_ROOT}" \
-    --no-serve-artifacts
+    --no-serve-artifacts \
+    --workers 1
