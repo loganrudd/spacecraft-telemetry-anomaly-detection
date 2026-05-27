@@ -92,7 +92,7 @@ spec:
       - groupName: cpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 10
+        maxReplicas: 45
         rayStartParams: {}
         template:
           metadata:
@@ -119,7 +119,7 @@ spec:
                 resources:
                   requests:
                     cpu: "2"
-                    memory: "8Gi"
+                    memory: "4Gi"
                   limits:
                     cpu: "2"
-                    memory: "8Gi"
+                    memory: "4Gi"
