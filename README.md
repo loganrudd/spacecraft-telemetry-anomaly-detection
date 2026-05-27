@@ -20,7 +20,7 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 
 Completed:
 - Phase 1: repo scaffold + ingestion
-- Phase 2: Pandas + Ray Core preprocessing (migrated from PySpark in Phase 10.5)
+- Phase 2: Pandas + Ray Core preprocessing
 - Phase 3: Telemanom model drop-in
 - Phase 4: Ray parallel training + scoring
 - Phase 5: Ray Tune scoring-parameter HPO
