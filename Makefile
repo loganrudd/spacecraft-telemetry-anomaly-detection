@@ -254,8 +254,12 @@ tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
 # for uptime — stop it when not actively training or demoing.
 
 cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preprocess/train/tune.
-	gcloud sql instances patch mlflow-pg --activation-policy=ALWAYS --quiet
-	@echo "Cloud SQL starting — allow ~60s before submitting jobs"
+	gcloud sql instances patch mlflow-pg --activation-policy=ALWAYS --async --quiet
+	@echo "Waiting for Cloud SQL to reach RUNNABLE state..."
+	@until [ "$$(gcloud sql instances describe mlflow-pg --format='value(state)' --quiet)" = "RUNNABLE" ]; do \
+		sleep 10; echo "  still waiting..."; \
+	done
+	@echo "Cloud SQL is RUNNABLE."
 	terraform -chdir=infra apply \
 		-target=google_container_cluster.ray \
 		-auto-approve
@@ -275,7 +279,7 @@ cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after tra
 	terraform -chdir=infra destroy \
 		-target=google_container_cluster.ray \
 		-auto-approve
-	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --quiet
+	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --async --quiet
 	@echo "Cloud SQL stopped. GKE destroyed."
 
 # ---------------------------------------------------------------------------

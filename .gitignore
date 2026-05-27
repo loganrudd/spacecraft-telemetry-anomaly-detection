@@ -90,4 +90,5 @@ infra/terraform.tfstate
 infra/terraform.tfstate.backup
 infra/terraform.tfstate.*.backup
 infra/terraform.tfvars
+infra/.terraform.tfstate.lock.info
 # infra/.terraform.lock.hcl is committed — it pins provider versions
