@@ -72,7 +72,7 @@ spec:
                       | grep success
                 initialDelaySeconds: 60
                 periodSeconds: 30
-                timeoutSeconds: 10
+                timeoutSeconds: 20
                 failureThreshold: 5
               readinessProbe:
                 exec:
@@ -86,7 +86,7 @@ spec:
                       | grep success
                 initialDelaySeconds: 30
                 periodSeconds: 10
-                timeoutSeconds: 10
+                timeoutSeconds: 20
                 failureThreshold: 5
 
     workerGroupSpecs:
