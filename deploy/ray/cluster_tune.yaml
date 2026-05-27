@@ -4,7 +4,7 @@
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (e.g. us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
-#   MISSION      Mission name (default: ESA-Mission2)
+#   MISSION      Mission name (e.g. ESA-Mission2)
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
