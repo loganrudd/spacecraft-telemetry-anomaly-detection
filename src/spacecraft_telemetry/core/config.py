@@ -27,12 +27,17 @@ _REPO_ROOT = Path(__file__).parents[3]
 
 
 class DataConfig(BaseModel):
-    raw_data_dir: Path = Path("data/raw")
-    sample_data_dir: Path = Path("data/sample")
+    raw_data_dir: str = "data/raw"
+    sample_data_dir: str = "data/sample"
     zenodo_record_id: str = "12528696"
     missions: list[str] = ["ESA-Mission1", "ESA-Mission2", "ESA-Mission3"]
     sample_fraction: float = 0.01  # fraction of rows to keep in local dev sample
     sample_channels: int = 5  # channels per mission in local dev sample
+
+    @field_validator("raw_data_dir", "sample_data_dir", mode="before")
+    @classmethod
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
 
     @field_validator("sample_fraction")
     @classmethod
@@ -52,11 +57,16 @@ class DataConfig(BaseModel):
 class PreprocessingConfig(BaseModel):
     """Config for the pandas + Ray Core preprocessing pipeline."""
 
-    processed_data_dir: Path = Path("data/processed")
+    processed_data_dir: str = "data/processed"
     train_fraction: float = 0.8
     normalization: Literal["z-score"] = "z-score"
     gap_multiplier: float = 3.0
     feature_windows: list[int] = [10, 50, 100]
+
+    @field_validator("processed_data_dir", mode="before")
+    @classmethod
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
 
     @field_validator("train_fraction")
     @classmethod
@@ -114,9 +124,14 @@ class ModelConfig(BaseModel):
     val_fraction: float = 0.1
     seed: int = 42
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
-    artifacts_dir: Path = Path("models")
+    artifacts_dir: str = "models"
     # DataLoader workers — 0 on MPS/macOS; 4 on cloud GPU nodes
     num_workers: int = 0
+
+    @field_validator("artifacts_dir", mode="before")
+    @classmethod
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
     # Scoring (Hundman §3.1 / §3.2 rolling-window simplification)
     inference_batch_size: int = 256
     error_smoothing_window: int = 30
@@ -280,9 +295,14 @@ class MonitoringConfig(BaseModel):
     # Fraction of features that must drift to emit a retraining trigger.
     drift_threshold: float = 0.30
     # Where reference profiles (train-split feature DataFrames) are persisted.
-    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+    reference_profiles_dir: str = "monitoring/reference_profiles"
     # Where HTML drift reports are written before upload to MLflow.
-    report_output_dir: Path = Path("monitoring/reports")
+    report_output_dir: str = "monitoring/reports"
+
+    @field_validator("reference_profiles_dir", "report_output_dir", mode="before")
+    @classmethod
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
     # Max rows sampled from the train split when building a reference profile.
     # Keeps memory bounded for long-running channels (full train can be 100K+ rows).
     reference_sample_rows: int = 5000
@@ -318,7 +338,12 @@ class DriftConfig(BaseModel):
     #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.
     # One knob keeps both levels consistent; tune it to change overall sensitivity.
     drift_alert_threshold: float = 0.30
-    reference_profiles_dir: Path = Path("monitoring/reference_profiles")
+    reference_profiles_dir: str = "monitoring/reference_profiles"
+
+    @field_validator("reference_profiles_dir", mode="before")
+    @classmethod
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
 
     @field_validator("window_size", "tick_interval")
     @classmethod

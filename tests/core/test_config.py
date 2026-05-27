@@ -333,8 +333,8 @@ class TestMonitoringConfig:
     def test_defaults(self) -> None:
         cfg = MonitoringConfig()
         assert cfg.drift_threshold == 0.30
-        assert cfg.reference_profiles_dir == Path("monitoring/reference_profiles")
-        assert cfg.report_output_dir == Path("monitoring/reports")
+        assert cfg.reference_profiles_dir == "monitoring/reference_profiles"
+        assert cfg.report_output_dir == "monitoring/reports"
         assert cfg.reference_sample_rows == 5000
 
     def test_drift_threshold_zero_is_invalid(self) -> None:
@@ -366,8 +366,8 @@ class TestMonitoringConfig:
             reference_profiles_dir=Path("custom/profiles"),
             report_output_dir=Path("custom/reports"),
         )
-        assert cfg.reference_profiles_dir == Path("custom/profiles")
-        assert cfg.report_output_dir == Path("custom/reports")
+        assert cfg.reference_profiles_dir == "custom/profiles"
+        assert cfg.report_output_dir == "custom/reports"
 
     def test_settings_has_monitoring_field(self) -> None:
         settings = Settings()
