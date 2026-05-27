@@ -314,12 +314,13 @@ def _run_parallel(
     abs_train_out = str(absolutize_if_local(train_out))
     abs_test_out = str(absolutize_if_local(test_out))
 
-    # Large channels (>150MB compressed Parquet, ~3GB peak RSS) get num_cpus=2
-    # so Ray monopolizes the entire 2-CPU node — no concurrent task can be
+    # Large channels (>150MB compressed Parquet, ~3.5GB peak RSS) get num_cpus=4
+    # so Ray monopolizes the entire 4-CPU node — no concurrent task can be
     # scheduled alongside them. max_calls=1 on the decorator ensures the worker
     # process exits after each task, returning all RSS to the OS before the next
     # task starts (Python's allocator does not release memory to the OS on del).
-    # Small channels (~950MB peak) pack 2 per node naturally (both CPUs used).
+    # Small channels (~950MB peak) pack 4 per node (4×950MB=3.8GB + 0.3GB Ray
+    # daemons = 4.1GB, well within the 5.7GB kill threshold on 6Gi workers).
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
 
@@ -333,7 +334,7 @@ def _run_parallel(
         is_large = size > _LARGE_THRESHOLD
         n_large += is_large
         task = (
-            _preprocess_channel_remote.options(num_cpus=2)
+            _preprocess_channel_remote.options(num_cpus=4)
             if is_large
             else _preprocess_channel_remote
         )
