@@ -59,6 +59,11 @@ def read_channel(path: UPath, channel_id: str, mission_id: str) -> pd.DataFrame:
         )
 
     df = df.rename(columns={"datetime": "telemetry_timestamp", channel_id: "value"})
+    if not pd.api.types.is_numeric_dtype(df["value"]):
+        raise TypeError(
+            f"channel {channel_id!r} has non-numeric dtype {df['value'].dtype} "
+            f"(categorical) — skipping"
+        )
     df["value"] = df["value"].astype("float32")
     df["channel_id"] = channel_id
     df["mission_id"] = mission_id

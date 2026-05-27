@@ -54,7 +54,11 @@ def _preprocess_channel(
     data_dir = to_upath(settings.data.sample_data_dir)
     channel_path = data_dir / mission / "channels" / f"{channel}.parquet"
 
-    raw_df = read_channel(channel_path, channel, mission)
+    try:
+        raw_df = read_channel(channel_path, channel, mission)
+    except TypeError as exc:
+        log.warning("pipeline.channel.skip", channel_id=channel, mission=mission, reason=str(exc))
+        return {"channel_id": channel, "rows_in": 0, "train_rows": 0, "test_rows": 0, "params": {}}
     cleaned = handle_nulls(raw_df)
     gapped = detect_gaps(cleaned, gap_multiplier=settings.preprocess.gap_multiplier)
     normalized, params = normalize(gapped, method=settings.preprocess.normalization)
