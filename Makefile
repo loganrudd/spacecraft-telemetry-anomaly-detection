@@ -269,6 +269,15 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_service_account.ray \
 		-auto-approve
+	terraform -chdir=infra apply \
+		-target=google_service_account_iam_member.ray_workload_identity \
+		-target=google_storage_bucket_iam_member.ray_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_processed_admin \
+		-target=google_storage_bucket_iam_member.ray_artifacts_admin \
+		-target=google_storage_bucket_iam_member.ray_wif_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_wif_processed_admin \
+		-target=google_storage_bucket_iam_member.ray_wif_artifacts_admin \
+		-auto-approve
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
 cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after training.

@@ -124,7 +124,8 @@ def write_series(df: pd.DataFrame, output_path: UPath) -> None:
     channel_id = str(df["channel_id"].iloc[0])
 
     partition_dir = to_upath(output_path) / f"mission_id={mission_id}" / f"channel_id={channel_id}"
-    partition_dir.mkdir(parents=True, exist_ok=True)
+    if not str(partition_dir).startswith("gs://"):
+        partition_dir.mkdir(parents=True, exist_ok=True)
 
     out_df = (
         df[["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"]]

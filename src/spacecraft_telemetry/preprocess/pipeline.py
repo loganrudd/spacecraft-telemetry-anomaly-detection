@@ -221,7 +221,8 @@ def run_preprocessing(
             )
 
     mission_out = output_dir / mission
-    mission_out.mkdir(parents=True, exist_ok=True)
+    if not str(mission_out).startswith("gs://"):
+        mission_out.mkdir(parents=True, exist_ok=True)
 
     params_path = mission_out / "normalization_params.json"
     params_path.write_text(json.dumps(normalization_params, indent=2))

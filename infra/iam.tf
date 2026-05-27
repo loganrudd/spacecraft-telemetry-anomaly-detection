@@ -100,6 +100,35 @@ resource "google_storage_bucket_iam_member" "ray_processed_admin" {
 }
 
 # ---------------------------------------------------------------------------
+# Direct Workload Identity Federation — GKE Autopilot 1.24+
+# On GKE Autopilot, pods authenticate as the WIF pool principal directly
+# rather than impersonating a GSA.  The principalSet:// wildcard covers all
+# KSAs in the cluster's WIF pool (safe for a single-purpose training cluster).
+# ---------------------------------------------------------------------------
+
+locals {
+  ray_wif_pool = "principalSet://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/*"
+}
+
+resource "google_storage_bucket_iam_member" "ray_wif_sample_viewer" {
+  bucket = google_storage_bucket.sample_data.name
+  role   = "roles/storage.objectViewer"
+  member = local.ray_wif_pool
+}
+
+resource "google_storage_bucket_iam_member" "ray_wif_processed_admin" {
+  bucket = google_storage_bucket.processed_data.name
+  role   = "roles/storage.objectAdmin"
+  member = local.ray_wif_pool
+}
+
+resource "google_storage_bucket_iam_member" "ray_wif_artifacts_admin" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.objectAdmin"
+  member = local.ray_wif_pool
+}
+
+# ---------------------------------------------------------------------------
 # Secret Manager IAM
 # ---------------------------------------------------------------------------
 

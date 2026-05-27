@@ -3,6 +3,9 @@ provider "google" {
   region  = var.region
 }
 
+# Needed to resolve the numeric project number for Direct WIF principal URIs.
+data "google_project" "project" {}
+
 provider "google-beta" {
   project = var.project_id
   region  = var.region
