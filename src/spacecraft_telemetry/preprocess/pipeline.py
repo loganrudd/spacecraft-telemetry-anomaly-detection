@@ -59,15 +59,20 @@ def _preprocess_channel(
     except TypeError as exc:
         log.warning("pipeline.channel.skip", channel_id=channel, mission=mission, reason=str(exc))
         return {"channel_id": channel, "rows_in": 0, "train_rows": 0, "test_rows": 0, "params": {}}
+    rows_in = len(raw_df)
     cleaned = handle_nulls(raw_df)
+    del raw_df
     gapped = detect_gaps(cleaned, gap_multiplier=settings.preprocess.gap_multiplier)
+    del cleaned
     normalized, params = normalize(gapped, method=settings.preprocess.normalization)
+    del gapped
 
     if labels_df is not None:
         labeled = label_timesteps(normalized, labels_df)
     else:
         labeled = normalized.copy()
         labeled["is_anomaly"] = False
+    del normalized
 
     series_cols = [
         "telemetry_timestamp", "value_normalized",
@@ -87,7 +92,7 @@ def _preprocess_channel(
 
     return {
         "channel_id": channel,
-        "rows_in": len(raw_df),
+        "rows_in": rows_in,
         "train_rows": train_count,
         "test_rows": test_count,
         "params": params if train_count > 0 else {},
