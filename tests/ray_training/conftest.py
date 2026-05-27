@@ -113,26 +113,6 @@ def ray_series_parquet(tmp_path_factory: pytest.TempPathFactory) -> Settings:
     return settings
 
 
-@pytest.fixture(scope="session")
-def ray_local():
-    """Start a Ray local cluster once for all Ray tests in the session.
-
-    Yields control, then shuts Ray down after the session.
-    """
-    import os
-    import sys
-
-    import ray
-
-    pythonpath = os.pathsep.join(p for p in sys.path if p)
-    ray.init(
-        num_cpus=2,
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": pythonpath}},
-    )
-    yield
-    ray.shutdown()
-
 
 @pytest.fixture(scope="session")
 def ray_train_result(ray_local, ray_series_parquet: Settings) -> list:

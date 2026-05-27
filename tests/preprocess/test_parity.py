@@ -10,19 +10,11 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from spacecraft_telemetry.preprocess.pipeline import run_preprocessing
-
-
-@pytest.fixture(scope="session")
-def ray_local():
-    """Start a minimal local Ray cluster for the session; shut it down on teardown."""
-    ray = pytest.importorskip("ray")
-    ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True)
-    yield
-    ray.shutdown()
 
 
 def _read_sorted(base: Path, mission: str, split: str, channel: str) -> pd.DataFrame:
@@ -30,7 +22,6 @@ def _read_sorted(base: Path, mission: str, split: str, channel: str) -> pd.DataF
     partition_dir = base / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
     files = sorted(partition_dir.glob("*.parquet"))
     assert files, f"No parquet files in {partition_dir}"
-    import pyarrow as pa
     tables = [pq.read_table(f, partitioning=None) for f in files]
     table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
     return table.to_pandas().sort_values("telemetry_timestamp").reset_index(drop=True)
