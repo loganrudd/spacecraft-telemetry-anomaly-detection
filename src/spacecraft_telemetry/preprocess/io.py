@@ -10,6 +10,7 @@ evidently_monitoring/reference.py — none of those files change.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -65,10 +66,11 @@ def read_channel(path: UPath, channel_id: str, mission_id: str) -> pd.DataFrame:
             f"(categorical) — skipping"
         )
     df["value"] = df["value"].astype("float32")
-    # Use Categorical to store these constant-per-channel columns once instead of
-    # repeating the string for every row — saves ~3GB on large channels (32M rows).
-    df["channel_id"] = pd.Categorical([channel_id] * len(df))
-    df["mission_id"] = pd.Categorical([mission_id] * len(df))
+    # from_codes avoids building a 32M-element Python list (~1.9GB transient) before
+    # converting to Categorical. int8 codes array is 32MB; the list approach was ~1.9GB.
+    _codes = np.zeros(len(df), dtype=np.int8)
+    df["channel_id"] = pd.Categorical.from_codes(_codes, categories=pd.Index([channel_id]))
+    df["mission_id"] = pd.Categorical.from_codes(_codes, categories=pd.Index([mission_id]))
 
     # Ensure UTC-aware timestamps (ingest writes UTC; guard against tz-naive files).
     ts = df["telemetry_timestamp"]
