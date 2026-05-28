@@ -130,6 +130,10 @@ spec:
                   # Pack 8 channel models per L4 (24 GB VRAM, each LSTM <50 MB).
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                     value: "0.125"
+                  # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
+                  # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
+                  - name: LD_LIBRARY_PATH
+                    value: /usr/local/nvidia/lib64
                 resources:
                   requests:
                     cpu: "8"
