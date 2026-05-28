@@ -20,7 +20,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any
 
 import mlflow
@@ -156,12 +156,32 @@ def open_run(
     Yields:
         mlflow.ActiveRun or None.
     """
+    # Use a daemon thread with a hard 30-second timeout so a slow or
+    # unreachable MLflow backend never blocks the training loop.
+    # MLFLOW_HTTP_REQUEST_TIMEOUT only covers TCP connect, not the case
+    # where Cloud Run accepts the connection but holds it waiting for a
+    # backend instance — the thread join covers both.
     _run: Any = None
-    try:
-        mlflow.set_experiment(experiment)
-        _run = mlflow.start_run(run_name=run_name, tags=tags, nested=nested)
-    except Exception as exc:
-        log.warning("mlflow.run.start_failed", experiment=experiment, error=str(exc))
+    _exc: list[Exception] = []
+    _result: list[Any] = []
+
+    def _start() -> None:
+        try:
+            mlflow.set_experiment(experiment)
+            _result.append(mlflow.start_run(run_name=run_name, tags=tags, nested=nested))
+        except Exception as exc:  # noqa: BLE001
+            _exc.append(exc)
+
+    t = Thread(target=_start, daemon=True)
+    t.start()
+    t.join(timeout=30)
+
+    if t.is_alive():
+        log.warning("mlflow.run.start_failed", experiment=experiment, error="timeout after 30s")
+    elif _exc:
+        log.warning("mlflow.run.start_failed", experiment=experiment, error=str(_exc[0]))
+    else:
+        _run = _result[0] if _result else None
 
     try:
         yield _run
