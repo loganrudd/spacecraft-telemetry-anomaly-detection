@@ -9,10 +9,11 @@
 # Apply via:
 #   envsubst < deploy/ray/cluster_train.yaml | kubectl apply -f -
 #
-# Sizing rationale (M1.5 measurements):
+# Sizing rationale:
 #   Head: 1 vCPU / 4 GiB — driver only, no model work.
-#   Workers: n1-standard-4 + 1× T4; num_gpus_per_task=0.25 packs 4 LSTMs per GPU.
-#   Autopilot Spot nodes are ~70% cheaper than on-demand for preemptible workloads.
+#   Workers: g2-standard-4 + 1× L4 spot; num_gpus=0.125 packs 8 LSTMs per GPU.
+#   1 node × 8 concurrent = 8 channels/batch; 90 channels → ~12 batches × ~5 min = ~60 min.
+#   L4 has 24 GB VRAM; each tiny LSTM uses <50 MB so packing 8 is safe.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -93,17 +94,16 @@ spec:
       - groupName: gpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 4 # 4 x 4 = 16 concurrent models training => ~7 batches at 3 min per batch/model = ~21 min total train time (capped by PREEMPTIBLE_NVIDIA_T4_GPUS quota = 4)
+        maxReplicas: 1 # NVIDIA_L4_GPUS quota = 1
         rayStartParams: {}
         template:
           metadata:
             labels:
-              # Autopilot: request Spot node pool via node selector + toleration below.
               cloud.google.com/gke-spot: "true"
           spec:
             serviceAccountName: ray-sa
             nodeSelector:
-              cloud.google.com/gke-accelerator: nvidia-tesla-t4
+              cloud.google.com/gke-accelerator: nvidia-l4
             tolerations:
               - key: nvidia.com/gpu
                 operator: Exists
@@ -125,9 +125,9 @@ spec:
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
-                  # Pack 4 channel models per T4 (each model is ~50K–500K params).
+                  # Pack 8 channel models per L4 (24 GB VRAM, each LSTM <50 MB).
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                    value: "0.25"
+                    value: "0.125"
                 resources:
                   requests:
                     cpu: "4"

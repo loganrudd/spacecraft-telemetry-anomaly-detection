@@ -267,12 +267,14 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 	@echo "Cloud SQL is RUNNABLE."
 	terraform -chdir=infra apply \
 		-target=google_container_cluster.ray \
+		-refresh=false \
 		-auto-approve
 	terraform -chdir=infra apply \
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_service_account.ray \
+		-refresh=false \
 		-auto-approve
 	terraform -chdir=infra apply \
 		-target=google_service_account_iam_member.ray_workload_identity \
@@ -282,6 +284,7 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 		-target=google_storage_bucket_iam_member.ray_wif_sample_viewer \
 		-target=google_storage_bucket_iam_member.ray_wif_processed_admin \
 		-target=google_storage_bucket_iam_member.ray_wif_artifacts_admin \
+		-refresh=false \
 		-auto-approve
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 

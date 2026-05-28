@@ -14,9 +14,9 @@ resource "google_cloud_run_v2_service" "mlflow" {
   name     = "mlflow"
   location = var.region
 
-  # Internal-only: accessible from sa-api and sa-ray via ID-token auth hook.
-  # Use `gcloud run services proxy mlflow` to access the UI locally.
-  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  # All-traffic ingress: allUsers invoker below handles auth.
+  # For a hardened prod setup, revert to INGRESS_TRAFFIC_INTERNAL_ONLY + ID-token auth hook.
+  ingress = "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.mlflow.email
@@ -165,7 +165,16 @@ resource "google_cloud_run_v2_service_iam_member" "api_public" {
   member   = "allUsers"
 }
 
-# sa-api and sa-ray invoke the internal mlflow service.
+# Public access — MLflow tracking server is open for demo purposes.
+# Re-add INGRESS_TRAFFIC_INTERNAL_ONLY + remove this to lock down for prod.
+resource "google_cloud_run_v2_service_iam_member" "mlflow_public" {
+  name     = google_cloud_run_v2_service.mlflow.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# sa-api and sa-ray invoke the mlflow service.
 resource "google_cloud_run_v2_service_iam_member" "mlflow_api_invoker" {
   name     = google_cloud_run_v2_service.mlflow.name
   location = var.region
@@ -178,4 +187,13 @@ resource "google_cloud_run_v2_service_iam_member" "mlflow_ray_invoker" {
   location = var.region
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.ray.email}"
+}
+
+# Autopilot 1.24+ pods authenticate as the Direct WIF principal, not the GSA above.
+# Same principalSet wildcard pattern used for GCS bindings in iam.tf.
+resource "google_cloud_run_v2_service_iam_member" "mlflow_ray_wif_invoker" {
+  name     = google_cloud_run_v2_service.mlflow.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "principalSet://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/*"
 }
