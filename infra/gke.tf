@@ -36,3 +36,25 @@ resource "google_container_cluster" "ray" {
 
   depends_on = [google_project_service.apis]
 }
+
+# ---------------------------------------------------------------------------
+# Cloud NAT — internet egress for GKE Autopilot pods
+# ---------------------------------------------------------------------------
+# Autopilot pods have no external IPs; without NAT they can only reach Google
+# services via Private Google Access (GCS, BigQuery, etc.).  Public endpoints
+# like Cloud Run (*.run.app) require a route through the internet — Cloud NAT
+# provides that without assigning external IPs to individual nodes.
+
+resource "google_compute_router" "nat_router" {
+  name    = "nat-router"
+  network = "default"
+  region  = var.region
+}
+
+resource "google_compute_router_nat" "nat" {
+  name                               = "ray-nat"
+  router                             = google_compute_router.nat_router.name
+  region                             = var.region
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+}

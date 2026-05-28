@@ -267,6 +267,8 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 	@echo "Cloud SQL is RUNNABLE."
 	terraform -chdir=infra apply \
 		-target=google_container_cluster.ray \
+		-target=google_compute_router.nat_router \
+		-target=google_compute_router_nat.nat \
 		-refresh=false \
 		-auto-approve
 	terraform -chdir=infra apply \
@@ -297,8 +299,14 @@ cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after tra
 	terraform -chdir=infra destroy \
 		-target=google_container_cluster.ray \
 		-auto-approve
+	terraform -chdir=infra destroy \
+		-target=google_compute_router_nat.nat \
+		-auto-approve
+	terraform -chdir=infra destroy \
+		-target=google_compute_router.nat_router \
+		-auto-approve
 	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --async --quiet
-	@echo "Cloud SQL stopped. GKE destroyed."
+	@echo "Cloud SQL stopped. GKE destroyed. Cloud NAT destroyed."
 
 # ---------------------------------------------------------------------------
 # GCP one-time operations (Phase 10 — M6)
