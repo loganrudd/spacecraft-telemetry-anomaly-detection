@@ -11,9 +11,9 @@
 #
 # Sizing rationale:
 #   Head: 1 vCPU / 4 GiB — driver only, no model work.
-#   Workers: g2-standard-4 + 1× L4 spot; num_gpus=0.125 packs 8 LSTMs per GPU.
-#   1 node × 8 concurrent = 8 channels/batch; 90 channels → ~12 batches × ~5 min = ~60 min.
-#   L4 has 24 GB VRAM; each tiny LSTM uses <50 MB so packing 8 is safe.
+#   Workers: g2-standard-8 (8 vCPU) + 1× L4 spot; num_gpus=0.125 packs 8 LSTMs per GPU.
+#   8 tasks × 1 CPU + 0.125 GPU each = fully utilises both the 8 CPUs and the L4.
+#   1 node × 8 concurrent = 8 channels/batch; 90 channels → ~12 batches × ~3 min = ~35 min.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -132,10 +132,10 @@ spec:
                     value: "0.125"
                 resources:
                   requests:
-                    cpu: "4"
-                    memory: "13Gi"
+                    cpu: "8"
+                    memory: "16Gi"
                     nvidia.com/gpu: "1"
                   limits:
-                    cpu: "4"
-                    memory: "13Gi"
+                    cpu: "8"
+                    memory: "16Gi"
                     nvidia.com/gpu: "1"
