@@ -54,6 +54,8 @@ spec:
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
+                - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                  value: "0.125"
               resources:
                 requests:
                   cpu: "1"
