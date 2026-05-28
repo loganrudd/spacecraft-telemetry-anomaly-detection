@@ -65,6 +65,19 @@ resource "google_cloud_run_v2_service" "mlflow" {
         name  = "MLFLOW_ARTIFACTS_DESTINATION"
         value = "gs://${var.project_id}-artifacts/mlflow"
       }
+
+      # Constrain SQLAlchemy pool to stay under Cloud SQL's max_connections=25.
+      # Default pool_size=5, max_overflow=10 → 15 connections per gunicorn worker.
+      # 1 instance × 2 workers × (3+4) = 14 connections max — well under 25.
+      env {
+        name  = "MLFLOW_SQLALCHEMYSTORE_POOL_SIZE"
+        value = "3"
+      }
+
+      env {
+        name  = "MLFLOW_SQLALCHEMYSTORE_MAX_OVERFLOW"
+        value = "4"
+      }
     }
   }
 
