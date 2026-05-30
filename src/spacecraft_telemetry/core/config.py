@@ -125,7 +125,8 @@ class ModelConfig(BaseModel):
     seed: int = 42
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     artifacts_dir: str = "models"
-    # DataLoader workers — 0 on MPS/macOS; 4 on cloud GPU nodes
+    # DataLoader workers — 0 everywhere: MPS can't share contexts across spawned
+    # processes; on cloud, packed tasks (4-8 per GPU) would oversubscribe vCPUs.
     num_workers: int = 0
 
     @field_validator("artifacts_dir", mode="before")
