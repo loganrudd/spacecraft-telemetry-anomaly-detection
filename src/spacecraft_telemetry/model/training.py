@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 
 import numpy as np
@@ -110,6 +110,15 @@ def train_channel(
     model = build_model(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
     loss_fn = nn.MSELoss()
+    # BF16 autocast on CUDA only — bfloat16 has float32's exponent range so no
+    # overflow risk. MPS stays float32: float16's limited range causes nan in the
+    # LSTM cell state after 250 sequential timesteps with untrained weights.
+    _amp_ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if device.type == "cuda"
+        else nullcontext()
+    )
+    _io_dtype: torch.dtype | None = None
 
     train_losses: list[float] = []
     val_losses: list[float] = []
@@ -158,11 +167,12 @@ def train_channel(
             epoch_train_loss = 0.0
             n_train = 0
             for x, y in train_loader:
-                x = x.to(device)
-                y = y.to(device)
-                optimizer.zero_grad()
-                pred = model(x).squeeze(1)
-                loss = loss_fn(pred, y)
+                x = x.to(device=device, dtype=_io_dtype)
+                y = y.to(device=device, dtype=_io_dtype)
+                optimizer.zero_grad(set_to_none=True)
+                with _amp_ctx:
+                    pred = model(x).squeeze(1)
+                    loss = loss_fn(pred, y)
                 loss.backward()
                 optimizer.step()
                 epoch_train_loss += loss.item() * len(x)
@@ -175,10 +185,11 @@ def train_channel(
             n_val = 0
             with torch.no_grad():
                 for x, y in val_loader:
-                    x = x.to(device)
-                    y = y.to(device)
-                    pred = model(x).squeeze(1)
-                    epoch_val_loss += loss_fn(pred, y).item() * len(x)
+                    x = x.to(device=device, dtype=_io_dtype)
+                    y = y.to(device=device, dtype=_io_dtype)
+                    with _amp_ctx:
+                        pred = model(x).squeeze(1)
+                        epoch_val_loss += loss_fn(pred, y).item() * len(x)
                     n_val += len(x)
             epoch_val_loss /= n_val
 
@@ -248,6 +259,7 @@ def train_channel(
                 model=model,
                 name=registered_model_name(cfg.model_type, mission, channel),
                 run_id=_run.info.run_id,
+                version_tags={"window_size": str(cfg.window_size)},
             )
 
     log.info(
