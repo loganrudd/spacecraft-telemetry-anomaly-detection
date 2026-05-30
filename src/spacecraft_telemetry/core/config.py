@@ -139,6 +139,9 @@ class ModelConfig(BaseModel):
     threshold_window: int = 250
     threshold_z: float = 3.0
     threshold_min_anomaly_len: int = 3
+    # Hundman §3.3 false-positive pruning: minimum relative peak-error decrease
+    # to treat a step as a real gap. 0.0 disables pruning (ablation baseline).
+    prune_min_decrease: float = 0.13
 
     @field_validator(
         "hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
@@ -165,11 +168,11 @@ class ModelConfig(BaseModel):
             raise ValueError(f"val_fraction must be in (0, 1), got {v}")
         return v
 
-    @field_validator("dropout")
+    @field_validator("dropout", "prune_min_decrease")
     @classmethod
-    def dropout_in_range(cls, v: float) -> float:
+    def fraction_in_range(cls, v: float) -> float:
         if not 0.0 <= v < 1.0:
-            raise ValueError(f"dropout must be in [0, 1), got {v}")
+            raise ValueError(f"must be in [0, 1), got {v}")
         return v
 
     @field_validator("learning_rate", "threshold_z")

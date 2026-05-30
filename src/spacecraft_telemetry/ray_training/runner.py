@@ -45,6 +45,10 @@ log = get_logger(__name__)
 
 # Scoring fields that Phase 5 is allowed to tune; any other key in tuned_configs
 # is ignored. This prevents an accidental override of architecture params.
+# prune_min_decrease is intentionally absent: pruning is offline-only (the
+# online serving path cannot replicate it), so a tuned config must not carry it
+# — that keeps the served params identical to what HPO optimized. See
+# ray_training/tune.py SEARCH_SPACE and docs/architecture/online-pruning-investigation.md.
 _TUNABLE_SCORING_FIELDS = frozenset(
     {"threshold_z", "threshold_window", "error_smoothing_window", "threshold_min_anomaly_len"}
 )

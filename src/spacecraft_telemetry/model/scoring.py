@@ -123,6 +123,15 @@ def dynamic_threshold(
     return threshold
 
 
+def _find_sequences(arr: np.ndarray[Any, Any]) -> list[tuple[int, int]]:
+    """Return (start, end) half-open intervals of contiguous True runs."""
+    padded = np.concatenate(([False], arr.astype(bool), [False]))
+    edges = np.diff(padded.astype(np.int8))
+    starts = np.where(edges == 1)[0]
+    ends = np.where(edges == -1)[0]
+    return list(zip(starts, ends, strict=False))
+
+
 def flag_anomalies(
     smoothed: np.ndarray[Any, Any],
     threshold: np.ndarray[Any, Any],
@@ -135,17 +144,68 @@ def flag_anomalies(
     """
     raw = smoothed > threshold
     result = np.zeros(len(raw), dtype=bool)
-
-    # Detect run boundaries via diff on a padded boolean array.
-    padded = np.concatenate(([False], raw, [False]))
-    edges = np.diff(padded.astype(np.int8))
-    starts = np.where(edges == 1)[0]
-    ends = np.where(edges == -1)[0]
-
-    for s, e in zip(starts, ends, strict=False):
+    for s, e in _find_sequences(raw):
         if e - s >= min_run_length:
             result[s:e] = True
+    return result
 
+
+def prune_anomalies(
+    smoothed: np.ndarray[Any, Any],
+    is_anomaly_pred: np.ndarray[Any, Any],
+    p: float,
+) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    """Hundman §3.3 false-positive pruning by relative peak-error decrease.
+
+    For each flagged sequence, take its peak smoothed error. Sort peaks
+    descending and append the max *non-flagged* error as a noise baseline.
+    Walking down the chain, a sequence is marked for removal whenever the
+    step-to-step percent decrease is below ``p`` — but any decrease >= ``p``
+    *resets* the removal set. The net effect: everything below the last
+    significant drop (the long tail blending into the noise floor) is pruned,
+    while sequences separated from the noise by a clear gap are kept.
+
+    ``p == 0`` disables pruning (returns the input unchanged), which keeps the
+    pre-pruning behaviour reproducible for ablation.
+
+    Args:
+        smoothed:        Full smoothed-error array.
+        is_anomaly_pred: Boolean flags from flag_anomalies().
+        p:               Minimum relative decrease to treat a step as a real
+                         gap (Hundman default 0.13). Must be in [0, 1).
+
+    Returns:
+        A pruned copy of is_anomaly_pred.
+    """
+    is_anomaly_pred = np.asarray(is_anomaly_pred).astype(bool)
+    if p <= 0.0:
+        return is_anomaly_pred
+
+    seqs = _find_sequences(is_anomaly_pred)
+    if not seqs:
+        return is_anomaly_pred
+
+    peaks = np.array([smoothed[s:e].max() for s, e in seqs], dtype=np.float64)
+    order = np.argsort(peaks)[::-1]  # sequence indices, highest peak first
+
+    non_flagged = smoothed[~is_anomaly_pred]
+    baseline = float(non_flagged.max()) if non_flagged.size else 0.0
+    chain = np.append(peaks[order], baseline)
+
+    to_remove: list[int] = []
+    for i in range(len(chain) - 1):
+        if chain[i] <= 0.0:
+            continue
+        decrease = (chain[i] - chain[i + 1]) / chain[i]
+        if decrease < p:
+            to_remove.append(int(order[i]))
+        else:
+            to_remove = []  # a real gap — everything above it stays
+
+    result = is_anomaly_pred.copy()
+    for idx in to_remove:
+        s, e = seqs[idx]
+        result[s:e] = False
     return result
 
 
@@ -153,7 +213,7 @@ def evaluate(
     is_anomaly: np.ndarray[Any, Any],
     is_anomaly_pred: np.ndarray[Any, Any],
 ) -> dict[str, float]:
-    """Precision, recall, F1, and F0.5 from binary anomaly label arrays.
+    """Point-level P/R/F1/F0.5 from binary anomaly label arrays.
 
     F0.5 weights precision twice as much as recall — appropriate for spacecraft
     telemetry where false alarms are more costly than missed detections.
@@ -190,6 +250,56 @@ def evaluate(
     }
 
 
+def evaluate_overlap(
+    is_anomaly: np.ndarray[Any, Any],
+    is_anomaly_pred: np.ndarray[Any, Any],
+) -> dict[str, float]:
+    """Segment-overlap P/R/F1/F0.5 per Hundman 2018 §3.4.
+
+    Counts TP/FP/FN at the sequence level, not the timestep level:
+      - Recall:    fraction of true anomaly sequences overlapped by any prediction.
+      - Precision: fraction of predicted sequences that overlap any true sequence.
+
+    This matches Hundman's reported numbers. The point-level evaluate() is kept
+    alongside as a stricter, less optimistic companion metric.
+    """
+    true_seqs = _find_sequences(is_anomaly)
+    pred_seqs = _find_sequences(is_anomaly_pred)
+
+    def _overlaps_any(s: int, e: int, candidates: list[tuple[int, int]]) -> bool:
+        return any(cs < e and ce > s for cs, ce in candidates)
+
+    n_true = len(true_seqs)
+    n_pred = len(pred_seqs)
+
+    tp_recall = sum(1 for s, e in true_seqs if _overlaps_any(s, e, pred_seqs))
+    tp_prec = sum(1 for s, e in pred_seqs if _overlaps_any(s, e, true_seqs))
+
+    recall = tp_recall / n_true if n_true > 0 else 0.0
+    precision = tp_prec / n_pred if n_pred > 0 else 0.0
+
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) > 0
+        else 0.0
+    )
+    beta_sq = 0.25
+    f0_5 = (
+        (1 + beta_sq) * precision * recall / (beta_sq * precision + recall)
+        if (beta_sq * precision + recall) > 0
+        else 0.0
+    )
+
+    return {
+        "seg_precision": precision,
+        "seg_recall": recall,
+        "seg_f1": f1,
+        "seg_f0_5": f0_5,
+        "n_true_seqs": float(n_true),
+        "n_pred_seqs": float(n_pred),
+    }
+
+
 def score_channel(
     settings: Settings,
     mission: str,
@@ -222,8 +332,13 @@ def score_channel(
                            scoring params (used to set ``tuned_from_run`` tag).
 
     Returns:
-        Metrics dict {precision, recall, f1, f0_5, n_true_positive_labels,
-        n_predicted_positive_labels} computed over the selected eval portion.
+        Metrics dict over the selected eval portion. Headline keys are computed
+        on the UN-pruned pipeline (serving parity): point {precision, recall,
+        f1, f0_5, n_true_positive_labels, n_predicted_positive_labels} and
+        segment-overlap {seg_precision, seg_recall, seg_f1, seg_f0_5,
+        n_true_seqs, n_pred_seqs}. Offline pruned-ceiling keys (Hundman §3.3,
+        not produced by serving): {pruned_seg_precision, pruned_seg_recall,
+        pruned_seg_f0_5, pruned_n_pred_seqs}.
     """
     from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
@@ -262,23 +377,36 @@ def score_channel(
     errors = preds - targets
     smoothed = smooth_errors(errors, cfg.error_smoothing_window)
     threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)
-    is_anomaly_pred = flag_anomalies(smoothed, threshold, cfg.threshold_min_anomaly_len)
+    # Headline flags are UN-pruned: this is exactly what the online serving
+    # engine (api/inference.py) produces tick-by-tick. Hundman §3.3 pruning is
+    # a retrospective batch op the streaming path cannot replicate, so we keep
+    # train/serve parity by reporting the un-pruned pipeline as the headline and
+    # the pruned result only as an offline "ceiling" (see docs/architecture/
+    # online-pruning-investigation.md for the path to online pruning).
+    flags_raw = flag_anomalies(smoothed, threshold, cfg.threshold_min_anomaly_len)
+    flags_pruned = prune_anomalies(smoothed, flags_raw, cfg.prune_min_decrease)
 
     # Slice true/pred labels for the reported metrics.
     # errors.npy is saved from the full smoothed array below, unaffected.
     n = len(is_anomaly)
     n_hpo = int(n * settings.tune.hpo_eval_fraction)
     if eval_split == "hpo_portion":
-        eval_true = is_anomaly[:n_hpo]
-        eval_pred = is_anomaly_pred[:n_hpo]
+        _sl = slice(None, n_hpo)
     elif eval_split == "final_portion":
-        eval_true = is_anomaly[n_hpo:]
-        eval_pred = is_anomaly_pred[n_hpo:]
+        _sl = slice(n_hpo, None)
     else:  # "full_test"
-        eval_true = is_anomaly
-        eval_pred = is_anomaly_pred
+        _sl = slice(None, None)
+    eval_true = is_anomaly[_sl]
+    eval_raw = flags_raw[_sl]
+    eval_pruned = flags_pruned[_sl]
 
-    metrics = evaluate(eval_true, eval_pred)
+    # Headline = serving-parity (un-pruned). Ceiling = offline pruned report.
+    metrics = {**evaluate(eval_true, eval_raw), **evaluate_overlap(eval_true, eval_raw)}
+    _ceiling = evaluate_overlap(eval_true, eval_pruned)
+    metrics["pruned_seg_precision"] = _ceiling["seg_precision"]
+    metrics["pruned_seg_recall"] = _ceiling["seg_recall"]
+    metrics["pruned_seg_f0_5"] = _ceiling["seg_f0_5"]
+    metrics["pruned_n_pred_seqs"] = _ceiling["n_pred_seqs"]
 
     # Serialise numpy artifacts for MLflow logging (all writes inside open_run).
     _errors_bytes = errors_to_bytes(smoothed)
@@ -313,6 +441,8 @@ def score_channel(
             "threshold_window": cfg.threshold_window,
             "threshold_z": cfg.threshold_z,
             "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
+            # Affects only the offline pruned-ceiling metrics, not the headline.
+            "prune_min_decrease": cfg.prune_min_decrease,
             "eval_split": eval_split,
         })
         log_metrics_final(metrics)

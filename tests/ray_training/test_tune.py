@@ -111,6 +111,8 @@ def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert "f0_5" in result
     assert isinstance(result["f0_5"], float)
+    assert "seg_f0_5" in result
+    assert isinstance(result["seg_f0_5"], float)
 
 
 def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,7 +209,7 @@ def test_run_all_sweeps_filters_and_runs(
                 "threshold_z": 2.5,
                 "threshold_min_anomaly_len": 2,
             },
-            "f0_5": 0.75,
+            "seg_f0_5": 0.75,
             "run_id": "fake-run-id-abc",
         }
 
@@ -226,7 +228,7 @@ def test_run_all_sweeps_filters_and_runs(
     assert entry["threshold_z"] == 2.5
     assert "_meta" in entry
     assert entry["_meta"]["run_id"] == "fake-run-id-abc"
-    assert entry["_meta"]["f0_5"] == pytest.approx(0.75)
+    assert entry["_meta"]["seg_f0_5"] == pytest.approx(0.75)
 
 
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,7 +334,7 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     score_channel(settings, mission, channel)
 
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
-    assert set(best.keys()) == {"config", "f0_5", "run_id"}
+    assert set(best.keys()) == {"config", "seg_f0_5", "run_id"}
     config = best["config"]
     assert set(config.keys()) == {
         "error_smoothing_window",
@@ -348,5 +350,5 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert 50 <= config["threshold_window"] <= 500
     assert 1 <= config["threshold_min_anomaly_len"] <= 10
     assert 1.5 <= config["threshold_z"] <= 5.0
-    assert isinstance(best["f0_5"], float)
+    assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)

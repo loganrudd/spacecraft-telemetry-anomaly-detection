@@ -152,6 +152,16 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
                 "f0_5": None,
                 "n_true_positive_labels": None,
                 "n_predicted_positive_labels": None,
+                "seg_precision": None,
+                "seg_recall": None,
+                "seg_f1": None,
+                "seg_f0_5": None,
+                "n_true_seqs": None,
+                "n_pred_seqs": None,
+                "pruned_seg_precision": None,
+                "pruned_seg_recall": None,
+                "pruned_seg_f0_5": None,
+                "pruned_n_pred_seqs": None,
             }
 
     return _score

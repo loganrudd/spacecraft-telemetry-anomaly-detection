@@ -811,10 +811,14 @@ def ray_score(
     click.echo(f"Errors   : {n_err}")
     for r in results:
         if r["status"] == "ok":
+            # Headline = serving-parity (un-pruned); pruned = offline ceiling.
             click.echo(
                 f"  {r['channel']:20s}  "
-                f"P={r['precision']:.3f}  R={r['recall']:.3f}  "
-                f"F1={r['f1']:.3f}  F0.5={r['f0_5']:.3f}"
+                f"P={r['precision']:.3f}  R={r['recall']:.3f}  F0.5={r['f0_5']:.3f}  "
+                f"segF0.5={r['seg_f0_5']:.3f}"
+                f"  ({int(r['n_true_seqs'])} true / {int(r['n_pred_seqs'])} pred seqs)"
+                f"  [pruned ceiling segF0.5={r['pruned_seg_f0_5']:.3f}"
+                f", {int(r['pruned_n_pred_seqs'])} seqs]"
             )
         else:
             click.echo(f"  {r['channel']:20s}  ERROR")

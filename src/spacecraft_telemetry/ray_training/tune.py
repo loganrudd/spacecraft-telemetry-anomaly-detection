@@ -1,7 +1,10 @@
 """Ray Tune HPO sweep for Telemanom scoring parameters (Phase 5).
 
-Tunes all 4 scoring parameters (error_smoothing_window, threshold_window,
+Tunes 4 scoring parameters (error_smoothing_window, threshold_window,
 threshold_z, threshold_min_anomaly_len) without re-training any LSTM models.
+The objective is segment-overlap F0.5 on the un-pruned pipeline; Hundman §3.3
+pruning is intentionally excluded to preserve train/serve parity (see
+SEARCH_SPACE).
 Each trial is a single pure-numpy scoring pass (~50ms), so FIFOScheduler is
 used rather than ASHA — ASHA's pruning requires intermediate checkpoints that
 don't exist for single-pass trials.
@@ -50,6 +53,12 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Search space — 4 scoring params only; no model architecture changes.
 # Upper bounds are exclusive for randint; inclusive for uniform.
+#
+# prune_min_decrease is deliberately NOT tuned: pruning is a retrospective
+# batch op the online serving path cannot replicate, so tuning it would pick a
+# z that only works *with* pruning and break train/serve parity. The objective
+# below is segment-overlap F0.5 on the UN-pruned pipeline — exactly what the
+# serving engine produces. Pruning stays a fixed offline-report knob.
 # ---------------------------------------------------------------------------
 
 SEARCH_SPACE: dict[str, Any] = {
@@ -199,14 +208,18 @@ def _scoring_trial(
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,
         evaluate,
+        evaluate_overlap,
         flag_anomalies,
         smooth_errors,
     )
 
     f0_5_scores: list[float] = []
+    seg_f0_5_scores: list[float] = []
     for errors, labels in channel_data.values():
 
-        # Scoring pipeline — identical to score_channel() in scoring.py.
+        # Un-pruned pipeline — identical to the headline path in score_channel()
+        # and to what the online serving engine produces. No prune step here:
+        # see SEARCH_SPACE note on train/serve parity.
         smoothed = smooth_errors(errors, int(config["error_smoothing_window"]))
         threshold = dynamic_threshold(
             smoothed,
@@ -214,11 +227,15 @@ def _scoring_trial(
             float(config["threshold_z"]),
         )
         flags = flag_anomalies(smoothed, threshold, int(config["threshold_min_anomaly_len"]))
-        metrics = evaluate(labels, flags)
-        f0_5_scores.append(metrics["f0_5"])
+        f0_5_scores.append(evaluate(labels, flags)["f0_5"])
+        seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
 
+    # seg_f0_5 (segment-overlap) is the HPO objective — it matches how long ESA
+    # anomalies should be scored and what serving produces. point-level f0_5 is
+    # reported alongside for observability.
     mean_f0_5 = float(np.mean(f0_5_scores)) if f0_5_scores else 0.0
-    return {"f0_5": mean_f0_5}
+    mean_seg_f0_5 = float(np.mean(seg_f0_5_scores)) if seg_f0_5_scores else 0.0
+    return {"f0_5": mean_f0_5, "seg_f0_5": mean_seg_f0_5}
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +264,10 @@ def run_hpo_sweep(
 
     Returns:
         Dict with keys:
-        - ``"config"``  — best scoring-param dict (4 keys from SEARCH_SPACE).
-        - ``"f0_5"``    — best F0.5 achieved over the HPO portion.
-        - ``"run_id"``  — MLflow run ID of the best trial (None if unavailable).
+        - ``"config"``    — best scoring-param dict (4 keys from SEARCH_SPACE).
+        - ``"seg_f0_5"``  — best segment-overlap F0.5 over the HPO portion
+          (un-pruned; the objective).
+        - ``"run_id"``    — MLflow run ID of the best trial (None if unavailable).
     """
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
@@ -294,11 +312,11 @@ def run_hpo_sweep(
         trial_fn,
         param_space=SEARCH_SPACE,
         tune_config=tune.TuneConfig(
-            metric="f0_5",
+            metric="seg_f0_5",
             mode="max",
             num_samples=settings.tune.num_samples,
             max_concurrent_trials=settings.tune.max_concurrent_trials,
-            search_alg=HyperOptSearch(metric="f0_5", mode="max"),
+            search_alg=HyperOptSearch(metric="seg_f0_5", mode="max"),
             scheduler=FIFOScheduler(),  # type: ignore[no-untyped-call]
         ),
         run_config=tune.RunConfig(
@@ -322,10 +340,10 @@ def run_hpo_sweep(
     )
 
     results = tuner.fit()
-    best = results.get_best_result(metric="f0_5", mode="max")
+    best = results.get_best_result(metric="seg_f0_5", mode="max")
 
     best_config: dict[str, Any] = best.config or {}
-    best_f0_5: float = (best.metrics or {}).get("f0_5", 0.0)
+    best_seg_f0_5: float = (best.metrics or {}).get("seg_f0_5", 0.0)
 
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
@@ -343,7 +361,7 @@ def run_hpo_sweep(
                     f"tags.subsystem = '{subsystem}'"
                     f" and attributes.start_time >= {_sweep_start_ms}"
                 ),
-                order_by=["metrics.f0_5 DESC"],
+                order_by=["metrics.seg_f0_5 DESC"],
                 max_results=1,
             )
             if _runs:
@@ -355,11 +373,11 @@ def run_hpo_sweep(
     log.info(
         "tune.sweep.end",
         subsystem=subsystem,
-        best_f0_5=round(best_f0_5, 4),
+        best_seg_f0_5=round(best_seg_f0_5, 4),
         best_config=best_config,
         best_run_id=best_run_id,
     )
-    return {"config": best_config, "f0_5": best_f0_5, "run_id": best_run_id}
+    return {"config": best_config, "seg_f0_5": best_seg_f0_5, "run_id": best_run_id}
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +452,7 @@ def run_all_sweeps(
             **sweep_result.get("config", {}),
             "_meta": {
                 "run_id": sweep_result.get("run_id"),
-                "f0_5": sweep_result.get("f0_5", 0.0),
+                "seg_f0_5": sweep_result.get("seg_f0_5", 0.0),
             },
         }
 
@@ -469,7 +487,7 @@ def write_tuned_configs(
             "subsystem_1": {
                 "threshold_z": 2.8, "threshold_window": 200,
                 "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
-                "_meta": {"run_id": "abc123...", "f0_5": 0.72}
+                "_meta": {"run_id": "abc123...", "seg_f0_5": 0.72}
             }
         }
 

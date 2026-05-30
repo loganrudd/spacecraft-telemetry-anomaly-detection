@@ -11,6 +11,7 @@ from spacecraft_telemetry.model.scoring import (
     dynamic_threshold,
     evaluate,
     flag_anomalies,
+    prune_anomalies,
     smooth_errors,
 )
 
@@ -120,6 +121,66 @@ def test_flag_anomalies_all_below_threshold() -> None:
     threshold = np.ones(10)
     flags = flag_anomalies(smoothed, threshold, min_run_length=1)
     assert not np.any(flags)
+
+
+# ---------------------------------------------------------------------------
+# prune_anomalies (Hundman §3.3)
+# ---------------------------------------------------------------------------
+
+
+def _flagged_blocks(arr: np.ndarray) -> int:
+    """Count contiguous True runs."""
+    padded = np.concatenate(([False], arr.astype(bool), [False]))
+    return int(np.count_nonzero(np.diff(padded.astype(np.int8)) == 1))
+
+
+def test_prune_disabled_when_p_zero() -> None:
+    """p=0 is the ablation switch — returns flags unchanged."""
+    smoothed = np.array([0.1, 5.0, 0.1, 0.2, 3.0, 0.1])
+    flags = np.array([False, True, False, False, True, False])
+    out = prune_anomalies(smoothed, flags, p=0.0)
+    assert np.array_equal(out, flags)
+
+
+def test_prune_resets_on_gap_to_baseline() -> None:
+    """A large final drop to the noise baseline *resets* the prune set, so a
+    sequence above a clear gap is NOT pruned. (This is why Hundman's p=0.13 is
+    ineffective against a flood that blends smoothly into the baseline — the
+    reset only fires when there IS a gap.)"""
+    # peaks 10.0, 1.0, 0.95; non-flagged max = 0.1.
+    # chain [10, 1.0, 0.95, 0.1]: 10->1 (90%) reset; 1->0.95 (5%) accumulate;
+    # 0.95->0.1 (89%) reset. Net prune set empty.
+    smoothed = np.array([0.1, 10.0, 0.1, 0.1, 1.0, 0.1, 0.1, 0.95, 0.1])
+    flags = np.array(
+        [False, True, False, False, True, False, False, True, False]
+    )
+    out = prune_anomalies(smoothed, flags, p=0.13)
+    assert np.array_equal(out, flags)
+
+
+def test_prune_removes_dense_noise_tail() -> None:
+    """A high peak separated from a dense cluster of near-equal low peaks that
+    blends into the baseline: the whole trailing cluster is pruned."""
+    # Strong seq (peak 10) + three near-equal weak seqs (1.00, 0.97, 0.95)
+    # with a non-flagged baseline (0.90) close enough that the final step is
+    # also < p, so no reset clears the accumulated tail.
+    smoothed = np.array(
+        [0.90, 10.0, 0.1,  1.00, 0.1,  0.97, 0.1,  0.95, 0.1]
+    )
+    flags = np.array(
+        [False, True, False, True, False, True, False, True, False]
+    )
+    out = prune_anomalies(smoothed, flags, p=0.13)
+    # The strong sequence survives; the three weak near-equal ones are pruned.
+    assert out[1]  # strong seq kept
+    assert _flagged_blocks(out) == 1
+
+
+def test_prune_no_sequences_is_noop() -> None:
+    smoothed = np.array([0.1, 0.2, 0.1])
+    flags = np.zeros(3, dtype=bool)
+    out = prune_anomalies(smoothed, flags, p=0.13)
+    assert not np.any(out)
 
 
 # ---------------------------------------------------------------------------
@@ -372,16 +433,25 @@ def test_score_channel_artifacts_and_metrics(
     metrics = score_channel(settings, fx.mission, fx.channel)
 
     # --- metrics dict contract ---
-    float_keys = {"precision", "recall", "f1", "f0_5"}
-    int_keys = {"n_true_positive_labels", "n_predicted_positive_labels"}
-    assert float_keys | int_keys == set(metrics.keys()), (
+    # Ratio metrics in [0,1]: point + segment headline (un-pruned) + pruned ceiling.
+    ratio_keys = {
+        "precision", "recall", "f1", "f0_5",
+        "seg_precision", "seg_recall", "seg_f1", "seg_f0_5",
+        "pruned_seg_precision", "pruned_seg_recall", "pruned_seg_f0_5",
+    }
+    int_count_keys = {"n_true_positive_labels", "n_predicted_positive_labels"}
+    float_count_keys = {"n_true_seqs", "n_pred_seqs", "pruned_n_pred_seqs"}
+    assert ratio_keys | int_count_keys | float_count_keys == set(metrics.keys()), (
         f"Unexpected keys: {set(metrics.keys())}"
     )
-    for k in float_keys:
+    for k in ratio_keys:
         assert isinstance(metrics[k], float), f"{k} must be float"
         assert 0.0 <= metrics[k] <= 1.0, f"{k}={metrics[k]} out of [0,1]"
-    for k in int_keys:
+    for k in int_count_keys:
         assert isinstance(metrics[k], int), f"{k} must be int"
+        assert metrics[k] >= 0, f"{k} must be non-negative"
+    for k in float_count_keys:
+        assert isinstance(metrics[k], float), f"{k} must be float"
         assert metrics[k] >= 0, f"{k} must be non-negative"
 
     # --- artifact files in MLflow (A1: filesystem writes removed) ---
