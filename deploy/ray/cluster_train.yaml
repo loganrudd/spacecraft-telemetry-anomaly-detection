@@ -13,7 +13,7 @@
 #   Head: 1 vCPU / 4 GiB — driver only, no model work.
 #   Workers: g2-standard-8 (8 vCPU) + 1× L4 spot; num_gpus=0.125 packs 8 LSTMs per GPU.
 #   8 tasks × 1 CPU + 0.125 GPU each = fully utilises both the 8 CPUs and the L4.
-#   1 node × 8 concurrent = 8 channels/batch; 90 channels → ~12 batches × ~3 min = ~35 min.
+#   GPU is the bottleneck (runs at ~99% util); epoch wall-clock per channel ~15-18 min at 8-way pack.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -108,6 +108,7 @@ spec:
             serviceAccountName: ray-sa
             nodeSelector:
               cloud.google.com/gke-accelerator: nvidia-l4
+              cloud.google.com/gke-spot: "true"
             tolerations:
               - key: nvidia.com/gpu
                 operator: Exists
