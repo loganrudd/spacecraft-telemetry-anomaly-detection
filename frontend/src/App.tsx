@@ -118,9 +118,11 @@ export default function App() {
   const subsystem = view.kind === "subsystem" ? view.subsystem : null;
   const density = getDensity(selected.length);
 
-  // Show loading / error screen until all engines are ready.
-  if (!health || health.status === "loading" || health.status === "degraded") {
-    const ready = health?.channels_ready ?? 0;
+  // Block the dashboard only while still loading, or when degraded with zero
+  // channels ready. A degraded mission with >= 1 loaded channel is usable —
+  // fall through to the dashboard (a banner notes the untrained channels).
+  const ready = health?.channels_ready ?? 0;
+  if (!health || health.status === "loading" || (health.status === "degraded" && ready === 0)) {
     const total = health?.channels_total ?? 0;
     const pct = total > 0 ? Math.round((ready / total) * 100) : 0;
     const mission = health?.mission ?? null;

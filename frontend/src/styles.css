@@ -57,6 +57,15 @@ button {
   overflow: hidden;
 }
 
+.app__partial-banner {
+  margin: 0;
+  padding: 0.4rem 1rem;
+  font-size: 0.8rem;
+  color: var(--alert);
+  background: rgba(210, 153, 34, 0.12);
+  border-bottom: 1px solid var(--border);
+}
+
 .app__main {
   flex: 1;
   overflow-y: auto;
