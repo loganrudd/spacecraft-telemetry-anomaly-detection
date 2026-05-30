@@ -156,32 +156,37 @@ def open_run(
     Yields:
         mlflow.ActiveRun or None.
     """
-    # Use a daemon thread with a hard 30-second timeout so a slow or
-    # unreachable MLflow backend never blocks the training loop.
-    # MLFLOW_HTTP_REQUEST_TIMEOUT only covers TCP connect, not the case
-    # where Cloud Run accepts the connection but holds it waiting for a
-    # backend instance — the thread join covers both.
-    _run: Any = None
+    # The thread is used only for set_experiment — the network call most likely
+    # to hang on a cold Cloud Run backend.  start_run / end_run must run on the
+    # calling thread: MLflow 3.x stores the active-run stack in a ThreadLocal,
+    # so a run started on a daemon thread is invisible to log_* helpers called
+    # from the main thread.
     _exc: list[Exception] = []
-    _result: list[Any] = []
 
-    def _start() -> None:
+    def _set_experiment() -> None:
         try:
             mlflow.set_experiment(experiment)
-            _result.append(mlflow.start_run(run_name=run_name, tags=tags, nested=nested))
         except Exception as exc:  # noqa: BLE001
             _exc.append(exc)
 
-    t = Thread(target=_start, daemon=True)
+    t = Thread(target=_set_experiment, daemon=True)
     t.start()
     t.join(timeout=30)
 
     if t.is_alive():
-        log.warning("mlflow.run.start_failed", experiment=experiment, error="timeout after 30s")
-    elif _exc:
+        log.warning("mlflow.run.start_failed", experiment=experiment, error="set_experiment timeout after 30s")
+        yield None
+        return
+    if _exc:
         log.warning("mlflow.run.start_failed", experiment=experiment, error=str(_exc[0]))
-    else:
-        _run = _result[0] if _result else None
+        yield None
+        return
+
+    _run: Any = None
+    try:
+        _run = mlflow.start_run(run_name=run_name, tags=tags, nested=nested)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mlflow.run.start_failed", experiment=experiment, error=str(exc))
 
     try:
         yield _run

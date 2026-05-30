@@ -196,15 +196,24 @@ def load_model_for_scoring(
     else:
         mv = max(versions, key=lambda v: int(v.version))
 
-    if mv.run_id is None:
-        raise RuntimeError(f"Model version for {name!r} has no associated run.")
-    run_id = mv.run_id
     model = mlflow_pytorch.load_model(  # type: ignore[no-untyped-call]
-        f"runs:/{run_id}/model",
+        f"models:/{name}/{mv.version}",
         map_location=device,
     )
-    run = client.get_run(run_id)
-    window_size = int(run.data.params["window_size"])
+    # Prefer run params as the authoritative source; fall back to the version
+    # tag written by register_pytorch_model (covers versions registered before
+    # the thread-local run-association bug was fixed).
+    if mv.run_id is not None:
+        run = client.get_run(mv.run_id)
+        window_size = int(run.data.params["window_size"])
+    elif "window_size" in (mv.tags or {}):
+        window_size = int(mv.tags["window_size"])
+    else:
+        raise RuntimeError(
+            f"Cannot determine window_size for model {name!r} version {mv.version}: "
+            "no associated run and no 'window_size' version tag. "
+            "Set the tag via: client.set_model_version_tag(name, version, 'window_size', '250')"
+        )
     return model, window_size
 
 

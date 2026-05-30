@@ -29,6 +29,7 @@ def register_pytorch_model(
     model: Any,
     name: str,
     run_id: str,
+    version_tags: dict[str, str] | None = None,
 ) -> Any:
     """Log a PyTorch model artifact and register it in the Model Registry.
 
@@ -40,9 +41,12 @@ def register_pytorch_model(
     the artifact to attach to.
 
     Args:
-        model:   PyTorch model instance to serialize and log.
-        name:    Registered model name from registered_model_name() in conventions.
-        run_id:  ID of the active MLflow run (run.info.run_id from open_run).
+        model:        PyTorch model instance to serialize and log.
+        name:         Registered model name from registered_model_name() in conventions.
+        run_id:       ID of the active MLflow run (run.info.run_id from open_run).
+        version_tags: Optional key/value tags to set on the new ModelVersion.
+                      Use for params that must survive without a run link
+                      (e.g. {"window_size": "250"}).
 
     Returns:
         The first mlflow.entities.model_registry.ModelVersion created for this
@@ -55,9 +59,11 @@ def register_pytorch_model(
     )
     client = mlflow.tracking.MlflowClient()
     versions = client.search_model_versions(f"name='{name}' and run_id='{run_id}'")
-    if versions:
-        return versions[0]
-    return None
+    mv = versions[0] if versions else None
+    if mv is not None and version_tags:
+        for k, v in version_tags.items():
+            client.set_model_version_tag(name, mv.version, k, v)
+    return mv
 
 
 def promote(
