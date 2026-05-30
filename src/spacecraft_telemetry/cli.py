@@ -708,7 +708,9 @@ def ray_train(
                 f"  val_loss={r['best_val_loss']:.6f}"
             )
         else:
-            click.echo(f"  {r['channel']:20s}  ERROR — see logs")
+            click.echo(f"  {r['channel']:20s}  ERROR")
+            if r.get("error_msg"):
+                click.echo(r["error_msg"], err=True)
 
     if n_err:
         raise SystemExit(1)
@@ -815,7 +817,9 @@ def ray_score(
                 f"F1={r['f1']:.3f}  F0.5={r['f0_5']:.3f}"
             )
         else:
-            click.echo(f"  {r['channel']:20s}  ERROR — see logs")
+            click.echo(f"  {r['channel']:20s}  ERROR")
+            if r.get("error_msg"):
+                click.echo(r["error_msg"], err=True)
 
     if n_err:
         raise SystemExit(1)
