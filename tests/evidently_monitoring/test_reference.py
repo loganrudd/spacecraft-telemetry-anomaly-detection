@@ -27,7 +27,7 @@ from spacecraft_telemetry.evidently_monitoring.reference import (
 _MISSION = "ESA-Mission1"
 _CHANNEL = "channel_1"
 
-# PyArrow schema that mirrors what Spark writes.
+# PyArrow schema that mirrors what the preprocessing pipeline writes.
 # mission_id / channel_id are Hive partition columns (encoded in directory
 # names) and are therefore NOT present as data columns in the Parquet files.
 _SERIES_FILE_SCHEMA = pa.schema(

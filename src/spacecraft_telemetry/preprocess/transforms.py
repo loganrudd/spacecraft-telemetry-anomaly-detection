@@ -3,9 +3,10 @@ train/test splitting, and anomaly labeling.
 
 Each function is a pure DataFrame → DataFrame transform (or DataFrame → (DataFrame, dict)).
 All transforms receive a single-channel DataFrame — the @ray.remote fan-out in
-pipeline.py handles cross-channel parallelism, so Window.partitionBy is unnecessary.
+pipeline.py handles cross-channel parallelism, so no per-channel grouping is needed.
 
-Functional parity with spark/transforms.py is verified by tests/preprocess/test_parity.py.
+Parity between the parallel (Ray) and sequential (pandas) code paths is verified
+by tests/preprocess/test_parity.py.
 """
 
 from __future__ import annotations
@@ -106,7 +107,7 @@ def normalize(
     channel_id = str(df["channel_id"].iloc[0])
 
     mean = float(df["value"].mean())
-    # ddof=1 matches Spark's STDDEV_SAMP (sample standard deviation).
+    # ddof=1 → sample standard deviation (matches normalize_value reference impl).
     std = float(df["value"].std(ddof=1))
 
     if std == 0.0 or np.isnan(std):
@@ -131,7 +132,7 @@ def temporal_train_test_split(
         min_ts + train_fraction * (max_ts - min_ts)
 
     Rows at or before the cutoff → train; rows after → test. This is a temporal
-    (non-random) split matching the Spark implementation's per-channel semantics.
+    (non-random) split applied per channel.
 
     Args:
         df:             DataFrame with 'telemetry_timestamp' column.
@@ -185,7 +186,7 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
     is_anomaly = pd.Series(False, index=df.index)
 
     for _, row in channel_labels.iterrows():
-        # Half-open interval: start inclusive, end exclusive — matches Spark semantics.
+        # Half-open interval: start inclusive, end exclusive.
         in_interval = (ts >= row["start_time"]) & (ts < row["end_time"])
         is_anomaly = is_anomaly | in_interval
 

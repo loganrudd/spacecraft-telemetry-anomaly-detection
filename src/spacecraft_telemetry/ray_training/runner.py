@@ -3,7 +3,7 @@
 Public API
 ----------
 discover_channels(settings, mission) -> list[str]
-    Scan Spark processed-data dirs for available channel IDs.
+    Scan processed-data dirs for available channel IDs.
 
 train_all_channels(settings, mission, channels, *, max_channels=None) -> list[dict]
     Fan out train_channel across all channels using Ray Core.

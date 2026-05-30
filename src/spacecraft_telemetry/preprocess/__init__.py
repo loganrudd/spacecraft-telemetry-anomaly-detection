@@ -1,6 +1,7 @@
 """Pandas + PyArrow + Ray Core preprocessing pipeline.
 
-Replaces spark/ — same public API, same on-disk Parquet contract, no JVM.
+Pure-Python (no JVM): pandas/PyArrow transforms with a @ray.remote fan-out
+across channels.
 
 Public API
 ----------

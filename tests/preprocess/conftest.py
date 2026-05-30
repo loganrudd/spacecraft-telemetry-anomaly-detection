@@ -1,6 +1,6 @@
 """Shared fixtures for pandas preprocessing tests.
 
-All fixtures are pure pandas/PyArrow — no SparkSession dependency.
+All fixtures are pure pandas/PyArrow.
 The pipeline_input_dir layout mirrors what ingest/sample.py produces:
     {root}/ESA-Mission1/channels/channel_1.parquet
     {root}/ESA-Mission1/labels.csv

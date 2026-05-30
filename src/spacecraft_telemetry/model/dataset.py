@@ -1,9 +1,8 @@
 """Dataset utilities for Telemanom LSTM training.
 
-Reads per-timestep series Parquet (written by the Spark preprocessing pipeline)
-via PyArrow — no Spark dependency at training time.  Constructs LSTM windows
-on-the-fly in the DataLoader, avoiding the 250x disk inflation of pre-materialized
-window arrays.
+Reads per-timestep series Parquet (written by the preprocessing pipeline)
+via PyArrow.  Constructs LSTM windows on-the-fly in the DataLoader, avoiding
+the 250x disk inflation of pre-materialized window arrays.
 
 Public API:
     make_dataloaders(settings, mission, channel)     -> (train_loader, val_loader)
@@ -103,8 +102,8 @@ def _build_window_index(
        value — the window plus target step don't span a segment gap.
     2. If ``skip_anomalous_windows``: no timestep in that span is anomalous.
 
-    Segment IDs are assigned in ascending temporal order by the Spark
-    preprocessing pipeline, so ``segment_ids[s] == segment_ids[s + span - 1]``
+    Segment IDs are assigned in ascending temporal order by the preprocessing
+    pipeline, so ``segment_ids[s] == segment_ids[s + span - 1]``
     is a correct and O(N)-vectorisable boundary check.
 
     Args:

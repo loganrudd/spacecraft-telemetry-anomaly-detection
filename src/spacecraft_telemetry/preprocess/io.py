@@ -1,7 +1,7 @@
 """Pandas/PyArrow I/O: read raw channel Parquet + labels CSV, write processed output.
 
-Replaces spark/io.py. All reads produce DataFrames with the same column contracts
-as before; all writes produce the same Hive-partitioned layout:
+All reads produce DataFrames with a fixed column contract; all writes produce the
+Hive-partitioned layout:
     {output_path}/mission_id={M}/channel_id={C}/part.parquet
 
 This layout is consumed by model/dataset.py, ray_training/runner.py, and

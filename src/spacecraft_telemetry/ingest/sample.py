@@ -101,7 +101,7 @@ class SampleCreator:
             sampled = self._take_first_n_rows(df)
             dest = self.sample_dir / mission / "channels" / f"{channel}.parquet"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            _write_parquet_spark_compat(sampled, dest)
+            _write_parquet_micros_utc(sampled, dest)
             row_counts[channel] = len(sampled)
             log.info(
                 "channel sampled",
@@ -219,12 +219,13 @@ class SampleCreator:
 # ------------------------------------------------------------------
 
 
-def _write_parquet_spark_compat(df: pd.DataFrame, path: Path) -> None:
-    """Write a pandas DataFrame to Parquet with PySpark 4.x-compatible timestamps.
+def _write_parquet_micros_utc(df: pd.DataFrame, path: Path) -> None:
+    """Write a pandas DataFrame to Parquet with UTC microsecond timestamps.
 
-    PySpark 4.x rejects TIMESTAMP(NANOS, false) — the default produced by pandas
-    when the DatetimeIndex has no timezone. Fix: localize to UTC and truncate to
-    microsecond precision so pyarrow writes TIMESTAMP(MICROS, true) instead.
+    pandas defaults to TIMESTAMP(NANOS, false) when the DatetimeIndex has no
+    timezone. The preprocessing schemas (RAW_CHANNEL_SCHEMA / SERIES_FILE_SCHEMA)
+    expect timestamp("us", tz="UTC"), so localize to UTC and truncate to
+    microsecond precision — pyarrow then writes TIMESTAMP(MICROS, true).
     """
     df = df.copy()
     if isinstance(df.index, pd.DatetimeIndex):

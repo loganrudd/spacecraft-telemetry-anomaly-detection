@@ -1,7 +1,7 @@
 """Reference profile building for Evidently drift monitoring (Phase 7).
 
 A reference profile is the train-split feature DataFrame for one channel.
-It is built once (after Spark preprocessing) and persisted to Parquet so that
+It is built once (after preprocessing) and persisted to Parquet so that
 each ``drift batch`` invocation can load it without re-reading all train data.
 
 Public API
@@ -177,7 +177,7 @@ def build_reference_profile(
     """Build a reference feature DataFrame for the given channel.
 
     Reads the train-split Parquet for ``(mission, channel)`` from the
-    Hive-partitioned directory layout written by the Spark pipeline::
+    Hive-partitioned directory layout written by the preprocessing pipeline::
 
         {processed_data_dir}/{mission}/train/mission_id={M}/channel_id={C}/
 

@@ -35,7 +35,7 @@ async def replay_channel(
     simulate real-time replay at the requested speed multiplier.
 
     Args:
-        processed_dir:         Path to the Spark-preprocessed Parquet tree.
+        processed_dir:         Path to the preprocessed Parquet tree.
         mission:               Mission identifier (e.g. ``"ESA-Mission1"``).
         channel:               Channel identifier (e.g. ``"A-1"``).
         speed:                 Replay speed multiplier (must be > 0).

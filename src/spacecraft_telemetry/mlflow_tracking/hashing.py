@@ -30,7 +30,7 @@ def training_data_hash(
     directory contents return identical strings.
 
     Args:
-        processed_data_dir: Root of Spark processed output (e.g. "data/processed").
+        processed_data_dir: Root of preprocessed output (e.g. "data/processed").
         mission:            Mission ID, e.g. "ESA-Mission1".
         channel:            Channel ID, e.g. "channel_1".
 
@@ -50,7 +50,7 @@ def training_data_hash(
     if not train_dir.exists():
         raise ValueError(
             f"Train partition directory not found: {train_dir}. "
-            "Run the Spark preprocessing pipeline before computing training_data_hash."
+            "Run the preprocessing pipeline before computing training_data_hash."
         )
     entries = sorted(
         (p.name, p.stat().st_size)

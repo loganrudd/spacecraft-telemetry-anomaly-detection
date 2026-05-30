@@ -14,7 +14,7 @@ from spacecraft_telemetry.core.config import Settings, load_settings
 _MISSION = "ESA-Mission1"
 _CHANNEL = "channel_1"
 
-# PyArrow schema matching SERIES_SCHEMA from spark/schemas.py,
+# PyArrow schema matching SERIES_FILE_SCHEMA from preprocess/schemas.py,
 # minus Hive partition columns (encoded in directory names).
 _SERIES_FILE_SCHEMA = pa.schema(
     [

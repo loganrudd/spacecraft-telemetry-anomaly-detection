@@ -1,10 +1,9 @@
 """Tests for api.replay — async generator and timestamp conversion.
 
 Regression guard for the numpy.datetime64 / pd.Timestamp dual-path bug:
-the real Spark-preprocessed parquet produces timezone-naive datetime64[ns]
-numpy scalars, while test fixtures write timezone-aware columns that yield
-pd.Timestamp objects from to_numpy(). Both must produce Python datetime
-objects without raising.
+timezone-naive datetime64[ns] parquet columns yield numpy.datetime64 scalars
+from to_numpy(), while timezone-aware columns yield pd.Timestamp objects.
+Both must produce Python datetime objects without raising.
 """
 
 from __future__ import annotations
@@ -39,10 +38,10 @@ _ANOM = np.array([False, True, False], dtype=bool)
 
 class TestReplayChannelTimestampConversion:
     async def test_timezone_naive_datetime64_yields_python_datetime(self) -> None:
-        """Regression: numpy.datetime64 (Spark output) must not raise AttributeError.
+        """Regression: numpy.datetime64 must not raise AttributeError.
 
         load_series_parquet returns timezone-naive datetime64[ns] when the
-        parquet column has no timezone metadata (common for Spark-written files).
+        parquet column has no timezone metadata.
         pd.Timestamp(ts) must bridge the gap — ts.to_pydatetime() would fail here.
         """
         timestamps = np.array(

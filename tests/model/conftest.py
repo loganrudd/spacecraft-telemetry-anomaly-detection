@@ -1,15 +1,16 @@
 """Shared fixtures for Telemanom model tests.
 
 Key fixture: tiny_series_parquet — writes synthetic per-timestep series Parquet in
-the Hive-partitioned layout produced by the Spark pipeline (Phase 2.5+), so model
-tests can run without Spark.  Matches SERIES_SCHEMA from spark/schemas.py.
+the Hive-partitioned layout produced by the preprocessing pipeline (Phase 2.5+), so
+model tests can run without running preprocessing.  Matches SERIES_FILE_SCHEMA from
+preprocess/schemas.py.
 
 Layout:
     {processed_dir}/ESA-Mission1/train/mission_id=ESA-Mission1/channel_id=channel_1/part.parquet
     {processed_dir}/ESA-Mission1/test/mission_id=ESA-Mission1/channel_id=channel_1/part.parquet
 
 Partition columns (mission_id, channel_id) are NOT in the Parquet files — they
-are encoded in directory names, exactly as Spark writes them.
+are encoded in directory names, exactly as the preprocessing pipeline writes them.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ _N_TEST_ROWS = 30
 _N_TEST_WINDOWS = max(0, _N_TEST_ROWS - _SPAN + 1)
 _ANOMALY_ROWS = 5       # last 5 rows of test segment are anomalous
 
-# PyArrow schema matching SERIES_SCHEMA from spark/schemas.py,
+# PyArrow schema matching SERIES_FILE_SCHEMA from preprocess/schemas.py,
 # minus the Hive partition columns (mission_id, channel_id).
 _SERIES_FILE_SCHEMA = pa.schema(
     [
@@ -158,7 +159,7 @@ def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
 
 @pytest.fixture()
 def tiny_series_parquet(tmp_path: Path) -> SeriesParquetFixture:
-    """Write synthetic series Parquet in Spark's Hive-partitioned layout.
+    """Write synthetic series Parquet in the Hive-partitioned layout.
 
     Train: 3 segments (60 + 30 + 10 rows).  Segment 2 is too short for any
     window, so only segments 0 and 1 contribute valid windows (50 + 20 = 70).

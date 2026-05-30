@@ -3,7 +3,7 @@
 Entrypoint: train_channel(settings, mission, channel) -> TrainingResult
 
 Follows the Explore → Plan → Execute discipline:
-- Reads per-timestep series Parquet written by Phase 2 Spark pipeline (Plan 002.5).
+- Reads per-timestep series Parquet written by the Phase 2 preprocessing pipeline (Plan 002.5).
 - Trains a TelemanomLSTM with early stopping on the val split.
 - Logs model artifacts, normalization params, and per-epoch losses to MLflow.
   MLflow is the single source of truth — no filesystem artifact copies.

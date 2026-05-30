@@ -210,7 +210,7 @@ class TestNormalizeValue:
         assert normalize_value(42.0, mean=42.0, std=0.0) == 0.0
 
     def test_zero_std_non_constant_still_zero(self) -> None:
-        # Even if x != mean, std=0 returns 0.0 (matches Spark CASE WHEN _std=0 THEN 0.0).
+        # Even if x != mean, std=0 returns 0.0 (matches the std == 0 guard in normalize()).
         assert normalize_value(99.0, mean=0.0, std=0.0) == 0.0
 
     def test_x_equals_mean_returns_zero(self) -> None:

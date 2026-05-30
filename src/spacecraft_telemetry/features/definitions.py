@@ -3,8 +3,9 @@
 This module is the single source of truth for what each feature means and how
 it is computed. Every phase that produces or consumes features imports from here:
 
-    Phase 2 (Spark)     — translates each FeatureDefinition to a Spark window
-                          function; tests assert Spark output matches compute_numpy
+    Phase 2 (preprocess) — transforms.normalize() uses normalize_value(); rolling
+                          features are computed on-the-fly downstream rather than
+                          materialized to disk (Plan 002.5)
     Phase 7 (Evidently) — canonical column names for batch drift monitoring;
                           compute_features_numpy() computes rolling features on
                           train/test Parquet at monitoring time
@@ -30,7 +31,7 @@ class FeatureDefinition:
 
     Attributes:
         name: Column name used everywhere (Parquet, Feast, Evidently).
-        dtype: Feast/Spark type string — "float32" for all current features.
+        dtype: Feast type string — "float32" for all current features.
         description: Plain-English definition. Phase 8 must match this exactly.
         window_size: Number of values the computation looks back over.
                      None means the feature uses a fixed look-back (e.g. 2 for ROC).
@@ -160,13 +161,13 @@ _BY_NAME: dict[str, FeatureDefinition] = {f.name: f for f in FEATURE_DEFINITIONS
 def normalize_value(x: float, mean: float, std: float) -> float:
     """Z-score normalization reference implementation.
 
-    This is the canonical formula used by both the Spark preprocessing pipeline
+    This is the canonical formula used by both the preprocessing pipeline
     (offline, via transforms.normalize()) and the FastAPI serving layer (online,
     Phase 8) to normalize raw telemetry values at inference time.
 
     Keeping the formula here — rather than inlined in transforms.py or the serving
     code — prevents train-serve skew: any drift in the formula is caught by the
-    Spark-vs-NumPy equivalence test in tests/spark/test_transforms.py.
+    equivalence test in tests/features/test_definitions.py.
 
     Args:
         x: Raw (unnormalized) telemetry value.
@@ -174,8 +175,8 @@ def normalize_value(x: float, mean: float, std: float) -> float:
         std: Per-channel sample standard deviation (ddof=1) from training data.
 
     Returns:
-        (x - mean) / std. Returns 0.0 for constant channels (std == 0) to match
-        Spark's CASE WHEN _std = 0 THEN 0.0 behaviour in transforms.normalize().
+        (x - mean) / std. Returns 0.0 for constant channels (std == 0), matching
+        the std == 0 guard in transforms.normalize().
     """
     if std == 0.0:
         return 0.0
@@ -207,7 +208,7 @@ def compute_features_numpy(
 
     This is the reference implementation consumed directly by:
     - Phase 8 FastAPI streaming loop (one call per incoming telemetry tick)
-    - Phase 2 Spark equivalence tests (validate Spark output matches this)
+    - Phase 7 Evidently batch monitoring (rolling features on train/test Parquet)
 
     Args:
         values: 1-D NumPy array of recent raw (z-score normalized) values,

@@ -1,7 +1,7 @@
 """Pandas + Ray Core preprocessing pipeline.
 
 Orchestrates: read → null-fill → gap-detect → normalize → label → split → write.
-Replaces spark/pipeline.py — same public API, same on-disk contract, no JVM.
+Pure-Python, no JVM.
 
 Parallelism model: each channel is processed by a @ray.remote task (one per CPU).
 The labels DataFrame is shared via ray.put() — serialized once, read by all workers.

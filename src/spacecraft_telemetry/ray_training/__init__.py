@@ -2,7 +2,7 @@
 
 Public API
 ----------
-discover_channels    Scan Spark output dirs for available channel IDs.
+discover_channels    Scan processed-data dirs for available channel IDs.
 train_all_channels   Fan out train_channel across channels via Ray Core.
 score_all_channels   Fan out score_channel across channels via Ray Core.
 make_train_task      Factory: returns a @ray.remote train task.

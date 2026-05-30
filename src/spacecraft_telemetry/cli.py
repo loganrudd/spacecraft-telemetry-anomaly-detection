@@ -659,7 +659,7 @@ def ray_train(
     """Train channels in parallel using Ray Core.
 
     Trains all discovered channels by default. Discovers channels by scanning
-    the Spark processed-data directory unless --channels or --channels-from is
+    the processed-data directory unless --channels or --channels-from is
     supplied (required when processed data lives on GCS).
 
     Examples:

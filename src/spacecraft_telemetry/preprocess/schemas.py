@@ -1,7 +1,7 @@
 """PyArrow schemas for each stage of the pandas preprocessing pipeline.
 
-Mirrors the PySpark StructType schemas from the removed spark/schemas.py, using
-PyArrow types instead. The SERIES_FILE_SCHEMA is the load-bearing contract: it
+PyArrow schemas for the preprocessing stages. The SERIES_FILE_SCHEMA is the
+load-bearing contract: it
 describes the columns written to each Hive partition file (excluding mission_id
 and channel_id, which are encoded in the directory path).
 """
