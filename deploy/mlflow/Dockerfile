@@ -12,9 +12,11 @@ RUN pip install --no-cache-dir \
 #   MLFLOW_ARTIFACTS_DESTINATION  gs://{project}-artifacts/mlflow
 ENV PORT=8080
 
-# 3 workers × (pool_size=3 + max_overflow=4) = 21 connections — under f1-micro's 25 hard cap.
-# gthread worker class required for --threads to actually enable concurrency;
-# default sync workers ignore the threads flag entirely.
+# MLflow 3.x serves via uvicorn by default; each --workers process runs an async
+# event loop, so 3 workers gives ample concurrency for I/O-bound (DB-waiting) UI
+# requests. NOTE: --gunicorn-opts/--threads cannot be combined with --allowed-hosts
+# (a uvicorn-only security flag) — doing so makes the container exit(2) at startup.
+# 3 workers × (pool_size=3 + max_overflow=4) = 21 connections — under f1-micro's 25 cap.
 CMD mlflow server \
     --host 0.0.0.0 \
     --port "${PORT}" \
@@ -22,5 +24,4 @@ CMD mlflow server \
     --default-artifact-root "${DEFAULT_ARTIFACT_ROOT}" \
     --no-serve-artifacts \
     --workers 3 \
-    --gunicorn-opts "--threads 4 --worker-class gthread" \
     --allowed-hosts "*"
