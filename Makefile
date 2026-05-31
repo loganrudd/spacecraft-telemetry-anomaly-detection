@@ -18,7 +18,7 @@ RUN := $(UV) run
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
-        cloud-up cloud-down \
+        cloud-up cloud-down cloud-db-start cloud-db-stop \
         cloud-preprocess cloud-train cloud-tune cloud-score \
         seed-reference-profiles \
         smoke-cloud \
@@ -145,10 +145,10 @@ mlflow-promote:   ## Set @champion alias on one model (MISSION=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry mlflow promote \
 		--mission $(MISSION) --channels $(CHANNEL)
 
-mlflow-promote-all: ## Promote @champion for all channels (PROJECT_ID=…, MISSION=…, [CHANNEL=…])
+mlflow-promote-all: ## Promote @champion for all registered channels (MISSION=…, [SUBSYSTEM=…])
 	$(RUN) spacecraft-telemetry --env cloud mlflow promote \
 		--mission $(MISSION) \
-		$(if $(CHANNEL),--channels $(CHANNEL),--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt)
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
 	$(eval _API_IMAGE := $(shell gcloud run services describe api \
@@ -254,17 +254,29 @@ tf-destroy:       ## Destroy all Terraform-managed resources (irreversible)
 # Cloud session lifecycle — run cloud-up before training, cloud-down after
 # ---------------------------------------------------------------------------
 # cloud-up:   starts Cloud SQL + provisions GKE + installs KubeRay (~10 min)
-# cloud-down: stops Cloud SQL + destroys GKE to eliminate idle billing
-# GKE Autopilot workers scale to zero between jobs, but Cloud SQL charges
-# for uptime — stop it when not actively training or demoing.
+# cloud-down: destroys GKE + NAT to eliminate idle billing (leaves Cloud SQL up)
+#
+# Cloud SQL is intentionally decoupled from cloud-down: MLflow + the API
+# (Cloud Run, scale-to-zero) depend on it, so stopping it breaks deploys, the
+# smoke test, and the live demo. The db-f1-micro tier costs ~$10/month running
+# 24/7 (~$8/month more than stopped, since 10GB storage is billed either way) —
+# cheap enough to leave on. The expensive infra is GKE Autopilot + GPU VMs,
+# which is what cloud-down tears down. Use cloud-db-stop only for long breaks
+# with no deploys or demos.
 
-cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preprocess/train/tune.
+cloud-db-start:   ## Start Cloud SQL (mlflow-pg) and wait for RUNNABLE. Needed for MLflow/API.
 	gcloud sql instances patch mlflow-pg --activation-policy=ALWAYS --async --quiet
 	@echo "Waiting for Cloud SQL to reach RUNNABLE state..."
 	@until [ "$$(gcloud sql instances describe mlflow-pg --format='value(state)' --quiet)" = "RUNNABLE" ]; do \
 		sleep 10; echo "  still waiting..."; \
 	done
 	@echo "Cloud SQL is RUNNABLE."
+
+cloud-db-stop:    ## Stop Cloud SQL (mlflow-pg). Breaks MLflow/API — only for long idle breaks.
+	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --async --quiet
+	@echo "Cloud SQL stop requested. MLflow + API will fail until cloud-db-start."
+
+cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-preprocess/train/tune.
 	terraform -chdir=infra apply \
 		-target=google_container_cluster.ray \
 		-target=google_compute_router.nat_router \
@@ -290,7 +302,7 @@ cloud-up:         ## Start Cloud SQL + provision GKE. Run before cloud-preproces
 		-auto-approve
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
-cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after training.
+cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQL up (see cloud-db-stop).
 	terraform -chdir=infra destroy \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_namespace.ray_system \
@@ -305,8 +317,8 @@ cloud-down:       ## Stop Cloud SQL + destroy GKE to stop billing. Run after tra
 	terraform -chdir=infra destroy \
 		-target=google_compute_router.nat_router \
 		-auto-approve
-	gcloud sql instances patch mlflow-pg --activation-policy=NEVER --async --quiet
-	@echo "Cloud SQL stopped. GKE destroyed. Cloud NAT destroyed."
+	@echo "GKE destroyed. Cloud NAT destroyed. Cloud SQL left RUNNING for MLflow/API."
+	@echo "To stop Cloud SQL as well (breaks deploys/demos): make cloud-db-stop"
 
 # ---------------------------------------------------------------------------
 # GCP one-time operations (Phase 10 — M6)
