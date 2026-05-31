@@ -199,14 +199,15 @@ def run_preprocessing(
 
     # Filter against suitability manifest if one exists. Channels flagged as
     # skip (empty/flat/constant) are excluded here rather than failing mid-run.
-    from pathlib import Path as _Path
-
+    # Pass the raw sample_data_dir string straight through — suitability_manifest_path
+    # calls to_upath internally. Wrapping in pathlib.Path first would collapse a
+    # gs:// URI to gs:/ and break the bucket parse.
     from spacecraft_telemetry.preprocess.profiler import (
         filter_channels as _filter_channels,
         suitability_manifest_path as _manifest_path,
     )
 
-    _manifest = _manifest_path(_Path(str(settings.data.sample_data_dir)), mission)
+    _manifest = _manifest_path(str(settings.data.sample_data_dir), mission)
     channel_list, _skipped = _filter_channels(channel_list, _manifest)
     if _skipped:
         log.info(
