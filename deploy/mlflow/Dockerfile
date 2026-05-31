@@ -12,11 +12,15 @@ RUN pip install --no-cache-dir \
 #   MLFLOW_ARTIFACTS_DESTINATION  gs://{project}-artifacts/mlflow
 ENV PORT=8080
 
+# 3 workers × (pool_size=3 + max_overflow=4) = 21 connections — under f1-micro's 25 hard cap.
+# gthread worker class required for --threads to actually enable concurrency;
+# default sync workers ignore the threads flag entirely.
 CMD mlflow server \
     --host 0.0.0.0 \
     --port "${PORT}" \
     --backend-store-uri "${BACKEND_STORE_URI}" \
     --default-artifact-root "${DEFAULT_ARTIFACT_ROOT}" \
     --no-serve-artifacts \
-    --workers 1 \
+    --workers 3 \
+    --gunicorn-opts "--threads 4 --worker-class gthread" \
     --allowed-hosts "*"
