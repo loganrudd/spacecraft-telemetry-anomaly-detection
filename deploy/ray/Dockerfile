@@ -13,6 +13,13 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 COPY configs/ configs/
 
+# load_settings() resolves the config dir relative to the INSTALLED package
+# location (site-packages), not WORKDIR — so without this it looks in
+# /usr/local/lib/python3.12/configs (nonexistent) and silently falls back to
+# model defaults, dropping every YAML-only setting (e.g. train_lookback).
+# Point it explicitly at the baked configs so cloud.yaml is actually read.
+ENV SPACECRAFT_CONFIG_DIR=/app/configs
+
 # Install CUDA-enabled PyTorch wheel before the rest of the package so pip
 # does not pull the CPU-only wheel from PyPI.  PyTorch CUDA wheels bundle
 # their own CUDA runtime libs; the host only needs to supply libcuda.so
