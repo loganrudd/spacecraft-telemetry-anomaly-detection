@@ -41,8 +41,12 @@ resource "google_cloud_run_v2_service" "mlflow" {
 
       resources {
         limits = {
-          cpu    = "1"
-          memory = "1Gi"
+          # 3 uvicorn workers need ~1.1 GiB (each ~360 MiB); 1Gi OOMs at startup.
+          # 2 vCPU lets workers run in parallel instead of time-slicing one core.
+          # NOTE: applied via `terraform apply` (Makefile), NOT deploy.yml — CI
+          # only updates the image. Memory/CPU changes require a manual TF apply.
+          cpu    = "2"
+          memory = "2Gi"
         }
       }
 

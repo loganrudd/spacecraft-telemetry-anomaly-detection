@@ -101,19 +101,12 @@ spec:
         maxReplicas: 1 # NVIDIA_L4_GPUS quota = 1
         rayStartParams: {}
         template:
-          metadata:
-            labels:
-              cloud.google.com/gke-spot: "true"
           spec:
             serviceAccountName: ray-sa
             nodeSelector:
               cloud.google.com/gke-accelerator: nvidia-l4
-              cloud.google.com/gke-spot: "true"
             tolerations:
               - key: nvidia.com/gpu
-                operator: Exists
-                effect: NoSchedule
-              - key: cloud.google.com/gke-spot
                 operator: Exists
                 effect: NoSchedule
             containers:

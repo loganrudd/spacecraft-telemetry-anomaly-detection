@@ -107,17 +107,8 @@ spec:
         maxReplicas: 15
         rayStartParams: {}
         template:
-          metadata:
-            labels:
-              cloud.google.com/gke-spot: "true"
           spec:
             serviceAccountName: ray-sa
-            nodeSelector:
-              cloud.google.com/gke-spot: "true"
-            tolerations:
-              - key: cloud.google.com/gke-spot
-                operator: Exists
-                effect: NoSchedule
             containers:
               - name: ray-worker
                 image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/training:latest
