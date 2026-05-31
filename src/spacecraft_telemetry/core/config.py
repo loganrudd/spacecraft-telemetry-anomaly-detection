@@ -67,6 +67,11 @@ class PreprocessingConfig(BaseModel):
     # training. The test window is always untouched. Accepts a pandas offset
     # alias (e.g. "730D" for 2 years). None = use all available history.
     train_lookback: str | None = None
+    # Channel suitability profiler thresholds (preprocess profile command).
+    # Channels failing either check are written as status=skip in the manifest
+    # and excluded from preprocessing.
+    profile_flat_threshold: float = 0.99   # frac_zero_diff at or above → flat/skip
+    profile_min_rows: int = 1000           # fewer numeric rows → empty/skip
 
     @field_validator("processed_data_dir", mode="before")
     @classmethod

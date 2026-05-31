@@ -10,7 +10,7 @@ RUN := $(UV) run
 
 .PHONY: help setup test test-all lint format typecheck \
         download-sample explore \
-        preprocess \
+        profile preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
         mlflow-server mlflow-ui mlflow-promote mlflow-promote-all cloud-deploy \
@@ -77,6 +77,9 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 # ---------------------------------------------------------------------------
 # Preprocessing (Phase 10.5 — pandas + Ray)
 # ---------------------------------------------------------------------------
+
+profile:          ## Profile raw channel suitability, write channel_suitability.json (MISSION=…)
+	$(RUN) spacecraft-telemetry preprocess profile --mission $(MISSION)
 
 preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
 	$(RUN) spacecraft-telemetry preprocess run \

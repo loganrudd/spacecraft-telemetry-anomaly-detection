@@ -197,6 +197,31 @@ def run_preprocessing(
         if not channel_list:
             raise FileNotFoundError(f"No channel Parquet files found in {channel_dir}")
 
+    # Filter against suitability manifest if one exists. Channels flagged as
+    # skip (empty/flat/constant) are excluded here rather than failing mid-run.
+    from pathlib import Path as _Path
+
+    from spacecraft_telemetry.preprocess.profiler import (
+        filter_channels as _filter_channels,
+        suitability_manifest_path as _manifest_path,
+    )
+
+    _manifest = _manifest_path(_Path(str(settings.data.sample_data_dir)), mission)
+    channel_list, _skipped = _filter_channels(channel_list, _manifest)
+    if _skipped:
+        log.info(
+            "pipeline.channels.skipped",
+            mission=mission,
+            n_skipped=len(_skipped),
+            channels=_skipped,
+            reason="channel_suitability manifest",
+        )
+    if not channel_list:
+        raise FileNotFoundError(
+            f"All channels for {mission} were filtered by the suitability manifest. "
+            "Run 'preprocess profile' to inspect, or delete channel_suitability.json to reset."
+        )
+
     # Read labels once; shared across all channels.
     labels_df: pd.DataFrame | None = None
     if labels_path.exists():

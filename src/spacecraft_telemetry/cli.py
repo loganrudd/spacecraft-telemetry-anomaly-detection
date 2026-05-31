@@ -352,6 +352,68 @@ def preprocess_run(
     click.echo(f"Test rows         : {summary['test_rows']:,}")
 
 
+@preprocess.command("profile")
+@click.option("--mission", required=True, help="Mission name to profile (e.g. ESA-Mission2).")
+@click.option("--env", default="local", show_default=True, help="Config environment.")
+def preprocess_profile(mission: str, env: str) -> None:
+    """Profile raw channel suitability and write channel_suitability.json.
+
+    Reads raw channel zips from data.raw_data_dir/{mission}/channels/ and
+    classifies each channel as ok, empty, constant, or flat. The manifest is
+    written to data.sample_data_dir/{mission}/channel_suitability.json — the
+    same directory that exists identically in cloud (gs://…/sample/{mission}/),
+    so 'preprocess run' picks it up automatically without any separate upload step.
+
+    No download-sample step is required — reads raw zips directly.
+    """
+    import json
+    from pathlib import Path
+
+    from spacecraft_telemetry.preprocess.profiler import (
+        profile_mission,
+        suitability_manifest_path,
+    )
+
+    settings = load_settings(env)
+    raw_data_dir = Path(str(settings.data.raw_data_dir))
+    sample_data_dir = Path(str(settings.data.sample_data_dir))
+
+    click.echo(f"Profiling {mission} (raw: {raw_data_dir / mission / 'channels'}) ...")
+
+    manifest = profile_mission(
+        raw_data_dir,
+        mission,
+        flat_threshold=settings.preprocess.profile_flat_threshold,
+        min_rows=settings.preprocess.profile_min_rows,
+    )
+
+    channels = manifest["channels"]
+    ok = [ch for ch, info in channels.items() if info["status"] == "ok"]
+    skip = [ch for ch, info in channels.items() if info["status"] == "skip"]
+
+    click.echo(f"\n{'Channel':20s} {'status':8s} {'rows':>10s} {'frac_flat':>10s} {'skip_reason'}")
+    click.echo("-" * 65)
+    for ch, info in sorted(channels.items()):
+        fz = f"{info['frac_zero_diff']:.3f}" if info["frac_zero_diff"] is not None else "—"
+        reason = info["skip_reason"] or ""
+        click.echo(
+            f"  {ch:18s} {info['status']:8s} {info['n_rows']:>10,} {fz:>10s} {reason}"
+        )
+
+    click.echo(f"\nSummary: {len(ok)} ok / {len(skip)} skipped")
+    by_reason: dict[str, list[str]] = {}
+    for ch in skip:
+        r = channels[ch]["skip_reason"] or "unknown"
+        by_reason.setdefault(r, []).append(ch)
+    for reason, chs in sorted(by_reason.items()):
+        click.echo(f"  {reason}: {', '.join(chs)}")
+
+    out = suitability_manifest_path(sample_data_dir, mission)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2))
+    click.echo(f"\nWritten: {out}")
+
+
 # ---------------------------------------------------------------------------
 # model group
 # ---------------------------------------------------------------------------
