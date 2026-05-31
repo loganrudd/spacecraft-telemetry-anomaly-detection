@@ -30,8 +30,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from upath import UPath
 
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.paths import to_upath
 
 log = get_logger(__name__)
 
@@ -218,19 +220,25 @@ def profile_mission(
 # ---------------------------------------------------------------------------
 
 
-def suitability_manifest_path(sample_data_dir: Path, mission: str) -> Path:
+def suitability_manifest_path(sample_data_dir: str | Path, mission: str) -> UPath:
     """Standard path for the suitability manifest.
 
     Lives in sample_data_dir (not raw_data_dir) so the same path works both
     locally (data/sample/{mission}/) and in cloud (gs://…/sample/{mission}/).
     The profiler writes here; the pipeline and cloud preprocess read from here.
+
+    Uses to_upath so a gs:// sample_data_dir round-trips correctly — plain
+    pathlib.Path collapses "gs://" to "gs:/" and cannot stat/read GCS.
     """
-    return Path(sample_data_dir) / mission / "channel_suitability.json"
+    return to_upath(str(sample_data_dir)) / mission / "channel_suitability.json"
 
 
-def load_suitability_manifest(manifest_path: Path) -> dict[str, str]:
-    """Return {channel: status} from a manifest file; empty dict if absent."""
-    p = Path(manifest_path)
+def load_suitability_manifest(manifest_path: str | Path) -> dict[str, str]:
+    """Return {channel: status} from a manifest file; empty dict if absent.
+
+    Reads through to_upath so gs:// URIs work in the cloud preprocess RayJob.
+    """
+    p = to_upath(str(manifest_path))
     if not p.exists():
         return {}
     data = json.loads(p.read_text())
