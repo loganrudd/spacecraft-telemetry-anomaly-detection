@@ -20,6 +20,7 @@ preprocess:
   normalization: z-score
   gap_multiplier: 3.0
   feature_windows: [3, 5]  # small for fast tests
+  train_lookback: "730D"
 
 model:
   hidden_dim: 16

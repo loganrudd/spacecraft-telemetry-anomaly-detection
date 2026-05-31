@@ -125,18 +125,25 @@ def normalize(
 def temporal_train_test_split(
     df: pd.DataFrame,
     train_fraction: float = 0.8,
+    train_lookback: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split a DataFrame into train and test sets using a timestamp cutoff.
 
     The cutoff is:
         min_ts + train_fraction * (max_ts - min_ts)
 
-    Rows at or before the cutoff → train; rows after → test. This is a temporal
-    (non-random) split applied per channel.
+    Rows at or before the cutoff → train; rows after → test. The test window
+    is always the full 20% tail — it is never affected by train_lookback.
+
+    When train_lookback is set (a pandas offset alias, e.g. "730D"), only the
+    most recent `train_lookback` of data before the cutoff is kept for training.
+    This caps stale history without touching the evaluation window.
 
     Args:
         df:             DataFrame with 'telemetry_timestamp' column.
         train_fraction: Fraction of the time range assigned to training.
+        train_lookback: Optional pandas offset alias capping how far back
+                        training data reaches (e.g. "730D" for 2 years).
 
     Returns:
         (train_df, test_df)
@@ -146,12 +153,18 @@ def temporal_train_test_split(
     max_ts = ts.max()
     cutoff = min_ts + train_fraction * (max_ts - min_ts)
 
-    train = df[ts <= cutoff].reset_index(drop=True)
+    train = df[ts <= cutoff]
+    if train_lookback is not None:
+        lookback_start = cutoff - pd.Timedelta(train_lookback)
+        train = train[train["telemetry_timestamp"] >= lookback_start]
+
+    train = train.reset_index(drop=True)
     test = df[ts > cutoff].reset_index(drop=True)
 
     log.info(
         "temporal_train_test_split",
         train_fraction=train_fraction,
+        train_lookback=train_lookback,
         train_rows=len(train),
         test_rows=len(test),
     )

@@ -8,7 +8,7 @@ data:
     - ESA-Mission1
     - ESA-Mission2
     - ESA-Mission3
-  sample_fraction: 1.0
+  sample_fraction: 0.01
   sample_channels: 1 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
 logging:
@@ -21,14 +21,15 @@ preprocess:
   normalization: z-score
   gap_multiplier: 3.0
   feature_windows: [10, 50, 100]
+  train_lookback: "730D"
 
 model:
   hidden_dim: 80
   num_layers: 2
   dropout: 0.3
   learning_rate: 0.001
-  batch_size: 512
-  epochs: 10
+  batch_size: 256
+  epochs: 1
   window_size: 250
   prediction_horizon: 1
   early_stopping_patience: 5

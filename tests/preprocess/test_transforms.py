@@ -269,6 +269,40 @@ class TestTemporalTrainTestSplit:
         train, test = temporal_train_test_split(shuffled)
         assert train["telemetry_timestamp"].max() < test["telemetry_timestamp"].min()
 
+    def test_train_lookback_caps_train_window(self) -> None:
+        """train_lookback keeps only the tail of the training window; test is unchanged."""
+        # 100 rows spanning 100 days; 80/20 split → cutoff at day 80.
+        df = _make_channel_df(n=100, freq="1D")
+        train_full, test_full = temporal_train_test_split(df, train_fraction=0.8)
+        train_cap, test_cap = temporal_train_test_split(
+            df, train_fraction=0.8, train_lookback="30D"
+        )
+        # Test window is identical.
+        assert len(test_cap) == len(test_full)
+        assert test_cap["telemetry_timestamp"].min() == test_full["telemetry_timestamp"].min()
+        # Training window is shorter.
+        assert len(train_cap) < len(train_full)
+        # Capped training rows all fall within 30 days before the cutoff.
+        cutoff = df["telemetry_timestamp"].min() + 0.8 * (
+            df["telemetry_timestamp"].max() - df["telemetry_timestamp"].min()
+        )
+        lookback_start = cutoff - pd.Timedelta("30D")
+        assert (train_cap["telemetry_timestamp"] >= lookback_start).all()
+
+    def test_train_lookback_none_is_noop(self) -> None:
+        df = _make_channel_df(n=50)
+        train_a, test_a = temporal_train_test_split(df, train_fraction=0.8)
+        train_b, test_b = temporal_train_test_split(df, train_fraction=0.8, train_lookback=None)
+        assert len(train_a) == len(train_b)
+        assert len(test_a) == len(test_b)
+
+    def test_train_lookback_longer_than_history_keeps_all(self) -> None:
+        """A lookback longer than the training window keeps all training rows."""
+        df = _make_channel_df(n=50)
+        train_full, _ = temporal_train_test_split(df, train_fraction=0.8)
+        train_cap, _ = temporal_train_test_split(df, train_fraction=0.8, train_lookback="9999D")
+        assert len(train_cap) == len(train_full)
+
 
 # ---------------------------------------------------------------------------
 # label_timesteps

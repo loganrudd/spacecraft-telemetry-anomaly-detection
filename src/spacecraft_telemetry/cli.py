@@ -994,7 +994,8 @@ def mlflow_group() -> None:
 @click.option(
     "--mission",
     default=None,
-    help="Mission name. Required with --channels or --channels-from.",
+    help="Mission name. Alone → discovers all registered models for the mission. "
+         "Required with --channels, --channels-from, or --subsystem.",
 )
 @click.option(
     "--channels",
@@ -1007,6 +1008,11 @@ def mlflow_group() -> None:
     default=None,
     help="Path to channels.txt (local or gs://). Promotes telemanom-{MISSION}-{channel} "
          "for every channel in the file. Requires --mission.",
+)
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Filter to channels belonging to this subsystem. Requires --mission.",
 )
 @click.option(
     "--version",
@@ -1022,6 +1028,7 @@ def mlflow_promote(
     mission: str | None,
     channels: str | None,
     channels_from: str | None,
+    subsystem: str | None,
     model_version: int | None,
 ) -> None:
     """Set the @champion alias on a model version, marking it ready to serve.
@@ -1031,11 +1038,20 @@ def mlflow_promote(
         spacecraft-telemetry mlflow promote --name telemanom-ESA-Mission2-channel_1
         spacecraft-telemetry mlflow promote --mission ESA-Mission2 --channels channel_1
 
-    Bulk form (all channels in a mission):
+    Bulk form — discover all registered models for a mission:
+
+        spacecraft-telemetry --env cloud mlflow promote --mission ESA-Mission2
+
+    Bulk form — specific channels from a manifest file:
 
         spacecraft-telemetry --env cloud mlflow promote \\
             --mission ESA-Mission2 \\
             --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
+
+    Bulk form — filter by subsystem:
+
+        spacecraft-telemetry --env cloud mlflow promote \\
+            --mission ESA-Mission2 --subsystem subsystem_1
     """
     import mlflow
 
@@ -1045,7 +1061,7 @@ def mlflow_promote(
     tracking_uri = settings.mlflow.tracking_uri
     mlflow.set_tracking_uri(tracking_uri)
 
-    # Resolve channel list from --channels or --channels-from.
+    # Resolve channel list from --channels, --channels-from, or registry discovery.
     channel_list: list[str] | None = None
     if channels is not None and channels_from is not None:
         raise click.ClickException("--channels and --channels-from are mutually exclusive.")
@@ -1053,12 +1069,26 @@ def mlflow_promote(
         channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
+    elif mission is not None and name is None:
+        # Discover all registered models for this mission directly from the registry.
+        prefix = f"telemanom-{mission}-"
+        client = mlflow.tracking.MlflowClient()
+        all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
+        discovered = sorted({v.name[len(prefix):] for v in all_versions})
+        if not discovered:
+            raise click.ClickException(
+                f"No registered models found matching '{prefix}*'. "
+                "Train at least one channel before promoting."
+            )
+        channel_list = discovered
 
     if channel_list is not None:
         if mission is None:
             raise click.ClickException("--mission is required when using --channels or --channels-from.")
         if name is not None:
             raise click.ClickException("--name is mutually exclusive with --channels/--channels-from.")
+        if subsystem is not None:
+            channel_list = _filter_channels_by_subsystem(settings, mission, channel_list, subsystem)
 
         ok, failed = 0, []
         for channel in channel_list:
@@ -1070,6 +1100,8 @@ def mlflow_promote(
                 failed.append((channel, str(exc)))
 
         click.echo(f"Mission       : {mission}")
+        if subsystem:
+            click.echo(f"Subsystem     : {subsystem}")
         click.echo(f"Promoted      : {ok}/{len(channel_list)}")
         click.echo(f"Alias         : @{CHAMPION_ALIAS}")
         click.echo(f"Tracking URI  : {tracking_uri}")
@@ -1082,7 +1114,7 @@ def mlflow_promote(
 
     if name is None:
         raise click.ClickException(
-            "Provide --name, or --mission with --channels or --channels-from."
+            "Provide --name, --mission, or --mission with --channels/--channels-from."
         )
 
     try:

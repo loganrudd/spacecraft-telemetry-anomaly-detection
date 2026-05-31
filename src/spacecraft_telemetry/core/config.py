@@ -62,6 +62,11 @@ class PreprocessingConfig(BaseModel):
     normalization: Literal["z-score"] = "z-score"
     gap_multiplier: float = 3.0
     feature_windows: list[int] = [10, 50, 100]
+    # Optional lookback cap on the training window. When set, only the most
+    # recent `train_lookback` of data before the train/test cutoff is used for
+    # training. The test window is always untouched. Accepts a pandas offset
+    # alias (e.g. "730D" for 2 years). None = use all available history.
+    train_lookback: str | None = None
 
     @field_validator("processed_data_dir", mode="before")
     @classmethod

@@ -955,6 +955,85 @@ class TestMlflowCli:
         assert result.exit_code != 0
         assert "No versions found" in result.output
 
+    def test_mlflow_promote_all_discovers_from_registry(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission alone discovers all registered models from the registry."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        def make_version(name: str, ver: str) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            return mv
+
+        channel_ids = ["channel_1", "channel_10", "channel_11"]
+        mission = "ESA-Mission1"
+        prefix = f"telemanom-{mission}-"
+        discovery_versions = [make_version(f"{prefix}{ch}", "1") for ch in channel_ids]
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            # First call: registry discovery. Subsequent calls: per-model version lookup.
+            per_model_version = make_version("", "1")
+            mock_client.search_model_versions.side_effect = (
+                lambda q: discovery_versions if "LIKE" in q else [per_model_version]
+            )
+            mock_client.set_registered_model_alias.return_value = None
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", mission],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert f"Promoted      : {len(channel_ids)}/{len(channel_ids)}" in result.output
+        assert mock_client.set_registered_model_alias.call_count == len(channel_ids)
+
+    def test_mlflow_promote_all_no_registered_models_errors(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission with no registered models raises a clear error."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.return_value = []
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", "ESA-Mission1"],
+            )
+
+        assert result.exit_code != 0
+        assert "No registered models found" in result.output
+
 
 # ---------------------------------------------------------------------------
 # drift group

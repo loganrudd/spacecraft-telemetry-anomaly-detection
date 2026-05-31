@@ -83,7 +83,9 @@ def _preprocess_channel(
     del labeled
 
     train_series, test_series = temporal_train_test_split(
-        series_df, train_fraction=settings.preprocess.train_fraction
+        series_df,
+        train_fraction=settings.preprocess.train_fraction,
+        train_lookback=settings.preprocess.train_lookback,
     )
     del series_df
 
