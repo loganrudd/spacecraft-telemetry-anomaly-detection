@@ -317,8 +317,10 @@ def score_all_channels(
     # metric independent of any HPO comparison.
     eval_split = "final_portion"
 
+    # Scoring is pure-numpy + CPU inference — never request GPU resources,
+    # regardless of the global num_gpus_per_task setting (which is for training).
     score_task = make_score_task(
-        num_gpus=settings.ray.num_gpus_per_task,
+        num_gpus=0.0,
         max_retries=settings.ray.max_retries,
     )
     futures = [
