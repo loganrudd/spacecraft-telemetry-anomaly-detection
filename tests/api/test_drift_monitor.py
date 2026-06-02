@@ -40,7 +40,6 @@ def _make_monitor(
     reference: pd.DataFrame | None = None,
     window_size: int = _WINDOW_SIZE,
     tick_interval: int = _TICK_INTERVAL,
-    stattest: str = "wasserstein",
 ) -> RollingDriftMonitor:
     ref = reference if reference is not None else _make_reference()
     return RollingDriftMonitor(
@@ -48,7 +47,6 @@ def _make_monitor(
         reference=ref,
         window_size=window_size,
         tick_interval=tick_interval,
-        stattest=stattest,
         feature_drift_threshold=0.10,
         channel_drift_threshold=0.30,
     )
@@ -190,14 +188,14 @@ async def test_run_returns_snapshot_when_nominal() -> None:
     assert snapshot.percent_drifted < 0.30
 
 
-def test_col_mapping_covers_realtime_feature_cols() -> None:
-    """_col_mapping.numerical_features must match REALTIME_FEATURE_COLS exactly.
+def test_monitor_tracks_realtime_feature_cols() -> None:
+    """Reference is subsetted to REALTIME_FEATURE_COLS on construction.
 
     If a future REALTIME_FEATURE_COLS change adds or removes a column, this test
-    will catch the mismatch before it silently changes what Evidently monitors.
+    will catch the mismatch before it silently changes what the monitor computes.
     """
     monitor = _make_monitor()
-    assert monitor._col_mapping.numerical_features == list(REALTIME_FEATURE_COLS)
+    assert list(monitor._reference.columns) == list(REALTIME_FEATURE_COLS)
 
 
 @pytest.mark.asyncio
@@ -205,8 +203,9 @@ def test_col_mapping_covers_realtime_feature_cols() -> None:
 async def test_full_nan_window_does_not_raise() -> None:
     """Pushing a full window of {} rows (all-NaN) must not raise during run().
 
-    Evidently may return NaN drift scores on constant-value columns — the monitor
-    must survive this and return a snapshot (not raise or return None).
+    All-NaN value_normalized → diff() stays NaN → dropna() gives empty array
+    → score=0, drifted=False for every column. Monitor must survive and return
+    a zero-score snapshot rather than raise or return None.
     """
     monitor = _make_monitor(window_size=_WINDOW_SIZE, tick_interval=_WINDOW_SIZE)
     for _ in range(_WINDOW_SIZE):

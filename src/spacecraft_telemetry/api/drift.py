@@ -1,15 +1,21 @@
 """Real-time rolling drift monitor for the FastAPI serving layer (Plan 0095).
 
 ``RollingDriftMonitor`` maintains a fixed-size rolling window of telemetry ticks
-for a single channel and periodically computes Evidently drift scores against a
+for a single channel and periodically computes Wasserstein drift scores against a
 reference profile loaded at startup.
+
+Evidently is NOT used on the hot serving path — only scipy is. At 100-1000× replay
+speeds, the ~58ms Evidently Report overhead per run would saturate the thread pool
+and cap effective replay speed. Direct scipy gives the same statistic in <1ms.
+Evidently is retained for batch reports (evidently_monitoring/reports.py) where
+the HTML report is the actual deliverable.
 
 Public API
 ----------
 FeatureDrift
-    Per-feature drift score and flag for one Evidently run.
+    Per-feature drift score and flag for one drift run.
 DriftSnapshot
-    Aggregate result from one Evidently run for a single channel.
+    Aggregate result from one drift run for a single channel.
 RollingDriftMonitor
     Stateful monitor: push ticks, check cadence, run drift asynchronously.
 """
@@ -17,15 +23,13 @@ RollingDriftMonitor
 from __future__ import annotations
 
 import asyncio
-import warnings
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import numpy as np
 import pandas as pd
-from evidently.legacy.metric_preset import DataDriftPreset
-from evidently.legacy.pipeline.column_mapping import ColumnMapping
-from evidently.legacy.report import Report
+from scipy import stats
 
 from spacecraft_telemetry.evidently_monitoring.reference import REALTIME_FEATURE_COLS
 
@@ -35,13 +39,13 @@ class FeatureDrift:
     """Drift result for a single monitored feature column."""
 
     feature: str
-    score: float    # Wasserstein distance (normed) — stattest pinned in DriftConfig
-    drifted: bool   # True if Wasserstein distance > feature_drift_threshold
+    score: float    # Wasserstein distance (normed): W1(ref, cur) / std(ref)
+    drifted: bool   # True if score >= feature_drift_threshold
 
 
 @dataclass
 class DriftSnapshot:
-    """Aggregate drift result for one channel from a single Evidently run."""
+    """Aggregate drift result for one channel from a single drift run."""
 
     timestamp: datetime
     channel: str
@@ -51,25 +55,25 @@ class DriftSnapshot:
 
 
 class RollingDriftMonitor:
-    """Maintains a rolling window per channel and runs Evidently periodically.
+    """Maintains a rolling window per channel and computes Wasserstein drift periodically.
 
     Each ``push`` appends one telemetry tick to the internal deque
     (evicting the oldest tick once ``window_size`` is reached).
     ``should_run`` returns True every ``tick_interval`` ticks once the
-    window is full.  ``run`` offloads the Evidently ``Report.run()`` call to a
-    thread via ``asyncio.to_thread`` so the event loop is never blocked.
+    window is full.  ``run`` offloads the scipy computation to a thread
+    via ``asyncio.to_thread`` so the event loop is never blocked.
+
+    Drift is computed as normed Wasserstein distance per feature column,
+    matching the formula used by Evidently's batch reports:
+        score = scipy.stats.wasserstein_distance(ref, cur) / max(std(ref), 0.001)
+    This keeps batch and real-time scores directly comparable.
 
     Args:
         channel:                 Channel identifier string.
         reference:               Reference-profile DataFrame (MONITORING_FEATURE_COLS columns).
         window_size:             Rolling window capacity in ticks.
-        tick_interval:           Number of ticks between Evidently runs.
-        stattest:                Evidently numerical stattest name (e.g. ``"wasserstein"``).
-                                 Pinned explicitly so test selection is deterministic
-                                 regardless of reference size.
-        feature_drift_threshold: Wasserstein distance (normed) threshold passed to
-                                 ``DataDriftPreset(num_stattest_threshold=...)``.
-                                 Lower values = stricter per-feature drift detection.
+        tick_interval:           Number of ticks between drift runs.
+        feature_drift_threshold: Normed Wasserstein distance threshold for per-feature drift.
         channel_drift_threshold: Fraction of features that must drift to flag the channel.
     """
 
@@ -80,7 +84,6 @@ class RollingDriftMonitor:
         reference: pd.DataFrame,
         window_size: int,
         tick_interval: int,
-        stattest: str,
         feature_drift_threshold: float,
         channel_drift_threshold: float,
     ) -> None:
@@ -89,11 +92,9 @@ class RollingDriftMonitor:
         self._window: deque[dict[str, float]] = deque(maxlen=window_size)
         self._window_size = window_size
         self._tick_interval = tick_interval
-        self._stattest = stattest
         self._feature_drift_threshold = feature_drift_threshold
         self._channel_drift_threshold = channel_drift_threshold
         self._tick_count: int = 0
-        self._col_mapping = ColumnMapping(numerical_features=REALTIME_FEATURE_COLS)
 
     def push(self, row: dict[str, float]) -> None:
         """Append one tick's values to the rolling window.
@@ -116,9 +117,8 @@ class RollingDriftMonitor:
     async def run(self) -> DriftSnapshot | None:
         """Compute drift against the reference profile.
 
-        Off-loads ``Report.run()`` (≈58 ms p50) to a thread pool executor via
-        ``asyncio.to_thread`` so the event loop is never blocked for more than a
-        few microseconds.
+        Off-loads scipy computation (<1ms p50) to a thread pool executor via
+        ``asyncio.to_thread`` so the event loop is never blocked.
 
         Returns:
             A ``DriftSnapshot`` if the window is full, else ``None``.
@@ -130,64 +130,45 @@ class RollingDriftMonitor:
 
     @staticmethod
     def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
-        """Fill rate_of_change from value_normalized.
+        """Fill rate_of_change from value_normalized diffs.
 
-        The tick bus only pushes value_normalized; rate_of_change is derived here
-        so Evidently receives a non-NaN column.  Rolling stats (rolling_mean_*, etc.)
-        are deliberately excluded from real-time comparison — their distributions are
-        only reliable when the buffer is much longer than the rolling window period,
-        which cannot be guaranteed at serve time.  See REALTIME_FEATURE_COLS.
+        The tick bus only pushes value_normalized; rate_of_change is derived here.
+        NaN is intentionally not filled: the first-row NaN from diff() and any
+        all-NaN windows are handled by dropna() in _compute_drift, which returns
+        score=0 for empty arrays rather than computing against spurious zeros.
+        Rolling stats (rolling_mean_*, etc.) are deliberately excluded from
+        real-time comparison — their distributions are only reliable when the
+        buffer is much longer than the rolling window period.  See REALTIME_FEATURE_COLS.
         """
-        df["rate_of_change"] = df["value_normalized"].diff().fillna(0.0)
+        df["rate_of_change"] = df["value_normalized"].diff()
         return df
 
     def _compute_drift(self, current: pd.DataFrame) -> DriftSnapshot:
-        """Run Evidently synchronously — called from a thread pool worker."""
+        """Compute normed Wasserstein distance per feature via scipy.
+
+        Mirrors the formula in Evidently's wasserstein_distance_norm.py exactly:
+            score = wasserstein_distance(ref, cur) / max(std(ref), 0.001)
+        so scores are directly comparable to batch drift reports.
+        Empty columns (all-NaN flatlined channel) return score=0, drifted=False.
+        """
         current = self._add_rolling_features(current)
-        report = Report(
-            metrics=[DataDriftPreset(
-                num_stattest=self._stattest,
-                num_stattest_threshold=self._feature_drift_threshold,
-            )]
-        )
-        try:
-            with warnings.catch_warnings():
-                # Evidently triggers numpy divide-by-zero warnings on constant-value
-                # columns (zero variance).  These are benign and would spam logs at
-                # every drift evaluation for flat-signal channels.
-                warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
-                report.run(
-                    reference_data=self._reference,
-                    current_data=current[REALTIME_FEATURE_COLS],
-                    column_mapping=self._col_mapping,
-                )
-            # Evidently defers computation errors until as_dict() is called —
-            # report.run() succeeds but raises on result extraction.
-            by_name = {m["metric"]: m["result"] for m in report.as_dict()["metrics"]}
-        except ValueError:
-            # Raised when a column is entirely NaN (e.g. a channel that has
-            # flat-lined and produced no valid readings for the entire window).
-            # Return a zero-score, non-drifted snapshot so the pump task survives.
-            features = [
-                FeatureDrift(feature=col, score=0.0, drifted=False)
-                for col in REALTIME_FEATURE_COLS
-            ]
-            return DriftSnapshot(
-                timestamp=datetime.now(UTC),
-                channel=self._channel,
-                features=features,
-                percent_drifted=0.0,
-                drifted=False,
-            )
+        features: list[FeatureDrift] = []
 
-        drift_table = by_name["DataDriftTable"]["drift_by_columns"]
-
-        features = []
         for col in REALTIME_FEATURE_COLS:
-            col_info = drift_table.get(col, {})
-            score = float(col_info.get("drift_score", 0.0))
-            drifted = bool(col_info.get("drift_detected", False))
-            features.append(FeatureDrift(feature=col, score=score, drifted=drifted))
+            ref_vals = self._reference[col].dropna().to_numpy(dtype=float)
+            cur_vals = current[col].dropna().to_numpy(dtype=float)
+
+            if len(ref_vals) == 0 or len(cur_vals) == 0:
+                features.append(FeatureDrift(feature=col, score=0.0, drifted=False))
+                continue
+
+            norm = max(float(np.std(ref_vals)), 0.001)
+            score = float(stats.wasserstein_distance(ref_vals, cur_vals)) / norm
+            features.append(FeatureDrift(
+                feature=col,
+                score=score,
+                drifted=score >= self._feature_drift_threshold,
+            ))
 
         n_drifted = sum(f.drifted for f in features)
         percent_drifted = n_drifted / len(features) if features else 0.0
