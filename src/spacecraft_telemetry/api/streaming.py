@@ -130,7 +130,8 @@ async def _merge_queues(
             g.cancel()
         disc_task.cancel()
         watcher.cancel()
-        await asyncio.gather(*getters.values(), disc_task, watcher, return_exceptions=True)
+        await asyncio.gather(*getters.values(), return_exceptions=True)
+        await asyncio.gather(disc_task, watcher, return_exceptions=True)
         for pump_task in tasks.values():
             pump_task.cancel()
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)

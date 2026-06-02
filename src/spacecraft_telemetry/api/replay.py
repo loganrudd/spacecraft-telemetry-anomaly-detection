@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from upath import UPath
 
 from spacecraft_telemetry.model.dataset import load_series_parquet
 
@@ -21,7 +22,7 @@ ReplayData = tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, A
 
 
 async def replay_channel(
-    processed_dir: Path,
+    processed_dir: Path | UPath | str,
     mission: str,
     channel: str,
     speed: float,
