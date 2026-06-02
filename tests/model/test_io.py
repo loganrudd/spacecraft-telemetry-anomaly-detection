@@ -27,6 +27,7 @@ from spacecraft_telemetry.model.io import (  # noqa: E402
     ScoringParams,
     bytes_to_errors,
     download_artifact_bytes,
+    ModelNotFoundError,
     errors_to_bytes,
     find_latest_run_for_channel,
     load_model_for_scoring,
@@ -166,9 +167,13 @@ def test_load_model_for_scoring_returns_model_and_window_size(_mlflow_uri: str) 
 
 
 def test_load_model_for_scoring_raises_when_no_version(_mlflow_uri: str) -> None:
-    """load_model_for_scoring raises RuntimeError when no registered versions exist."""
+    """load_model_for_scoring raises ModelNotFoundError when no versions exist.
+
+    Distinct from RuntimeError so the Ray score task can map it to status=skipped
+    and the serving layer can skip the channel rather than crash at startup.
+    """
     mlflow.set_tracking_uri(_mlflow_uri)
-    with pytest.raises(RuntimeError, match="No registered versions found"):
+    with pytest.raises(ModelNotFoundError, match="No registered versions found"):
         load_model_for_scoring("nonexistent-model", torch.device("cpu"), _mlflow_uri)
 
 

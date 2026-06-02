@@ -118,8 +118,13 @@ def test_score_task_ok(ray_local, pretrained_channel) -> None:
 
 
 @pytest.mark.slow
-def test_score_task_error_on_missing_model(ray_local, ray_series_parquet) -> None:
-    """score task should return status='error' when no model artifact exists."""
+def test_score_task_skipped_on_missing_model(ray_local, ray_series_parquet) -> None:
+    """score task returns status='skipped' (not 'error') when no model exists.
+
+    A channel with no registered model is an expected outcome of partial
+    training (e.g. a smoke test). It must be distinguishable from a genuine
+    scoring failure so real errors stay visible and don't fail the sweep.
+    """
     pytest.importorskip("ray")
     import ray
 
@@ -130,5 +135,8 @@ def test_score_task_error_on_missing_model(ray_local, ray_series_parquet) -> Non
     settings_ref = ray.put(settings)
     result = cast(dict[str, Any], ray.get(task.remote(settings_ref, "ESA-Mission1", "channel_99")))
 
-    assert result["status"] == "error"
-    assert result["error_msg"] is not None
+    assert result["status"] == "skipped"
+    assert result["error_msg"] is not None  # carries the "no model" reason
+    # Metric fields present but null, so the CLI summary can render uniformly.
+    assert result["f0_5"] is None
+    assert result["seg_f0_5"] is None

@@ -330,7 +330,14 @@ def score_all_channels(
     results: list[dict[str, Any]] = ray.get(futures)
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
-    n_err = len(results) - n_ok
-    log.info("ray.score.sweep.end", mission=mission, n_ok=n_ok, n_error=n_err)
+    n_skipped = sum(1 for r in results if r["status"] == "skipped")
+    n_err = len(results) - n_ok - n_skipped
+    log.info(
+        "ray.score.sweep.end",
+        mission=mission,
+        n_ok=n_ok,
+        n_skipped=n_skipped,
+        n_error=n_err,
+    )
 
     return results

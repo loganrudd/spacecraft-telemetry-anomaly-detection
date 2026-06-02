@@ -311,6 +311,12 @@ cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQ
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
 		-auto-approve
+	@# Block until the ray namespace has fully terminated before destroying the
+	@# cluster. Namespace deletion waits on KubeRay finalizers and can lag the
+	@# terraform destroy return; a later cloud-up then races a still-Terminating
+	@# namespace and fails with "being terminated". Must run while the cluster
+	@# still exists (kubectl is unreachable once the cluster is gone).
+	kubectl wait --for=delete namespace/ray --timeout=300s || true
 	terraform -chdir=infra destroy \
 		-target=google_container_cluster.ray \
 		-auto-approve

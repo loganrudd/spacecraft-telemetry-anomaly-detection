@@ -866,10 +866,12 @@ def ray_score(
         )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
-    n_err = len(results) - n_ok
+    n_skipped = sum(1 for r in results if r["status"] == "skipped")
+    n_err = len(results) - n_ok - n_skipped
     click.echo(f"Mission  : {mission}")
     click.echo(f"Channels : {len(results)}")
     click.echo(f"OK       : {n_ok}")
+    click.echo(f"Skipped  : {n_skipped} (no trained model)")
     click.echo(f"Errors   : {n_err}")
     for r in results:
         if r["status"] == "ok":
@@ -882,11 +884,14 @@ def ray_score(
                 f"  [pruned ceiling segF0.5={r['pruned_seg_f0_5']:.3f}"
                 f", {int(r['pruned_n_pred_seqs'])} seqs]"
             )
+        elif r["status"] == "skipped":
+            click.echo(f"  {r['channel']:20s}  SKIPPED — no trained model")
         else:
             click.echo(f"  {r['channel']:20s}  ERROR")
             if r.get("error_msg"):
                 click.echo(r["error_msg"], err=True)
 
+    # Skipped channels do not fail the run — only genuine scoring errors do.
     if n_err:
         raise SystemExit(1)
 

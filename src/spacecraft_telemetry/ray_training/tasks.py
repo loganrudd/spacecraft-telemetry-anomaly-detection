@@ -20,8 +20,11 @@ Task result dict schema
 Both train and score tasks return a flat dict with these keys:
 
     channel     str             channel ID
-    status      "ok" | "error"
-    error_msg   str | None      traceback string on error, else None
+    status      "ok" | "error" | "skipped"
+                                "skipped" = no trained model for this channel
+                                (expected for untrained channels); distinct from
+                                "error" so real failures stay visible.
+    error_msg   str | None      traceback on error / reason on skip, else None
 
 Train-only keys (None on error):
     best_epoch      int | None
@@ -121,6 +124,7 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
         # Ray auto-dereferences ObjectRefs passed to .remote() — settings is
         # already the Settings object, not a ref.
         typed_settings: Settings = settings
+        from spacecraft_telemetry.model.io import ModelNotFoundError
         try:
             from typing import Literal, cast
 
@@ -139,29 +143,39 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
                 "error_msg": None,
                 **metrics,
             }
+        except ModelNotFoundError as exc:
+            # Expected for untrained channels (e.g. partial/smoke-test training).
+            # Not an error — keeps real failures distinguishable in the summary.
+            log.info("ray.score.task.skipped", channel=channel, reason=str(exc))
+            return _null_score_result(channel, status="skipped", error_msg=str(exc))
         except Exception:
             tb = traceback.format_exc()
             log.error("ray.score.task.failed", channel=channel, traceback=tb)
-            return {
-                "channel": channel,
-                "status": "error",
-                "error_msg": tb,
-                "precision": None,
-                "recall": None,
-                "f1": None,
-                "f0_5": None,
-                "n_true_positive_labels": None,
-                "n_predicted_positive_labels": None,
-                "seg_precision": None,
-                "seg_recall": None,
-                "seg_f1": None,
-                "seg_f0_5": None,
-                "n_true_seqs": None,
-                "n_pred_seqs": None,
-                "pruned_seg_precision": None,
-                "pruned_seg_recall": None,
-                "pruned_seg_f0_5": None,
-                "pruned_n_pred_seqs": None,
-            }
+            return _null_score_result(channel, status="error", error_msg=tb)
 
     return _score
+
+
+def _null_score_result(channel: str, *, status: str, error_msg: str | None) -> dict[str, Any]:
+    """Result dict with all metric fields None — shared by skipped/error cases."""
+    return {
+        "channel": channel,
+        "status": status,
+        "error_msg": error_msg,
+        "precision": None,
+        "recall": None,
+        "f1": None,
+        "f0_5": None,
+        "n_true_positive_labels": None,
+        "n_predicted_positive_labels": None,
+        "seg_precision": None,
+        "seg_recall": None,
+        "seg_f1": None,
+        "seg_f0_5": None,
+        "n_true_seqs": None,
+        "n_pred_seqs": None,
+        "pruned_seg_precision": None,
+        "pruned_seg_recall": None,
+        "pruned_seg_f0_5": None,
+        "pruned_n_pred_seqs": None,
+    }

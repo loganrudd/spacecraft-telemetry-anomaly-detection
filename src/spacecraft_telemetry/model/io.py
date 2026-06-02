@@ -29,6 +29,16 @@ if TYPE_CHECKING:
     from spacecraft_telemetry.model.architecture import TelemanomLSTM
 
 
+class ModelNotFoundError(Exception):
+    """No registered model version exists for a channel.
+
+    Distinct from a genuine scoring failure: scoring a channel that was never
+    trained is an *expected* outcome of partial training (e.g. a smoke test
+    that trained 3 of 62 channels). Callers map this to status="skipped"
+    rather than status="error" so true failures stay visible.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Array serialisation helpers (called by scoring.py / tune.py)
 # ---------------------------------------------------------------------------
@@ -167,8 +177,9 @@ def load_model_for_scoring(
         length the model was trained on.
 
     Raises:
-        RuntimeError: If no registered versions exist, or (when
-            require_champion=True) no @champion alias is set.
+        ModelNotFoundError: If no registered versions exist for ``name`` (an
+            expected outcome for untrained channels; callers treat as skipped).
+        RuntimeError: When require_champion=True and no @champion alias is set.
     """
     import mlflow
     import mlflow.pytorch as mlflow_pytorch
@@ -180,7 +191,7 @@ def load_model_for_scoring(
 
     versions = client.search_model_versions(f"name='{name}'")
     if not versions:
-        raise RuntimeError(
+        raise ModelNotFoundError(
             f"No registered versions found for model {name!r}. "
             "Run 'model train' for this channel before serving."
         )

@@ -54,7 +54,11 @@ from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_na
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 from spacecraft_telemetry.model.dataset import load_series_parquet
 from spacecraft_telemetry.model.device import resolve_device
-from spacecraft_telemetry.model.io import load_model_for_scoring, load_scoring_params
+from spacecraft_telemetry.model.io import (
+    ModelNotFoundError,
+    load_model_for_scoring,
+    load_scoring_params,
+)
 
 # Maximum concurrent MLflow model loads during lifespan startup.  Unbounded
 # gather causes OOM or MLflow throttling at whole-mission scale (100+ channels).
@@ -70,6 +74,10 @@ _CHANNEL_LOAD_ERRORS = (
     ConnectionError,
     TimeoutError,
     RuntimeError,
+    # No registered version for this channel — expected when serving a mission
+    # whose channels weren't all trained. Not a RuntimeError subclass, so it must
+    # be listed explicitly or startup would crash instead of skipping the channel.
+    ModelNotFoundError,
 )
 
 
