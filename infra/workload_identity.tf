@@ -9,7 +9,11 @@ resource "kubernetes_service_account" "ray" {
     name      = "ray-sa"
     namespace = kubernetes_namespace.ray.metadata[0].name
     annotations = {
-      "iam.gke.io/google-service-account" = google_service_account.ray.email
+      # MUST be "gcp-service-account" — GKE Workload Identity only recognizes
+      # this exact key. "google-service-account" is silently ignored, leaving
+      # the KSA unlinked so the metadata server cannot mint ID tokens (causing
+      # 403s when Ray pods call the private MLflow Cloud Run service).
+      "iam.gke.io/gcp-service-account" = google_service_account.ray.email
     }
   }
 }
