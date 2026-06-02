@@ -35,8 +35,8 @@ class FeatureDrift:
     """Drift result for a single monitored feature column."""
 
     feature: str
-    score: float    # Wasserstein distance (Evidently default for numerical columns)
-    drifted: bool   # True if KS p-value < threshold
+    score: float    # Wasserstein distance (normed) — stattest pinned in DriftConfig
+    drifted: bool   # True if Wasserstein distance > feature_drift_threshold
 
 
 @dataclass

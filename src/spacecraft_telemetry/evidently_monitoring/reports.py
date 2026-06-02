@@ -127,7 +127,7 @@ def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:
 
         by_name["DataDriftTable"]
             ["drift_by_columns"]   : dict[str, dict]
-                [col]["drift_detected"]  : bool  (threshold applied to K-S p-value or Wasserstein distance)
+                [col]["drift_detected"]  : bool  (Wasserstein distance > threshold; stattest pinned)
 
     If the Evidently version changes and this path breaks, fix only here.
 
