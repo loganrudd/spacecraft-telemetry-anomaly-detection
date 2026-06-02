@@ -25,8 +25,9 @@ spec:
     bash -c 'spacecraft-telemetry --env cloud ray tune
     --mission ${MISSION}
     --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
-    && gsutil cp models/${MISSION}/tuned_configs.json
-    gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json'
+    && python -c "import gcsfs;
+    gcsfs.GCSFileSystem().put(\"models/${MISSION}/tuned_configs.json\",
+    \"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\")"'
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600

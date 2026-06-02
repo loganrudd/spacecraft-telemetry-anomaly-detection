@@ -15,12 +15,13 @@ Moving it here restores clean layering:
 from __future__ import annotations
 
 import csv
+import io
 import json
 from functools import lru_cache
-from pathlib import Path
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.paths import to_upath
 
 log = get_logger(__name__)
 
@@ -31,32 +32,36 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
     Lookup order:
     1) Processed metadata file:
        {preprocess.processed_data_dir}/{mission}/metadata/channel_subsystems.json
-    2) Raw metadata CSV fallback:
-       {data.raw_data_dir}/{mission}/channels.csv
+    2) CSV fallback (channels.csv) tried in BOTH the sample and raw dirs — in
+       cloud only the sample bucket exists; locally only raw has it.
 
     The processed metadata path keeps training/scoring metadata colocated with
     processed artifacts. CSV fallback is retained for backward compatibility.
 
-    Returns an empty dict (not an exception) when neither file exists — callers
+    Returns an empty dict (not an exception) when no source exists — callers
     treat the subsystem tag as optional/best-effort metadata.
 
-    The mapping is cached per (processed_dir, raw_dir, mission) tuple inside each
-    process.  Under Ray fan-out each worker process caches its own copy, so disk
-    reads are bounded to at most one read per file per process regardless of how
-    many channels that worker handles sequentially.
+    All paths go through to_upath so gs:// URIs resolve in the cloud (plain
+    pathlib mangles gs:// → gs:/ and cannot read GCS).
+
+    The mapping is cached per (processed_dir, sample_dir, raw_dir, mission)
+    tuple inside each process.  Under Ray fan-out each worker process caches its
+    own copy, so reads are bounded to one per file per process.
     """
-    processed_dir = str(Path(str(settings.preprocess.processed_data_dir)).resolve())
-    raw_dir = str(Path(str(settings.data.raw_data_dir)).resolve())
-    return _load_cached(processed_dir, raw_dir, mission)
+    return _load_cached(
+        str(settings.preprocess.processed_data_dir),
+        str(settings.data.sample_data_dir),
+        str(settings.data.raw_data_dir),
+        mission,
+    )
 
 
 @lru_cache(maxsize=32)
-def _load_cached(processed_dir: str, raw_dir: str, mission: str) -> dict[str, str]:
+def _load_cached(
+    processed_dir: str, sample_dir: str, raw_dir: str, mission: str
+) -> dict[str, str]:
     processed_map_path = (
-        Path(processed_dir)
-        / mission
-        / "metadata"
-        / "channel_subsystems.json"
+        to_upath(processed_dir) / mission / "metadata" / "channel_subsystems.json"
     )
     if processed_map_path.exists():
         try:
@@ -80,20 +85,24 @@ def _load_cached(processed_dir: str, raw_dir: str, mission: str) -> dict[str, st
                     path=str(processed_map_path),
                 )
 
-    # CSV fallback for compatibility with current preprocessing output.
-    csv_path = Path(raw_dir) / mission / "channels.csv"
-    if not csv_path.exists():
-        log.warning(
-            "channels.csv not found; tuned_configs will not be applied",
-            path=str(csv_path),
-        )
-        return {}
-    mapping: dict[str, str] = {}
-    with csv_path.open(newline="") as f:
-        reader = csv.DictReader(f)
+    # CSV fallback. Try sample dir first (the one that exists in cloud), then
+    # raw (local dev). Both via to_upath so gs:// resolves.
+    for base in (sample_dir, raw_dir):
+        csv_path = to_upath(base) / mission / "channels.csv"
+        if not csv_path.exists():
+            continue
+        mapping: dict[str, str] = {}
+        reader = csv.DictReader(io.StringIO(csv_path.read_text()))
         for row in reader:
             channel = row.get("Channel", "").strip()
             subsystem = row.get("Subsystem", "").strip()
             if channel and subsystem:
                 mapping[channel] = subsystem
-    return mapping
+        return mapping
+
+    log.warning(
+        "channels.csv not found; tuned_configs will not be applied",
+        sample_path=str(to_upath(sample_dir) / mission / "channels.csv"),
+        raw_path=str(to_upath(raw_dir) / mission / "channels.csv"),
+    )
+    return {}
