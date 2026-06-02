@@ -53,12 +53,20 @@ def predict(
     model: TelemanomLSTM,
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
     device: torch.device,
+    *,
+    channel: str | None = None,
+    log_every: int = 200,
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], np.ndarray[Any, np.dtype[np.float32]]]:
     """Run the LSTM forward over all batches; return (predictions, targets).
 
     Both arrays are shape (N,) float32 and in DataLoader iteration order
     (i.e. the same order as the window index, since the test loader does not
     shuffle).
+
+    Emits a ``batch X / total`` log line every ``log_every`` batches so a long
+    CPU inference pass (≈1M test windows/channel) is observable in the worker
+    logs rather than appearing hung. ``channel`` tags the line so concurrent
+    tasks on one node stay disambiguated. Pass ``log_every=0`` to silence.
     """
     import torch
 
@@ -66,12 +74,24 @@ def predict(
     all_preds: list[np.ndarray[Any, np.dtype[np.float32]]] = []
     all_targets: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
+    try:
+        n_batches = len(loader)
+    except TypeError:
+        n_batches = -1  # unsized loader; report -1 rather than failing
+
     with torch.no_grad():
-        for x, y in loader:
+        for i, (x, y) in enumerate(loader):
             x = x.to(device)
             pred: torch.Tensor = model(x).squeeze(1)
             all_preds.append(pred.cpu().numpy())
             all_targets.append(y.numpy())
+            if log_every and (i + 1) % log_every == 0:
+                log.info(
+                    "model.score.predict.progress",
+                    channel=channel,
+                    batch=i + 1,
+                    total=n_batches,
+                )
 
     predictions = np.concatenate(all_preds).astype(np.float32)
     targets = np.concatenate(all_targets).astype(np.float32)
@@ -359,6 +379,7 @@ def score_channel(
     # Load model from MLflow registry (single source of truth post-A1 pivot).
     # require_champion=False: scoring is a training-pipeline step, not serving;
     # we need to score a model before deciding whether to promote it.
+    log.info("model.score.start", channel=channel, mission=mission, device=str(device))
     name = registered_model_name(cfg.model_type, mission, channel)
     model, saved_window_size = load_model_for_scoring(
         name, device, settings.mlflow.tracking_uri, require_champion=False
@@ -369,11 +390,14 @@ def score_channel(
             f"value the model was trained on (window_size={saved_window_size}). "
             "Re-train with consistent settings."
         )
+    log.info("model.score.model_loaded", channel=channel)
 
     loader, _target_timestamps, is_anomaly = make_test_dataloader(
         settings, mission, channel
     )
-    preds, targets = predict(model, loader, device)
+    log.info("model.score.dataloader_ready", channel=channel, n_windows=len(is_anomaly))
+    preds, targets = predict(model, loader, device, channel=channel)
+    log.info("model.score.predict_done", channel=channel)
     errors = preds - targets
     smoothed = smooth_errors(errors, cfg.error_smoothing_window)
     threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)

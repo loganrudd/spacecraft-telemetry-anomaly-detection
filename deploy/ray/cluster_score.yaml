@@ -104,7 +104,11 @@ spec:
       - groupName: cpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 15
+        # 16 pods × 4 vCPU ÷ num_cpus=1 per task = ~64 concurrent score tasks,
+        # so a full 62-channel mission scores in one wave (~10 min). Fewer, larger
+        # nodes (vs 31×2vCPU) provision faster on Autopilot and cut per-node Ray
+        # daemon overhead. 64 vCPU + head is well under the regional CPUS quota (200).
+        maxReplicas: 16
         rayStartParams: {}
         template:
           spec:
@@ -124,9 +128,13 @@ spec:
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
                 resources:
+                  # 4 vCPU → 4 score tasks/pod (num_cpus=1 each). 4Gi is plenty:
+                  # actual per-task usage is ~0.6GiB (mostly fixed torch overhead,
+                  # not data-proportional), so 4 tasks ≈ 2.4GiB. 4Gi is also
+                  # Autopilot's minimum at 4 vCPU (1 GiB-per-vCPU floor).
                   requests:
-                    cpu: "2"
+                    cpu: "4"
                     memory: "4Gi"
                   limits:
-                    cpu: "2"
+                    cpu: "4"
                     memory: "4Gi"
