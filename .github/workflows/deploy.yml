@@ -42,13 +42,44 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Detect which component changed so we only rebuild/redeploy what's affected.
+  # The MLflow image rarely changes (only deploy/mlflow/**), but redeploying it
+  # on every push means an unrelated commit (e.g. frontend-only) can fail the
+  # whole pipeline if its backing Cloud SQL instance happens to be down.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      mlflow: ${{ steps.filter.outputs.mlflow }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            api:
+              - 'src/**'
+              - 'frontend/**'
+              - 'configs/**'
+              - 'Dockerfile'
+              - '.github/workflows/deploy.yml'
+            mlflow:
+              - 'deploy/mlflow/**'
+              - '.github/workflows/deploy.yml'
+
+  # ---------------------------------------------------------------------------
   # Build API and MLflow images in parallel, then deploy sequentially.
   # MLflow deploys before API because the API Cloud Run service declares
   # depends_on = [mlflow] in Terraform — we preserve that ordering here.
+  # Each build/deploy is gated on `changes` so unaffected components are skipped.
   # ---------------------------------------------------------------------------
 
   build-api:
     name: Build API image
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.ref }}
@@ -76,6 +107,8 @@ jobs:
 
   build-mlflow:
     name: Build MLflow image
+    needs: changes
+    if: needs.changes.outputs.mlflow == 'true'
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.image.outputs.ref }}
@@ -104,6 +137,7 @@ jobs:
   deploy-mlflow:
     name: Deploy MLflow to Cloud Run
     needs: build-mlflow
+    if: needs.build-mlflow.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -123,6 +157,15 @@ jobs:
   deploy-api:
     name: Deploy API to Cloud Run
     needs: [build-api, deploy-mlflow]
+    # Run once the API image is built. deploy-mlflow may be skipped (MLflow
+    # unchanged) — that's fine — but if it ran and failed, block the API deploy
+    # to preserve the depends_on ordering. always() is required so a skipped
+    # deploy-mlflow doesn't transitively skip this job.
+    if: |
+      always() &&
+      needs.build-api.result == 'success' &&
+      needs.deploy-mlflow.result != 'failure' &&
+      needs.deploy-mlflow.result != 'cancelled'
     runs-on: ubuntu-latest
 
     steps:
