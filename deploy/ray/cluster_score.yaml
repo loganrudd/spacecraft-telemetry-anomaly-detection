@@ -24,7 +24,7 @@ metadata:
 spec:
   entrypoint: >-
     bash -c 'set -e;
-    gsutil cp gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json /tmp/tuned_configs.json 2>/dev/null || true;
+    python -c "import gcsfs, sys; fs=gcsfs.GCSFileSystem(); [fs.get(\"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\", \"/tmp/tuned_configs.json\") if fs.exists(\"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\") else None]";
     if [ -f /tmp/tuned_configs.json ]; then
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
