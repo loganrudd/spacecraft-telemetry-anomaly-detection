@@ -71,14 +71,29 @@ def _install_id_token_auth(tracking_uri: str) -> None:
         if cached and now < cached[1]:
             token = cached[0]
         else:
+            # Audience must be the Cloud Run service base URL (scheme://host),
+            # with no path/query — fetch_id_token validates the token's `aud`
+            # claim against exactly this string, and Cloud Run issues tokens
+            # scoped to the bare service URL.
+            parsed = urlparse(tracking_uri)
+            audience = f"{parsed.scheme}://{parsed.netloc}"
             try:
                 import google.auth.transport.requests
                 import google.oauth2.id_token
 
                 req = google.auth.transport.requests.Request()
-                token = cast(str, google.oauth2.id_token.fetch_id_token(req, tracking_uri))  # type: ignore[no-untyped-call]
+                token = cast(str, google.oauth2.id_token.fetch_id_token(req, audience))  # type: ignore[no-untyped-call]
                 _token_cache[tracking_uri] = (token, now + 50 * 60)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # Was a silent `return`, which hid the real cause of Cloud Run
+                # 403s from Ray pods. Log loudly so the failure is diagnosable;
+                # still return (token stays unset) so local SQLite dev — where
+                # ADC is legitimately absent — does not crash.
+                log.warning(
+                    "mlflow.auth.id_token_failed",
+                    audience=audience,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 return
 
     os.environ["MLFLOW_TRACKING_TOKEN"] = token
