@@ -53,3 +53,9 @@ variable "api_cpu_idle" {
   type        = bool
   default     = false
 }
+
+variable "mlflow_admin_invokers" {
+  description = "IAM principals allowed to invoke the private MLflow Cloud Run service for operator access (for example, user:alice@example.com or group:mlflow-admins@example.com)"
+  type        = set(string)
+  default     = []
+}

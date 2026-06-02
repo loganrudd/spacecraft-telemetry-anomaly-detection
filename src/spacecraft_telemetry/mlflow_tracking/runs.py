@@ -45,8 +45,8 @@ _token_lock = Lock()
 def _install_id_token_auth(tracking_uri: str) -> None:
     """Set MLFLOW_TRACKING_TOKEN to a fresh GCP ID token for *.run.app URIs.
 
-    The MLflow Cloud Run service uses INGRESS_TRAFFIC_INTERNAL_ONLY; callers
-    must include a GCP ID token in the Authorization header.  Setting
+    The MLflow Cloud Run service is private/authenticated; callers must
+    include a GCP ID token in the Authorization header. Setting
     MLFLOW_TRACKING_TOKEN is the standard MLflow mechanism — the HTTP client
     reads it on every request.
 

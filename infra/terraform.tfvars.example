@@ -14,3 +14,7 @@ billing_account = "XXXXXX-XXXXXX-XXXXXX"
 # api_memory         = "2Gi"
 # api_min_instances  = 0
 # api_cpu_idle       = false
+
+# MLflow operator access — keep MLflow private and grant invoke only to
+# specific principals. Prefer a Google Group for easier rotation.
+# mlflow_admin_invokers = ["group:mlflow-admins@example.com"]

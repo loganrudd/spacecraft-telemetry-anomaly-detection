@@ -4,7 +4,7 @@ output "api_url" {
 }
 
 output "mlflow_url" {
-  description = "Internal-only URL of the MLflow Cloud Run service (use `gcloud run services proxy mlflow` to access locally)"
+  description = "Authenticated URL of the MLflow Cloud Run service (use `gcloud run services proxy mlflow` to access locally)"
   value       = google_cloud_run_v2_service.mlflow.uri
 }
 

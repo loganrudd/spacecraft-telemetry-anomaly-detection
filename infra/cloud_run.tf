@@ -7,15 +7,16 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# MLflow tracking server — internal-only ingress
+# MLflow tracking server — authenticated control surface
 # ---------------------------------------------------------------------------
 
 resource "google_cloud_run_v2_service" "mlflow" {
   name     = "mlflow"
   location = var.region
 
-  # All-traffic ingress: allUsers invoker below handles auth.
-  # For a hardened prod setup, revert to INGRESS_TRAFFIC_INTERNAL_ONLY + ID-token auth hook.
+  # Keep internet ingress so authenticated operators can use
+  # `gcloud run services proxy mlflow` from local machines. Privacy is
+  # enforced by Cloud Run IAM — there is no public allUsers binding.
   ingress = "INGRESS_TRAFFIC_ALL"
 
   template {
@@ -190,15 +191,6 @@ resource "google_cloud_run_v2_service_iam_member" "api_public" {
   member   = "allUsers"
 }
 
-# Public access — MLflow tracking server is open for demo purposes.
-# Re-add INGRESS_TRAFFIC_INTERNAL_ONLY + remove this to lock down for prod.
-resource "google_cloud_run_v2_service_iam_member" "mlflow_public" {
-  name     = google_cloud_run_v2_service.mlflow.name
-  location = var.region
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
 # sa-api and sa-ray invoke the mlflow service.
 resource "google_cloud_run_v2_service_iam_member" "mlflow_api_invoker" {
   name     = google_cloud_run_v2_service.mlflow.name
@@ -221,4 +213,15 @@ resource "google_cloud_run_v2_service_iam_member" "mlflow_ray_wif_invoker" {
   location = var.region
   role     = "roles/run.invoker"
   member   = "principalSet://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/*"
+}
+
+# Human/operator access to the MLflow control surface.
+# Prefer a Google Group here so access rotation does not require code changes.
+resource "google_cloud_run_v2_service_iam_member" "mlflow_admin_invoker" {
+  for_each = var.mlflow_admin_invokers
+
+  name     = google_cloud_run_v2_service.mlflow.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = each.value
 }
