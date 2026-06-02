@@ -21,7 +21,7 @@ from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from threading import Lock, Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import mlflow
 import mlflow.exceptions
@@ -76,7 +76,7 @@ def _install_id_token_auth(tracking_uri: str) -> None:
                 import google.oauth2.id_token
 
                 req = google.auth.transport.requests.Request()
-                token = google.oauth2.id_token.fetch_id_token(req, tracking_uri)  # type: ignore[no-untyped-call]
+                token = cast(str, google.oauth2.id_token.fetch_id_token(req, tracking_uri))  # type: ignore[no-untyped-call]
                 _token_cache[tracking_uri] = (token, now + 50 * 60)
             except Exception:
                 return
