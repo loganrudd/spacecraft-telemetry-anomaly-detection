@@ -18,7 +18,7 @@ _WINDOW_SIZE = 64
 _TICK_INTERVAL = 10
 
 
-def _make_reference(n_rows: int = 500, seed: int = 0) -> pd.DataFrame:
+def _make_reference(n_rows: int = 1200, seed: int = 0) -> pd.DataFrame:
     """Build a synthetic reference DataFrame matching MONITORING_FEATURE_COLS.
 
     The monitor subsets to REALTIME_FEATURE_COLS internally, so all 14 columns
@@ -40,6 +40,7 @@ def _make_monitor(
     reference: pd.DataFrame | None = None,
     window_size: int = _WINDOW_SIZE,
     tick_interval: int = _TICK_INTERVAL,
+    stattest: str = "wasserstein",
 ) -> RollingDriftMonitor:
     ref = reference if reference is not None else _make_reference()
     return RollingDriftMonitor(
@@ -47,7 +48,8 @@ def _make_monitor(
         reference=ref,
         window_size=window_size,
         tick_interval=tick_interval,
-        feature_drift_threshold=0.05,
+        stattest=stattest,
+        feature_drift_threshold=0.10,
         channel_drift_threshold=0.30,
     )
 
@@ -154,10 +156,11 @@ async def test_run_returns_none_before_window_full() -> None:
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_run_returns_snapshot_when_drifted() -> None:
-    ref = _make_reference(n_rows=500, seed=10)
-    monitor = _make_monitor(reference=ref, window_size=_WINDOW_SIZE, tick_interval=_TICK_INTERVAL)
+    # Use prod-realistic reference size so Wasserstein estimates are stable.
+    ref = _make_reference(n_rows=1200, seed=10)
+    monitor = _make_monitor(reference=ref, window_size=256, tick_interval=_TICK_INTERVAL)
     # Push heavily shifted rows — all features displaced by 5 std from reference mean.
-    for _ in range(_WINDOW_SIZE):
+    for _ in range(256):
         monitor.push(_drifted_row(ref))
     snapshot = await monitor.run()
     assert isinstance(snapshot, DriftSnapshot)
@@ -173,10 +176,13 @@ async def test_run_returns_snapshot_when_drifted() -> None:
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_run_returns_snapshot_when_nominal() -> None:
-    ref = _make_reference(n_rows=500, seed=20)
-    monitor = _make_monitor(reference=ref, window_size=_WINDOW_SIZE, tick_interval=_TICK_INTERVAL)
+    # Use prod-realistic shapes: ref=1200, current window=256.
+    # At these sizes the normalized Wasserstein distance for truly nominal
+    # N(0,1) data is reliably well below the 0.10 threshold.
+    ref = _make_reference(n_rows=1200, seed=20)
+    monitor = _make_monitor(reference=ref, window_size=256, tick_interval=_TICK_INTERVAL)
     rng = np.random.default_rng(21)
-    for _ in range(_WINDOW_SIZE):
+    for _ in range(256):
         monitor.push(_nominal_row(ref, rng))
     snapshot = await monitor.run()
     assert isinstance(snapshot, DriftSnapshot)

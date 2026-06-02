@@ -304,29 +304,23 @@ class MlflowConfig(BaseModel):
 
 
 class MonitoringConfig(BaseModel):
-    """Evidently drift monitoring configuration (Phase 7)."""
+    """Evidently batch monitoring I/O configuration (Phase 7).
 
-    # Fraction of features that must drift to emit a retraining trigger.
-    drift_threshold: float = 0.30
-    # Where reference profiles (train-split feature DataFrames) are persisted.
-    reference_profiles_dir: str = "monitoring/reference_profiles"
+    Drift sensitivity thresholds (drift_alert_threshold, feature_drift_threshold,
+    stattest) live in DriftConfig, which is the single source of truth for both
+    batch and real-time drift detection.
+    """
+
     # Where HTML drift reports are written before upload to MLflow.
     report_output_dir: str = "monitoring/reports"
-
-    @field_validator("reference_profiles_dir", "report_output_dir", mode="before")
-    @classmethod
-    def coerce_path_to_str(cls, v: object) -> str:
-        return str(v)
     # Max rows sampled from the train split when building a reference profile.
     # Keeps memory bounded for long-running channels (full train can be 100K+ rows).
     reference_sample_rows: int = 5000
 
-    @field_validator("drift_threshold")
+    @field_validator("report_output_dir", mode="before")
     @classmethod
-    def threshold_in_range(cls, v: float) -> float:
-        if not 0.0 < v < 1.0:
-            raise ValueError(f"drift_threshold must be in (0, 1), got {v}")
-        return v
+    def coerce_path_to_str(cls, v: object) -> str:
+        return str(v)
 
     @field_validator("reference_sample_rows")
     @classmethod
@@ -337,16 +331,26 @@ class MonitoringConfig(BaseModel):
 
 
 class DriftConfig(BaseModel):
-    """Real-time drift monitoring configuration (Phase 9.5)."""
+    """Drift monitoring configuration — shared by batch (Phase 7) and real-time (Phase 9.5).
+
+    Single source of truth for all drift sensitivity knobs. MonitoringConfig owns
+    only batch I/O concerns (report paths, sample sizes).
+    """
 
     enabled: bool = True
     window_size: int = 256
     # Run Evidently every N telemetry ticks per channel.
     # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
     tick_interval: int = 60
-    # KS test p-value threshold passed to Evidently DataDriftPreset for per-feature
-    # drift detection. Consistent between batch (reports.py) and real-time (drift.py).
-    feature_drift_threshold: float = 0.05
+    # Numerical stattest passed explicitly to Evidently DataDriftPreset (num_stattest).
+    # Pinned to "wasserstein" so the test is deterministic regardless of reference size.
+    # Evidently would otherwise auto-select KS (n <= 1000) or Wasserstein (n > 1000),
+    # making the threshold semantics change silently with data volume.
+    stattest: str = "wasserstein"
+    # Wasserstein distance (normed) threshold for per-feature drift detection.
+    # 0.10 matches Evidently's own default for Wasserstein. Calibrate against ESA
+    # labeled anomaly segments to tune for this dataset.
+    feature_drift_threshold: float = 0.10
     # Shared alert threshold used at two levels:
     #   1. Channel level: fraction of features drifted → channel flagged as drifted.
     #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.

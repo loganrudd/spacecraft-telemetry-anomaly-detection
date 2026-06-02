@@ -41,12 +41,12 @@ class DriftResult:
 
     Attributes:
         share_of_drifted_columns: Fraction of columns where Evidently's per-column
-            KS test detected drift (p < 0.05).  Range [0.0, 1.0].
+            Wasserstein distance test detected drift.  Range [0.0, 1.0].
         drift_detected: ``True`` when ``share_of_drifted_columns`` exceeds
-            ``settings.monitoring.drift_threshold`` (default 0.30).
+            ``settings.drift.drift_alert_threshold`` (default 0.30).
         n_features: Total number of monitored columns (always 14 for this project).
         n_drifted: Number of columns where drift was detected.
-        per_column_drift: Column name → bool; ``True`` = KS test detected drift.
+        per_column_drift: Column name → bool; ``True`` = Wasserstein test detected drift.
     """
 
     share_of_drifted_columns: float
@@ -67,7 +67,7 @@ def run_drift_report(
         reference: Reference profile DataFrame (train split), columns must include
             all entries of ``MONITORING_FEATURE_COLS``.
         current:   Current DataFrame (test split with the same feature columns).
-        settings:  Runtime settings; ``settings.monitoring.drift_threshold`` sets
+        settings:  Runtime settings; ``settings.drift.drift_alert_threshold`` sets
             the share threshold that flips ``DriftResult.drift_detected``.
 
     Returns:
@@ -78,7 +78,10 @@ def run_drift_report(
     col_mapping = ColumnMapping(numerical_features=MONITORING_FEATURE_COLS)
     report = Report(
         metrics=[
-            DataDriftPreset(num_stattest_threshold=settings.drift.feature_drift_threshold),
+            DataDriftPreset(
+                num_stattest=settings.drift.stattest,
+                num_stattest_threshold=settings.drift.feature_drift_threshold,
+            ),
             DataQualityPreset(),
         ]
     )
@@ -124,13 +127,13 @@ def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:
 
         by_name["DataDriftTable"]
             ["drift_by_columns"]   : dict[str, dict]
-                [col]["drift_detected"]  : bool  (KS p < 0.05)
+                [col]["drift_detected"]  : bool  (threshold applied to K-S p-value or Wasserstein distance)
 
     If the Evidently version changes and this path breaks, fix only here.
 
     Args:
         report:   Executed ``Report`` object.
-        settings: Used to apply ``monitoring.drift_threshold``.
+        settings: Used to apply ``drift.drift_alert_threshold``.
 
     Returns:
         :class:`DriftResult` populated from the report data.
@@ -150,7 +153,7 @@ def _extract_drift_result(report: Report, settings: Settings) -> DriftResult:
         for col, info in drift_table["drift_by_columns"].items()
     }
 
-    drift_detected = share > settings.monitoring.drift_threshold
+    drift_detected = share > settings.drift.drift_alert_threshold
 
     return DriftResult(
         share_of_drifted_columns=share,

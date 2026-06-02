@@ -72,8 +72,6 @@ mlflow:
   experiment_prefix: ""
 
 monitoring:
-  drift_threshold: 0.30
-  reference_profiles_dir: monitoring/reference_profiles
   report_output_dir: monitoring/reports
   reference_sample_rows: 5000
 
@@ -81,7 +79,8 @@ drift:
   enabled: true
   window_size: 256
   tick_interval: 60  # Tier 2: p95=61.9ms from Step 0 benchmark
-  feature_drift_threshold: 0.05
+  stattest: wasserstein
+  feature_drift_threshold: 0.10
   drift_alert_threshold: 0.30
   reference_profiles_dir: monitoring/reference_profiles
 

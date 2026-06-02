@@ -64,7 +64,10 @@ class RollingDriftMonitor:
         reference:               Reference-profile DataFrame (MONITORING_FEATURE_COLS columns).
         window_size:             Rolling window capacity in ticks.
         tick_interval:           Number of ticks between Evidently runs.
-        feature_drift_threshold: KS test p-value threshold passed to Evidently's
+        stattest:                Evidently numerical stattest name (e.g. ``"wasserstein"``).
+                                 Pinned explicitly so test selection is deterministic
+                                 regardless of reference size.
+        feature_drift_threshold: Wasserstein distance (normed) threshold passed to
                                  ``DataDriftPreset(num_stattest_threshold=...)``.
                                  Lower values = stricter per-feature drift detection.
         channel_drift_threshold: Fraction of features that must drift to flag the channel.
@@ -77,6 +80,7 @@ class RollingDriftMonitor:
         reference: pd.DataFrame,
         window_size: int,
         tick_interval: int,
+        stattest: str,
         feature_drift_threshold: float,
         channel_drift_threshold: float,
     ) -> None:
@@ -85,6 +89,7 @@ class RollingDriftMonitor:
         self._window: deque[dict[str, float]] = deque(maxlen=window_size)
         self._window_size = window_size
         self._tick_interval = tick_interval
+        self._stattest = stattest
         self._feature_drift_threshold = feature_drift_threshold
         self._channel_drift_threshold = channel_drift_threshold
         self._tick_count: int = 0
@@ -140,7 +145,10 @@ class RollingDriftMonitor:
         """Run Evidently synchronously — called from a thread pool worker."""
         current = self._add_rolling_features(current)
         report = Report(
-            metrics=[DataDriftPreset(num_stattest_threshold=self._feature_drift_threshold)]
+            metrics=[DataDriftPreset(
+                num_stattest=self._stattest,
+                num_stattest_threshold=self._feature_drift_threshold,
+            )]
         )
         try:
             with warnings.catch_warnings():

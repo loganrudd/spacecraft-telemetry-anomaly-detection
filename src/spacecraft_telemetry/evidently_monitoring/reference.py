@@ -245,7 +245,7 @@ def reference_profile_path(
     Path: ``{reference_profiles_dir}/{mission}/{channel}/reference.parquet``
     """
     return (
-        Path(settings.monitoring.reference_profiles_dir)
+        Path(settings.drift.reference_profiles_dir)
         / mission
         / channel
         / "reference.parquet"

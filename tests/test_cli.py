@@ -1096,7 +1096,7 @@ class TestDriftCommands:
     ) -> None:
         """Happy-path smoke test: writes train+test Parquet, runs drift batch."""
         from spacecraft_telemetry.core.config import (
-            MonitoringConfig,
+            DriftConfig,
             PreprocessingConfig,
             Settings,
         )
@@ -1112,7 +1112,7 @@ class TestDriftCommands:
         settings = Settings(
             preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
-            monitoring=MonitoringConfig(reference_profiles_dir=tmp_path / "profiles"),
+            drift=DriftConfig(reference_profiles_dir=str(tmp_path / "profiles")),
         )
 
         with patch("spacecraft_telemetry.cli.load_settings", return_value=settings):

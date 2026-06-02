@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spacecraft_telemetry.core.config import MonitoringConfig, Settings
+from spacecraft_telemetry.core.config import DriftConfig, Settings
 from spacecraft_telemetry.evidently_monitoring.reference import (
     MONITORING_FEATURE_COLS,
     compute_feature_dataframe,
@@ -22,7 +22,7 @@ from spacecraft_telemetry.evidently_monitoring.reports import (
 # Shared test helpers
 # ---------------------------------------------------------------------------
 
-_N = 300  # rows per synthetic dataset — large enough for reliable KS stats
+_N = 1200  # rows per synthetic dataset — matches realistic reference size; Wasserstein path
 
 
 def _make_feature_df(
@@ -81,11 +81,11 @@ class TestDriftResultDataclass:
 
 
 class TestRunDriftReportNominal:
-    """Reference == current (identical DataFrames) → KS test p=1.0 → no drift.
+    """Reference == current (identical DataFrames) → drift score of 0 → no drift.
 
-    Using two independent seeds with only 200 rows causes Evidently's KS test to
-    flag rolling features as drifted due to autocorrelation within overlapping
-    windows.  Identical data is the reliable way to assert zero drift.
+    Using two independent seeds with only 200 rows causes Evidently to flag rolling
+    features as drifted due to autocorrelation within overlapping windows.
+    Identical data is the reliable way to assert zero drift.
     """
 
     @pytest.fixture(scope="class")
@@ -206,7 +206,7 @@ class TestDriftThreshold:
     def test_low_threshold_triggers_drift_on_partial_shift(self) -> None:
         """With threshold=0.01 even partial drift triggers detection."""
         ref, cur = _make_partial_drift_df(seed=0)
-        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.01))
+        settings = Settings(drift=DriftConfig(drift_alert_threshold=0.01))
         _, result = run_drift_report(ref, cur, settings)
         assert result.drift_detected is True
 
@@ -217,7 +217,7 @@ class TestDriftThreshold:
         Setting threshold=0.80 (above 0.714) means drift is not flagged.
         """
         ref, cur = _make_partial_drift_df(seed=0)
-        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.80))
+        settings = Settings(drift=DriftConfig(drift_alert_threshold=0.80))
         _, result = run_drift_report(ref, cur, settings)
         assert result.share_of_drifted_columns > 0.0  # data genuinely drifted
         assert result.drift_detected is False
@@ -228,7 +228,7 @@ class TestDriftThreshold:
         Same fixture as above; threshold=0.50 (below ~0.714) → detected.
         """
         ref, cur = _make_partial_drift_df(seed=0)
-        settings = Settings(monitoring=MonitoringConfig(drift_threshold=0.50))
+        settings = Settings(drift=DriftConfig(drift_alert_threshold=0.50))
         _, result = run_drift_report(ref, cur, settings)
         assert result.drift_detected is True
 

@@ -254,6 +254,7 @@ async def drift_stream(
             reference=state.drift_references[channel],
             window_size=state.settings.drift.window_size,
             tick_interval=state.settings.drift.tick_interval,
+            stattest=state.settings.drift.stattest,
             feature_drift_threshold=state.settings.drift.feature_drift_threshold,
             channel_drift_threshold=state.settings.drift.drift_alert_threshold,
         )
