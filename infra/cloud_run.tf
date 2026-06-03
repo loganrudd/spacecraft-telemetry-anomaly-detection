@@ -217,7 +217,17 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       env {
+        name  = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+        value = "gs://${var.project_id}-sample-data"
+      }
+
+      env {
         name  = "SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR"
+        value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      env {
+        name  = "SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR"
         value = "gs://${var.project_id}-artifacts/reference_profiles"
       }
 
