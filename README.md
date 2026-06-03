@@ -159,6 +159,25 @@ Expected key artifacts:
 - `models/ESA-Mission1/tuned_configs.json` — per-subsystem scoring params + HPO lineage
 - `mlflow.db` — local SQLite MLflow tracking store (experiments, runs, registered models)
 
+Cloud lifecycle on GKE mirrors local exactly — baseline score first, then tune, then tuned score:
+
+```bash
+# 1) Train
+make cloud-train MISSION=ESA-Mission1
+
+# 2) Baseline score — Hundman defaults, full test set (no TUNED flag)
+make cloud-score MISSION=ESA-Mission1
+
+# 3) Tune — writes tuned_configs.json to GCS
+make cloud-tune MISSION=ESA-Mission1
+
+# 4) Tuned score — HPO params, held-out final 40% only
+make cloud-score MISSION=ESA-Mission1 TUNED=1
+```
+
+`TUNED=1` fetches `tuned_configs.json` from GCS and passes it to the scorer; omitting it
+(or `TUNED=0`) always runs a clean Hundman-defaults baseline regardless of what's in the bucket.
+
 ## Repository Map
 
 Top-level directories:

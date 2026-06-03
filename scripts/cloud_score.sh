@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Submit a spacecraft-score RayJob to the GKE cluster and tail its logs.
 #
-# Run after cloud-train (baseline validation) and again after cloud-tune
-# (auto-detects tuned_configs.json in GCS and applies it if present).
+# Mirrors local `make ray-score` semantics:
+#   Baseline:  ./scripts/cloud_score.sh --mission ESA-Mission2
+#   Tuned:     ./scripts/cloud_score.sh --mission ESA-Mission2 --tuned
+#
+# Use baseline (no --tuned) after cloud-train to establish Hundman-defaults F0.5.
+# Use --tuned after cloud-tune to score the held-out 40% with HPO params.
+# tuned_configs.json must exist in GCS before using --tuned; the job exits 1 if missing.
 #
 # Usage:
-#   ./scripts/cloud_score.sh [--mission MISSION] [--no-wait] [--delete-after]
+#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -17,16 +22,19 @@
 #   export REGION=us-central1
 #   export MLFLOW_URL=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)')
 #   ./scripts/cloud_score.sh --mission ESA-Mission2
+#   ./scripts/cloud_score.sh --mission ESA-Mission2 --tuned
 
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+TUNED="${TUNED:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
+    --tuned)        TUNED="1"; shift ;;
     --no-wait)      NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -36,15 +44,12 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MLFLOW_URL MISSION
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED
 
-echo "==> Submitting spacecraft-score RayJob (mission=${MISSION})"
-
-TUNED_GCS="gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json"
-if gsutil -q stat "${TUNED_GCS}" 2>/dev/null; then
-  echo "==> tuned_configs.json found at ${TUNED_GCS} — scoring with HPO params"
+if [[ "${TUNED}" = "1" ]]; then
+  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"
 else
-  echo "==> No tuned_configs.json in GCS — scoring with Hundman defaults"
+  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=baseline)"
 fi
 
 if kubectl get rayjob spacecraft-score -n ray &>/dev/null; then

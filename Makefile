@@ -140,6 +140,7 @@ ray-test:         ## Run Ray training/tuning unit tests (fast only)
 
 STAGE         ?= Production
 TUNED_CONFIGS ?=
+TUNED         ?=
 
 mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
@@ -348,8 +349,8 @@ cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MI
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=…). Run after cloud-train and again after cloud-tune.
-	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune).
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) \
 		./scripts/cloud_score.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
