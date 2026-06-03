@@ -14,9 +14,13 @@ for serving.
 
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
+**Live demo:** https://api-pb5fb25noa-uc.a.run.app
+
+**Deployment guide:** [docs/deployment.md](docs/deployment.md)
+
 ## Status
 
-**Current phase: 9.5 of 11 complete (real-time drift panel).**
+**Phase 10 complete — GCP deployment, ESA-Mission1, live demo.**
 
 Completed:
 - Phase 1: repo scaffold + ingestion
@@ -27,7 +31,8 @@ Completed:
 - Phase 6: MLflow experiment tracking + model registry
 - Phase 7: Evidently batch drift detection + MLflow artifact logging
 - Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
-- Phase 9: React dashboard — live telemetry charts + anomaly & Real-time drift alerts
+- Phase 9: React dashboard — live telemetry charts + anomaly & real-time drift alerts
+- Phase 10: GCP deployment — Cloud Run serving, GKE/Ray training, Terraform IaC, keyless CI/CD
 
 ## What Works Today
 
@@ -214,8 +219,34 @@ ESA Parquet (Zenodo/GCS)
   -> Real-time drift panel  [Phase 9.5 - complete]
        Per-channel KS drift scores (value_normalized feature)
        Subsystem-level gauge: % channels drifting, alert at ≥30%
-  -> GCP deployment  [Phase 10 - planned]
+  -> GCP deployment  [Phase 10 - complete]
+       Cloud Run (API + MLflow), GKE Autopilot (Ray training), GCS
+       Terraform IaC, GitHub Actions CI/CD, Workload Identity Federation
+       Billing kill-switch, cost guardrails
 ```
+
+## Deployment
+
+Full instructions in [docs/deployment.md](docs/deployment.md). Summary:
+
+```bash
+# Provision infrastructure
+cd infra && terraform init && terraform apply
+
+# Run training pipeline (after cloud-up)
+make cloud-preprocess MISSION=ESA-Mission1
+make cloud-train      MISSION=ESA-Mission1
+make cloud-score      MISSION=ESA-Mission1          # baseline
+make cloud-tune       MISSION=ESA-Mission1
+make cloud-score      MISSION=ESA-Mission1 TUNED=1  # tuned, held-out 40%
+
+# Seed drift reference profiles + promote + serve
+make seed-reference-profiles MISSION=ESA-Mission1
+make mlflow-promote   MISSION=ESA-Mission1 ENV=cloud
+make cloud-deploy
+```
+
+Architecture decisions: [docs/architecture/phase-10-gcp.md](docs/architecture/phase-10-gcp.md)
 
 ## Known Limitations
 
@@ -248,7 +279,7 @@ expected behaviour.
 | 7 | Evidently monitoring | Complete |
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
-| 10 | GCP deployment | In Progress |
+| 10 | GCP deployment | Complete |
 | 11 | Documentation + polish | Planned |
 
 ## Links
