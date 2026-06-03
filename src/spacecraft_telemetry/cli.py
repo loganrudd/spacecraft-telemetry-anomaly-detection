@@ -23,6 +23,7 @@ from spacecraft_telemetry.core.logging import get_logger, setup_logging
     "--env",
     default="local",
     show_default=True,
+    envvar="SPACECRAFT_ENV",
     help="Config environment to load (local | cloud | test).",
 )
 @click.option("--verbose", is_flag=True, help="Force DEBUG logging regardless of config.")

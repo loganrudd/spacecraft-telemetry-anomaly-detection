@@ -73,6 +73,15 @@ resource "google_storage_bucket_iam_member" "api_processed_viewer" {
   member = "serviceAccount:${google_service_account.api.email}"
 }
 
+# api: read channels.csv (channel→subsystem map) from the sample bucket. The
+# processed bucket has no metadata/channel_subsystems.json, so the API falls
+# back to sample-data/{mission}/channels.csv (see core/metadata.py lookup order).
+resource "google_storage_bucket_iam_member" "api_sample_viewer" {
+  bucket = google_storage_bucket.sample_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.api.email}"
+}
+
 # mlflow: write MLflow artifacts (model files, reports) to the artifacts bucket.
 resource "google_storage_bucket_iam_member" "mlflow_artifacts_admin" {
   bucket = google_storage_bucket.artifacts.name

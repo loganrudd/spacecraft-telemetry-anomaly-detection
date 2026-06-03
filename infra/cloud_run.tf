@@ -243,6 +243,14 @@ resource "google_cloud_run_v2_service" "api" {
     google_cloud_run_v2_service.mlflow,
     google_project_iam_member.api_cloudsql_client,
   ]
+
+  # CI/CD (deploy.yml) owns the container image after initial creation; Terraform
+  # owns everything else (env, scaling, IAM). Without this, `terraform apply`
+  # reverts the image to the placeholder, breaking the running service. Mirrors
+  # the same guard on the mlflow service above.
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
 }
 
 # ---------------------------------------------------------------------------
