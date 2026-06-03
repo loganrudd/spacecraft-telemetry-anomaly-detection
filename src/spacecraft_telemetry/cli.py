@@ -955,6 +955,7 @@ def ray_tune(
     """
     import json
 
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
     from spacecraft_telemetry.ray_training import (
         run_all_sweeps,
         run_hpo_sweep,
@@ -963,6 +964,11 @@ def ray_tune(
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
+
+    # Install ID-token auth before any MLflow call reaches Cloud Run.
+    # train/score go through _ensure_mlflow_experiments → configure_mlflow;
+    # tune bypasses runner.py, so we must call it explicitly here.
+    configure_mlflow(settings)
 
     tune_settings = settings
     if num_samples is not None:
