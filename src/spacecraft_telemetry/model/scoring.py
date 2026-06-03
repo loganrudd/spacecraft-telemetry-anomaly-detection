@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -29,14 +30,17 @@ import pandas as pd
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
     experiment_name,
     log_artifact_bytes,
+    log_input_dataset,
     log_metrics_final,
     log_params,
     open_run,
+    partition_hash,
     registered_model_name,
 )
 
@@ -459,7 +463,28 @@ def score_channel(
         extra=_extra,
     )
 
+    # Hash the test partition for the Dataset column — best-effort; failure is
+    # expected for GCS paths in local dev where the partition is not cached.
+    _eval_hash: str | None = None
+    with suppress(Exception):
+        _eval_hash = partition_hash(
+            settings.preprocess.processed_data_dir, mission, channel, "test"
+        )
+
     with open_run(experiment=_exp, run_name=channel, tags=_tags):
+        # Log the test partition as the evaluation dataset so the Dataset
+        # column in the MLflow UI records which data produced these scores.
+        log_input_dataset(
+            source=str(
+                to_upath(settings.preprocess.processed_data_dir)
+                / mission / "test"
+                / f"mission_id={mission}"
+                / f"channel_id={channel}"
+            ),
+            name=f"{mission}-{channel}-test",
+            digest=_eval_hash,
+            context="evaluation",
+        )
         log_params({
             "error_smoothing_window": cfg.error_smoothing_window,
             "threshold_window": cfg.threshold_window,

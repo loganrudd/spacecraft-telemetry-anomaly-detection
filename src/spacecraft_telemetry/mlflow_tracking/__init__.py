@@ -3,9 +3,9 @@
 Public API
 ----------
 conventions  experiment_name, registered_model_name, common_tags
-hashing      training_data_hash
+hashing      training_data_hash, partition_hash
 runs         configure_mlflow, open_run, log_params, log_metrics_step,
-             log_metrics_final, log_artifact_bytes
+             log_metrics_final, log_artifact_bytes, log_input_dataset
 registry     register_pytorch_model, promote, latest_uri
 """
 
@@ -14,7 +14,7 @@ from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name,
     registered_model_name,
 )
-from spacecraft_telemetry.mlflow_tracking.hashing import training_data_hash
+from spacecraft_telemetry.mlflow_tracking.hashing import partition_hash, training_data_hash
 from spacecraft_telemetry.mlflow_tracking.registry import (
     latest_uri,
     promote,
@@ -24,6 +24,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
     configure_mlflow,
     log_artifact_bytes,
     log_dict,
+    log_input_dataset,
     log_metrics_final,
     log_metrics_step,
     log_params,
@@ -37,10 +38,12 @@ __all__ = [
     "latest_uri",
     "log_artifact_bytes",
     "log_dict",
+    "log_input_dataset",
     "log_metrics_final",
     "log_metrics_step",
     "log_params",
     "open_run",
+    "partition_hash",
     "promote",
     "register_pytorch_model",
     "registered_model_name",

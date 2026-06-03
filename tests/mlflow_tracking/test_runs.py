@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import mlflow
@@ -15,8 +16,10 @@ import pytest
 from spacecraft_telemetry.core.config import load_settings
 from spacecraft_telemetry.mlflow_tracking.runs import (
     _install_id_token_auth,
+    _parquet_stats,
     configure_mlflow,
     log_artifact_bytes,
+    log_input_dataset,
     log_metrics_final,
     log_metrics_step,
     log_params,
@@ -155,6 +158,170 @@ class TestLogHelpers:
     def test_log_artifact_bytes_noop_without_active_run(self, mlflow_uri: str) -> None:
         assert mlflow.active_run() is None
         log_artifact_bytes(b"data", "file.bin")  # must not raise
+
+
+class TestParquetStats:
+    def test_returns_zero_for_missing_path(self, tmp_path: Path) -> None:
+        schema, num_rows, start, end = _parquet_stats(str(tmp_path / "nonexistent"))
+        assert schema is None
+        assert num_rows == 0
+        assert start is None and end is None
+
+    def test_returns_zero_for_directory_with_no_parquet(self, tmp_path: Path) -> None:
+        (tmp_path / "readme.txt").write_text("hello")
+        schema, num_rows, start, end = _parquet_stats(str(tmp_path))
+        assert schema is None
+        assert num_rows == 0
+
+    def test_returns_correct_row_count_and_columns(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        num_rows, num_cols = 120, 4
+        table = pa.table({f"col_{i}": pa.array(range(num_rows)) for i in range(num_cols)})
+        pq.write_table(table, tmp_path / "part.parquet")
+
+        schema, n, start, end = _parquet_stats(str(tmp_path))
+        assert n == num_rows
+        assert schema is not None and len(schema.names) == num_cols
+        # No telemetry_timestamp column → no date range.
+        assert start is None and end is None
+
+    def test_aggregates_rows_across_multiple_files(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        for i in range(3):
+            table = pa.table({"a": pa.array(range(10)), "b": pa.array(range(10))})
+            pq.write_table(table, tmp_path / f"part_{i}.parquet")
+
+        _schema, n, _start, _end = _parquet_stats(str(tmp_path))
+        assert n == 30
+
+    def test_extracts_timestamp_date_range(self, tmp_path: Path) -> None:
+        import pandas as pd
+        import pyarrow.parquet as pq
+
+        ts = pd.date_range("2014-01-01", periods=100, freq="s", tz="UTC")
+        df = pd.DataFrame({"telemetry_timestamp": ts, "value_normalized": range(100)})
+        df.to_parquet(tmp_path / "part.parquet", index=False)
+
+        _schema, n, start, end = _parquet_stats(str(tmp_path))
+        assert n == 100
+        assert start == ts[0].isoformat()
+        assert end == ts[-1].isoformat()
+
+
+class TestLogInputDataset:
+    def test_noop_without_active_run(self, mlflow_uri: str) -> None:
+        """log_input_dataset is a no-op when there is no active run."""
+        assert mlflow.active_run() is None
+        log_input_dataset(
+            source="/data/processed/ESA-Mission1/train/mission_id=ESA-Mission1/channel_id=ch1",
+            name="ESA-Mission1-ch1-train",
+            digest="a" * 64,
+            context="training",
+        )  # must not raise
+
+    def test_noop_when_digest_is_none(self, mlflow_uri: str) -> None:
+        """log_input_dataset is a no-op when digest is None."""
+        with open_run(experiment="exp", run_name="r", tags={}):
+            log_input_dataset(
+                source="/data/processed/ESA-Mission1/train",
+                name="ESA-Mission1-ch1-train",
+                digest=None,
+                context="training",
+            )  # must not raise; no dataset should be logged
+
+        client = mlflow.tracking.MlflowClient()
+        exp = client.get_experiment_by_name("exp")
+        assert exp is not None
+        run = client.search_runs([exp.experiment_id])[0]
+        assert run.inputs.dataset_inputs == []
+
+    def test_records_dataset_in_active_run(self, mlflow_uri: str) -> None:
+        """log_input_dataset stores name, digest, and context on the run."""
+        fake_digest = "b" * 64
+        with open_run(experiment="exp", run_name="r", tags={}) as run:
+            assert run is not None
+            run_id = run.info.run_id
+            log_input_dataset(
+                source="/data/processed/ESA-Mission1/train/mission_id=ESA-Mission1/channel_id=ch1",
+                name="ESA-Mission1-ch1-train",
+                digest=fake_digest,
+                context="training",
+            )
+
+        client = mlflow.tracking.MlflowClient()
+        finished = client.get_run(run_id)
+        inputs = finished.inputs.dataset_inputs
+        assert len(inputs) == 1
+        di = inputs[0]
+        assert di.dataset.name == "ESA-Mission1-ch1-train"
+        # digest is truncated to MLflow's 36-char column limit
+        assert di.dataset.digest == fake_digest[:36]
+        context_tags = [t for t in di.tags if t.key == "mlflow.data.context"]
+        assert context_tags[0].value == "training"
+
+    def test_records_evaluation_context(self, mlflow_uri: str) -> None:
+        """context='evaluation' is stored correctly on a scoring run."""
+        fake_digest = "c" * 64
+        with open_run(experiment="exp", run_name="r", tags={}) as run:
+            assert run is not None
+            run_id = run.info.run_id
+            log_input_dataset(
+                source="/data/processed/ESA-Mission1/test/mission_id=ESA-Mission1/channel_id=ch1",
+                name="ESA-Mission1-ch1-test",
+                digest=fake_digest,
+                context="evaluation",
+            )
+
+        client = mlflow.tracking.MlflowClient()
+        finished = client.get_run(run_id)
+        di = finished.inputs.dataset_inputs[0]
+        assert di.dataset.name == "ESA-Mission1-ch1-test"
+        context_tags = [t for t in di.tags if t.key == "mlflow.data.context"]
+        assert context_tags[0].value == "evaluation"
+
+
+    def test_profile_shows_real_row_count_when_parquet_exists(
+        self, mlflow_uri: str, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """Profile shows actual row count (not 0) when a Parquet file is present."""
+        import json
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        import pandas as pd
+
+        ts = pd.date_range("2014-01-01", periods=50, freq="s", tz="UTC")
+        table = pa.table({
+            "telemetry_timestamp": pa.array(ts),
+            "value_normalized": pa.array(range(50)),
+            "is_anomaly": pa.array([False] * 50),
+        })
+        pq.write_table(table, tmp_path / "part.parquet")
+        fake_digest = "d" * 64
+
+        with open_run(experiment="exp", run_name="r", tags={}) as run:
+            assert run is not None
+            run_id = run.info.run_id
+            log_input_dataset(
+                source=str(tmp_path),
+                name="test-channel-train",
+                digest=fake_digest,
+                context="training",
+            )
+
+        client = mlflow.tracking.MlflowClient()
+        di = client.get_run(run_id).inputs.dataset_inputs[0]
+        profile = json.loads(di.dataset.profile)
+        assert profile["num_rows"] == 50
+        # num_elements is intentionally dropped; start/end dates replace it.
+        assert "num_elements" not in profile
+        assert profile["start_date"] == ts[0].isoformat()
+        assert profile["end_date"] == ts[-1].isoformat()
 
 
 class TestInstallIdTokenAuth:

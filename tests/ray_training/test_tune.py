@@ -263,10 +263,12 @@ def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
 
-    assert "channel_1" in result
-    errors, labels = result["channel_1"]
+    channel_data, scoring_run_ids = result
+    assert "channel_1" in channel_data
+    errors, labels = channel_data["channel_1"]
     assert len(errors) == expected_n
     assert len(labels) == expected_n
+    assert scoring_run_ids.get("channel_1") == "fake-run-id"
 
 
 def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
