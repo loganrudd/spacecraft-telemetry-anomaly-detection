@@ -2,6 +2,22 @@ import { useSyncExternalStore } from "react";
 import type { TelemetryEvent } from "../api/types";
 
 const BUFFER_SIZE = 600;
+
+// Shared TTL for anomaly recency — used by both the overview badge and the
+// per-channel Anomaly Alerts list so both clear on the same schedule.
+export const ANOMALY_TTL_MS = 60_000;
+const MAX_ALERTS = 50;
+let _alertId = 0;
+
+export type StoredAlert = {
+  id: number;
+  capturedAtMs: number; // wall-clock epoch ms — used for TTL comparison
+  timestamp: string;    // telemetry event timestamp (display only)
+  channel: string;
+  smoothed_error: number | null;
+  threshold: number | null;
+  ground_truth_match: boolean;
+};
 // Stable empty reference — useSyncExternalStore requires getSnapshot to return
 // the same reference when nothing has changed. A `?? []` literal creates a new
 // object each call, triggering an infinite re-render loop for empty channels.
@@ -49,6 +65,11 @@ export class TelemetryStore {
   // Epoch-ms of the most recent tick per channel. Used by useSubsystemRollup to
   // determine whether a channel is actively streaming without reading the full buffer.
   lastTickAtMs: Record<string, number> = {};
+  // Rising-edge anomaly alerts captured globally (regardless of which channel view
+  // is mounted). AnomalyAlerts reads from here and filters by TTL so the list and
+  // the overview badge clear on the same 60-second schedule.
+  recentAlerts: StoredAlert[] = [];
+  private prevPredicted: Record<string, boolean> = {};
 
   push(event: TelemetryEvent): void {
     let ring = this.buffers.get(event.channel);
@@ -57,10 +78,26 @@ export class TelemetryStore {
       this.buffers.set(event.channel, ring);
     }
     ringPush(ring, event);
-    this.lastTickAtMs[event.channel] = Date.now();
+    const nowMs = Date.now();
+    this.lastTickAtMs[event.channel] = nowMs;
     if (event.is_anomaly_predicted) {
-      this.lastAnomalyAtMs[event.channel] = Date.now();
+      this.lastAnomalyAtMs[event.channel] = nowMs;
     }
+    // Rising-edge detection: false → true transition triggers a stored alert.
+    const prevPred = this.prevPredicted[event.channel] ?? false;
+    if (!prevPred && event.is_anomaly_predicted) {
+      const alert: StoredAlert = {
+        id: ++_alertId,
+        capturedAtMs: nowMs,
+        timestamp: event.timestamp,
+        channel: event.channel,
+        smoothed_error: event.smoothed_error,
+        threshold: event.threshold,
+        ground_truth_match: event.is_anomaly,
+      };
+      this.recentAlerts = [alert, ...this.recentAlerts].slice(0, MAX_ALERTS);
+    }
+    this.prevPredicted[event.channel] = event.is_anomaly_predicted;
     this.dirty.add(event.channel);
 
     if (!this.rafScheduled) {
@@ -91,6 +128,8 @@ export class TelemetryStore {
     this.dirty.clear();
     this.lastAnomalyAtMs = {};
     this.lastTickAtMs = {};
+    this.recentAlerts = [];
+    this.prevPredicted = {};
     this.notify();
   }
 

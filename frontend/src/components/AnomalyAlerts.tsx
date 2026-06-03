@@ -1,66 +1,26 @@
-import { useEffect, useRef, useState } from "react";
-import { telemetryStore } from "../state/telemetryStore";
-import type { TelemetryEvent } from "../api/types";
-
-const MAX_ALERTS = 50;
-
-type Alert = {
-  id: number;
-  timestamp: string;
-  channel: string;
-  smoothed_error: number | null;
-  threshold: number | null;
-  ground_truth_match: boolean;
-};
+import { useEffect, useReducer } from "react";
+import { telemetryStore, ANOMALY_TTL_MS } from "../state/telemetryStore";
 
 type Props = {
   channels: string[];
 };
 
-let _alertId = 0;
-
 export default function AnomalyAlerts({ channels }: Props) {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  // Track previous is_anomaly_predicted per channel to detect rising edge
-  const prevPredicted = useRef<Map<string, boolean>>(new Map());
+  const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
-    prevPredicted.current.clear();
-    setAlerts([]);
-  }, [channels]);
+    const unsub = telemetryStore.subscribe(forceUpdate);
+    // 1 Hz tick so expired alerts clear from the list even when no SSE events arrive,
+    // matching the same timer pattern used by the overview badge in useSubsystemRollup.
+    const id = setInterval(forceUpdate, 1_000);
+    return () => { unsub(); clearInterval(id); };
+  }, []);
 
-  useEffect(() => {
-    if (channels.length === 0) return;
-
-    const unsub = telemetryStore.subscribe(() => {
-      for (const ch of channels) {
-        const buf = telemetryStore.snapshot(ch);
-        if (buf.length === 0) continue;
-        const latest: TelemetryEvent = buf[buf.length - 1];
-        const prev = prevPredicted.current.get(ch) ?? false;
-
-        // Rising edge: false → true
-        if (!prev && latest.is_anomaly_predicted) {
-          const alert: Alert = {
-            id: ++_alertId,
-            timestamp: latest.timestamp,
-            channel: ch,
-            smoothed_error: latest.smoothed_error,
-            threshold: latest.threshold,
-            ground_truth_match: latest.is_anomaly,
-          };
-          setAlerts((prev) => {
-            const next = [alert, ...prev];
-            return next.slice(0, MAX_ALERTS);
-          });
-        }
-
-        prevPredicted.current.set(ch, latest.is_anomaly_predicted);
-      }
-    });
-
-    return unsub;
-  }, [channels]);
+  const channelSet = new Set(channels);
+  const nowMs = Date.now();
+  const alerts = telemetryStore.recentAlerts.filter(
+    (a) => channelSet.has(a.channel) && nowMs - a.capturedAtMs < ANOMALY_TTL_MS,
+  );
 
   return (
     <aside className="anomaly-alerts">

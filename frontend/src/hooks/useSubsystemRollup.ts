@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef } from "react";
-import { telemetryStore } from "../state/telemetryStore";
+import { telemetryStore, ANOMALY_TTL_MS } from "../state/telemetryStore";
 import { driftStore } from "../state/driftStore";
 
 export type ChannelStatus = {
@@ -9,8 +9,6 @@ export type ChannelStatus = {
 };
 
 export type SubsystemRollup = Map<string, Map<string, ChannelStatus>>;
-
-const ANOMALY_TTL_MS = 60_000;
 // Throttle rollup rebuilds to ~4 Hz. TelemetryStore notifies at rAF rate (~60 Hz);
 // without throttling every tick triggers a full Map rebuild across all channels.
 const ROLLUP_THROTTLE_MS = 250;
