@@ -41,6 +41,11 @@ from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
 )
+from spacecraft_telemetry.mlflow_tracking.runs import (
+    configure_mlflow as _configure_mlflow,
+    log_artifact_bytes as _log_artifact_bytes,
+    open_run as _open_run,
+)
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
@@ -73,7 +78,10 @@ def _prepare_channel_data(
     settings: Settings,
     mission: str,
     channels: list[str],
-) -> dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]]:
+) -> tuple[
+    dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
+    dict[str, str | None],
+]:
     """Load, validate, and temporally slice per-channel trial inputs.
 
     Reads smoothed errors for each channel from the most recent MLflow scoring
@@ -91,6 +99,7 @@ def _prepare_channel_data(
     shape_mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
     load_failures: list[tuple[str, str]] = []
     prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]] = {}
+    scoring_run_ids: dict[str, str | None] = {}
 
     _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
 
@@ -122,6 +131,8 @@ def _prepare_channel_data(
             continue
 
         prepared[channel] = (errors, labels)
+        # Track the scoring run ID so the caller can build a channel manifest.
+        scoring_run_ids[channel] = _run.info.run_id
 
     if shape_mismatches:
         details = "; ".join(
@@ -177,7 +188,7 @@ def _prepare_channel_data(
             stacklevel=3,
         )
 
-    return prepared
+    return prepared, scoring_run_ids
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +307,7 @@ def run_hpo_sweep(
 
     # Load immutable per-channel data once and validate compatibility before
     # launching Tune trials.
-    channel_data = _prepare_channel_data(settings_abs, mission, channels)
+    channel_data, scoring_run_ids = _prepare_channel_data(settings_abs, mission, channels)
 
     trial_fn = tune.with_parameters(
         _scoring_trial,
@@ -369,6 +380,29 @@ def run_hpo_sweep(
     if best_run_id is None:
         log.warning("tune.sweep.best_run_id_missing", subsystem=subsystem,
                     note="lineage tag tuned_from_run will be absent on scoring runs")
+
+    # Log the channel manifest (which channels and their scoring run IDs fed
+    # this sweep) as an artifact on the best HPO run.  Makes the input lineage
+    # of the sweep browseable from the Run Artifacts tab without a separate
+    # query.  Best-effort: a failure here must not abort the sweep.
+    if best_run_id is not None and scoring_run_ids:
+        with suppress(Exception):
+            import mlflow as _mlflow
+            _manifest_client = _mlflow.MlflowClient(
+                tracking_uri=settings.mlflow.tracking_uri
+            )
+            _manifest_client.log_dict(
+                run_id=best_run_id,
+                dictionary={
+                    "subsystem": subsystem,
+                    "hpo_eval_fraction": settings.tune.hpo_eval_fraction,
+                    "channels": {
+                        ch: {"scoring_run_id": rid}
+                        for ch, rid in scoring_run_ids.items()
+                    },
+                },
+                artifact_file="hpo_channel_manifest.json",
+            )
 
     log.info(
         "tune.sweep.end",
@@ -472,6 +506,25 @@ def run_all_sweeps(
             sweep_results[sub] = _to_entry(run_hpo_sweep(sub, sub_channels, settings, mission))
 
     write_tuned_configs(sweep_results, output)
+
+    # Open a summary MLflow run to make tuned_configs.json visible in the
+    # HPO experiment's Runs UI — the on-disk file is the authoritative copy;
+    # this is a read-only mirror for discoverability.  Best-effort: failures
+    # here must not abort the pipeline.
+    with suppress(Exception):
+        _configure_mlflow(settings)
+        _hpo_exp = _mlflow_experiment_name(settings.model.model_type, "hpo", mission)
+        with _open_run(
+            experiment=_hpo_exp,
+            run_name="tuned-configs-summary",
+            tags={
+                "model_type": settings.model.model_type,
+                "mission_id": mission,
+                "phase": "hpo",
+            },
+        ):
+            _log_artifact_bytes(output.read_bytes(), "tuned_configs.json")
+
     return output
 
 

@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from spacecraft_telemetry.mlflow_tracking.hashing import training_data_hash
+from spacecraft_telemetry.mlflow_tracking.hashing import partition_hash, training_data_hash
 
 _MISSION = "ESA-Mission1"
 _CHANNEL = "channel_1"
 
 
-def _make_partition(base: Path, mission: str, channel: str) -> Path:
-    """Create a fake train Parquet partition directory with some files."""
-    part = base / mission / "train" / f"mission_id={mission}" / f"channel_id={channel}"
+def _make_partition(base: Path, mission: str, channel: str, split: str = "train") -> Path:
+    """Create a fake Parquet partition directory with some files."""
+    part = base / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
     part.mkdir(parents=True)
     (part / "part-00000.parquet").write_bytes(b"fake-parquet-data-a")
     (part / "part-00001.parquet").write_bytes(b"fake-parquet-data-b")
@@ -72,3 +72,45 @@ class TestTrainingDataHash:
         assert training_data_hash(tmp_path, _MISSION, "channel_1") != training_data_hash(
             tmp_path, _MISSION, "channel_2"
         )
+
+
+class TestPartitionHash:
+    """Tests for the general partition_hash function."""
+
+    def test_hash_is_stable_for_train_split(self, tmp_path: Path) -> None:
+        _make_partition(tmp_path, _MISSION, _CHANNEL, split="train")
+        h1 = partition_hash(tmp_path, _MISSION, _CHANNEL, "train")
+        h2 = partition_hash(tmp_path, _MISSION, _CHANNEL, "train")
+        assert h1 == h2
+
+    def test_hash_is_stable_for_test_split(self, tmp_path: Path) -> None:
+        _make_partition(tmp_path, _MISSION, _CHANNEL, split="test")
+        h1 = partition_hash(tmp_path, _MISSION, _CHANNEL, "test")
+        h2 = partition_hash(tmp_path, _MISSION, _CHANNEL, "test")
+        assert h1 == h2
+
+    def test_train_and_test_splits_produce_different_hashes(self, tmp_path: Path) -> None:
+        # Same channel name but different split content → different hashes.
+        train_part = _make_partition(tmp_path, _MISSION, _CHANNEL, split="train")
+        test_part = _make_partition(tmp_path, _MISSION, _CHANNEL, split="test")
+        (train_part / "extra.parquet").write_bytes(b"train-only-file")
+        h_train = partition_hash(tmp_path, _MISSION, _CHANNEL, "train")
+        h_test = partition_hash(tmp_path, _MISSION, _CHANNEL, "test")
+        assert h_train != h_test
+
+    def test_training_data_hash_delegates_to_partition_hash(self, tmp_path: Path) -> None:
+        """training_data_hash must return the same value as partition_hash(..., 'train')."""
+        _make_partition(tmp_path, _MISSION, _CHANNEL, split="train")
+        assert training_data_hash(tmp_path, _MISSION, _CHANNEL) == partition_hash(
+            tmp_path, _MISSION, _CHANNEL, "train"
+        )
+
+    def test_missing_directory_raises_with_split_name(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="Test partition directory not found"):
+            partition_hash(tmp_path, _MISSION, "nonexistent_channel", "test")
+
+    def test_hash_is_64_char_hex(self, tmp_path: Path) -> None:
+        _make_partition(tmp_path, _MISSION, _CHANNEL, split="test")
+        h = partition_hash(tmp_path, _MISSION, _CHANNEL, "test")
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)

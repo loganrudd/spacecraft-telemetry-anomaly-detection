@@ -33,6 +33,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     configure_mlflow,
     experiment_name,
     log_dict,
+    log_input_dataset,
     log_metrics_final,
     log_metrics_step,
     log_params,
@@ -148,6 +149,19 @@ def train_channel(
     )
 
     with open_run(experiment=_exp, run_name=channel, tags=_tags) as _run:
+        # Log the train partition as the run's input dataset so the Dataset
+        # column in the MLflow UI shows which data produced this model.
+        log_input_dataset(
+            source=str(
+                to_upath(settings.preprocess.processed_data_dir)
+                / mission / "train"
+                / f"mission_id={mission}"
+                / f"channel_id={channel}"
+            ),
+            name=f"{mission}-{channel}-train",
+            digest=_data_hash,
+            context="training",
+        )
         log_params({
             "model_type": cfg.model_type,
             "hidden_dim": cfg.hidden_dim,
@@ -254,12 +268,22 @@ def train_channel(
         )
 
         # Register model in MLflow registry (calls mlflow.pytorch.log_model internally).
+        # Mirror compact lineage onto the model version so it is readable without
+        # following a run link: window_size, mission, channel, and the data hash.
         if _run is not None:
+            _vtags: dict[str, str] = {
+                "window_size": str(cfg.window_size),
+                "mission_id": mission,
+                "channel_id": channel,
+            }
+            if _data_hash is not None:
+                _vtags["training_data_hash"] = _data_hash
             register_pytorch_model(
                 model=model,
                 name=registered_model_name(cfg.model_type, mission, channel),
                 run_id=_run.info.run_id,
-                version_tags={"window_size": str(cfg.window_size)},
+                source_run_model_name=channel,
+                version_tags=_vtags,
             )
 
     log.info(

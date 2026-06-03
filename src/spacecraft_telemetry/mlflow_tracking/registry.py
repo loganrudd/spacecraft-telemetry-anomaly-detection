@@ -15,7 +15,8 @@ from __future__ import annotations
 from typing import Any
 
 import mlflow
-import mlflow.pytorch
+from mlflow.pytorch import log_model as log_pytorch_model
+from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.core.logging import get_logger
 
@@ -29,6 +30,7 @@ def register_pytorch_model(
     model: Any,
     name: str,
     run_id: str,
+    source_run_model_name: str = "model",
     version_tags: dict[str, str] | None = None,
 ) -> Any:
     """Log a PyTorch model artifact and register it in the Model Registry.
@@ -44,6 +46,10 @@ def register_pytorch_model(
         model:        PyTorch model instance to serialize and log.
         name:         Registered model name from registered_model_name() in conventions.
         run_id:       ID of the active MLflow run (run.info.run_id from open_run).
+        source_run_model_name:
+                      Model name shown on the source run in the MLflow Models UI.
+                      Defaults to "model" when the caller does not provide a more
+                      specific label such as a channel ID.
         version_tags: Optional key/value tags to set on the new ModelVersion.
                       Use for params that must survive without a run link
                       (e.g. {"window_size": "250"}).
@@ -52,12 +58,12 @@ def register_pytorch_model(
         The first mlflow.entities.model_registry.ModelVersion created for this
         run, or None if the version search returns nothing.
     """
-    mlflow.pytorch.log_model(
+    log_pytorch_model(
         pytorch_model=model,
-        name="model",
+        name=source_run_model_name,
         registered_model_name=name,
     )
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     versions = client.search_model_versions(f"name='{name}' and run_id='{run_id}'")
     mv = versions[0] if versions else None
     if mv is not None and version_tags:
@@ -85,7 +91,7 @@ def promote(
     Raises:
         ValueError: If no versions exist for ``name``.
     """
-    client = mlflow.tracking.MlflowClient()
+    client = MlflowClient()
     if version is None:
         candidates = client.search_model_versions(f"name='{name}'")
         if not candidates:

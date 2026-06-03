@@ -2,6 +2,7 @@
 
 import os
 import sys
+from collections.abc import Generator
 
 import pytest
 
@@ -10,6 +11,33 @@ import pytest
 def sample_data_dir(tmp_path):
     """Return a temporary directory for sample test data."""
     return tmp_path / "sample"
+
+
+@pytest.fixture(autouse=True)
+def isolate_mlflow_globals() -> Generator[None, None, None]:
+    """Reset MLflow's process-global client state around each test.
+
+    Many tests use per-test SQLite tracking URIs. MLflow stores tracking and
+    registry URIs in module-global state, so one test can otherwise leak a temp
+    database into the next and trigger false-positive URI-change warnings.
+    """
+    try:
+        import mlflow
+    except ModuleNotFoundError:
+        yield
+        return
+
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
+    mlflow.set_registry_uri("")
+
+    yield
+
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
+    mlflow.set_registry_uri("")
 
 
 @pytest.fixture(scope="session")

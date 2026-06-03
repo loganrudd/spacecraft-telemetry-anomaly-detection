@@ -268,3 +268,138 @@ def log_artifact_bytes(data: bytes, artifact_file: str) -> None:
         tmp_file = Path(tmp_dir) / artifact_path_obj.name
         tmp_file.write_bytes(data)
         mlflow.log_artifact(str(tmp_file), artifact_path=parent if parent != "." else None)
+
+
+def log_input_dataset(
+    source: str,
+    name: str,
+    digest: str | None,
+    context: str,
+) -> None:
+    """Log a Parquet partition as a run input dataset (Dataset column in the UI).
+
+    Records the source path and pre-computed content digest as run metadata.
+    No data is read from disk; only the path string and hash are stored.
+    No-op when there is no active run, or when ``digest`` is None (skipping
+    avoids recording a meaningless constant hash derived from an empty frame).
+
+    Args:
+        source:  Local path or GCS URI to the partition directory.
+        name:    Human-readable name shown in the MLflow UI Dataset column,
+                 e.g. ``"ESA-Mission1-channel_1-train"``.
+        digest:  Pre-computed hex fingerprint from ``partition_hash`` or
+                 ``training_data_hash``.  When None, the call is silently
+                 skipped so that a missing partition never aborts training.
+        context: Semantic role of this dataset in the run, e.g. ``"training"``
+                 or ``"evaluation"``.
+    """
+    if mlflow.active_run() is None or digest is None:
+        return
+    try:
+        from mlflow.data.dataset_source_registry import resolve_dataset_source
+        from mlflow.data.pandas_dataset import PandasDataset
+
+        # MLflow's dataset digest column is capped at 36 characters (UUID width).
+        # The SHA-256 hex digests produced by partition_hash are 64 chars; the
+        # first 36 chars are 144 bits of collision resistance — sufficient for
+        # data-identity purposes.
+        _digest = digest[:36]
+
+        # Read only the Parquet footers (schema + row-count + per-column min/max
+        # statistics) — never the actual row data — so this is fast even for
+        # 200 MB partitions and works against gs:// URIs via to_upath.
+        schema, num_rows, start_date, end_date = _parquet_stats(source)
+
+        # An empty, schema-correct frame carries the column names/dtypes for the
+        # dataset's schema; the row count and date range are reported via the
+        # overridden profile below (we never materialise the actual rows).
+        empty_df = schema.empty_table().to_pandas() if schema is not None else None
+
+        profile: dict[str, Any] = {"num_rows": num_rows}
+        if start_date is not None:
+            profile["start_date"] = start_date
+        if end_date is not None:
+            profile["end_date"] = end_date
+
+        class _DatedPandasDataset(PandasDataset):
+            """PandasDataset whose profile reports row count + slice date range.
+
+            The stock PandasDataset.profile is hardcoded to
+            ``{"num_rows", "num_elements"}`` and computes both from the in-memory
+            DataFrame — which would be 0 here since we deliberately never load the
+            rows. Overriding profile lets us report the true (footer-derived) row
+            count plus the start/end timestamps of the slice. num_elements is
+            dropped: it is just num_rows × num_columns and adds no lineage signal.
+            """
+
+            @property
+            def profile(self) -> dict[str, Any]:
+                return profile
+
+        dataset = _DatedPandasDataset(
+            df=empty_df,
+            source=resolve_dataset_source(source),
+            name=name,
+            digest=_digest,
+        )
+        mlflow.log_input(dataset, context=context)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "mlflow.dataset.log_failed", name=name, context=context, error=str(exc)
+        )
+
+
+def _parquet_stats(
+    partition_dir: str,
+) -> tuple[Any, int, str | None, str | None]:
+    """Return (schema, num_rows, start_date, end_date) for a Parquet partition.
+
+    Reads only Parquet file footers (schema, row counts, and the
+    ``telemetry_timestamp`` column's min/max statistics) — never actual row
+    data — so this is fast even for 200 MB partitions.  Works against both local
+    paths and ``gs://`` URIs via ``to_upath`` + fsspec file handles.
+
+    Dates are returned as ISO-8601 strings (JSON-serialisable for the MLflow
+    profile).  Returns ``(None, 0, None, None)`` when the path does not exist,
+    contains no Parquet files, or cannot be read.
+    """
+    try:
+        import pyarrow.parquet as pq
+
+        from spacecraft_telemetry.core.paths import to_upath
+
+        part_dir = to_upath(partition_dir)
+        if not part_dir.exists():
+            return None, 0, None, None
+        files = sorted(part_dir.glob("**/*.parquet"))
+        if not files:
+            return None, 0, None, None
+
+        with files[0].open("rb") as fh:
+            schema = pq.read_schema(fh)
+
+        num_rows = 0
+        ts_min: Any = None
+        ts_max: Any = None
+        ts_idx = schema.names.index("telemetry_timestamp") if "telemetry_timestamp" in schema.names else None
+
+        for f in files:
+            with f.open("rb") as fh:
+                md = pq.read_metadata(fh)
+            num_rows += md.num_rows
+            if ts_idx is None:
+                continue
+            for rg in range(md.num_row_groups):
+                stats = md.row_group(rg).column(ts_idx).statistics
+                if stats is None:
+                    continue
+                if ts_min is None or stats.min < ts_min:
+                    ts_min = stats.min
+                if ts_max is None or stats.max > ts_max:
+                    ts_max = stats.max
+
+        start_date = ts_min.isoformat() if ts_min is not None else None
+        end_date = ts_max.isoformat() if ts_max is not None else None
+        return schema, num_rows, start_date, end_date
+    except Exception:  # noqa: BLE001
+        return None, 0, None, None
