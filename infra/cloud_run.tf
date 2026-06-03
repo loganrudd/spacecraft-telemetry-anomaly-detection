@@ -235,6 +235,11 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "MLFLOW_ARTIFACTS_DESTINATION"
         value = "gs://${var.project_id}-artifacts/mlflow"
       }
+
+      env {
+        name  = "SPACECRAFT_API__STATIC_DIR"
+        value = "/app/frontend/dist"
+      }
     }
   }
 

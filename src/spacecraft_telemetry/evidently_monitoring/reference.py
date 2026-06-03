@@ -26,6 +26,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from spacecraft_telemetry.core.config import Settings
+from upath import UPath
+
 from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.features.definitions import _DEFAULT_WINDOWS, FEATURE_DEFINITIONS
 
@@ -240,20 +242,20 @@ def reference_profile_path(
     settings: Settings,
     mission: str,
     channel: str,
-) -> Path:
+) -> UPath:
     """Return the on-disk path for a channel's reference profile Parquet.
 
     Path: ``{reference_profiles_dir}/{mission}/{channel}/reference.parquet``
     """
     return (
-        Path(settings.drift.reference_profiles_dir)
+        to_upath(settings.drift.reference_profiles_dir)
         / mission
         / channel
         / "reference.parquet"
     )
 
 
-def save_reference_profile(df: pd.DataFrame, path: Path) -> None:
+def save_reference_profile(df: pd.DataFrame, path: Path | UPath) -> None:
     """Persist a reference profile DataFrame to Parquet.
 
     Creates parent directories as needed.
@@ -264,10 +266,10 @@ def save_reference_profile(df: pd.DataFrame, path: Path) -> None:
               canonical location).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
+    df.to_parquet(str(path), index=False)
 
 
-def load_reference_profile(path: Path) -> pd.DataFrame:
+def load_reference_profile(path: Path | UPath) -> pd.DataFrame:
     """Load a previously saved reference profile from Parquet.
 
     Args:
@@ -284,4 +286,5 @@ def load_reference_profile(path: Path) -> pd.DataFrame:
             f"Reference profile not found at {path}. "
             "Run `spacecraft-telemetry drift batch` first to build it."
         )
-    return pd.read_parquet(path)
+    # str() converts gs://... UPath to a string pandas/pyarrow can resolve via fsspec.
+    return pd.read_parquet(str(path))
