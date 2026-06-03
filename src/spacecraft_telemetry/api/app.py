@@ -36,6 +36,7 @@ from typing import Any
 import mlflow.exceptions
 import torch
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from spacecraft_telemetry.api import endpoints
@@ -285,6 +286,19 @@ def create_app(settings: Settings) -> FastAPI:
     if settings.api.static_dir:
         static_path = Path(settings.api.static_dir)
         if static_path.is_dir():
+            index_html = static_path / "index.html"
+
+            # Starlette StaticFiles mounted at "/" strips the leading "/" before
+            # path lookup, leaving scope["path"]="". The html=True redirect logic
+            # then issues a self-redirect ("" → "/") that Cloud Run's proxy
+            # collapses into a 404 loop. An explicit route bypasses this.
+            if index_html.is_file():
+                _index = str(index_html)
+
+                @app.get("/", include_in_schema=False)
+                async def _serve_spa_root() -> FileResponse:
+                    return FileResponse(_index)
+
             app.mount(
                 "/",
                 StaticFiles(directory=static_path, html=True),
