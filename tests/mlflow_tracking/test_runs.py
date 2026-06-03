@@ -286,7 +286,7 @@ class TestLogInputDataset:
 
 
     def test_profile_shows_real_row_count_when_parquet_exists(
-        self, mlflow_uri: str, tmp_path: pytest.TempPathFactory
+        self, mlflow_uri: str, tmp_path: Path
     ) -> None:
         """Profile shows actual row count (not 0) when a Parquet file is present."""
         import json
