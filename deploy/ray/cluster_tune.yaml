@@ -53,6 +53,8 @@ spec:
                   value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                   value: gs://${PROJECT_ID}-processed-data
+                - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                  value: gs://${PROJECT_ID}-sample-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -112,6 +114,8 @@ spec:
                     value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                     value: gs://${PROJECT_ID}-processed-data
+                  - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                    value: gs://${PROJECT_ID}-sample-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
