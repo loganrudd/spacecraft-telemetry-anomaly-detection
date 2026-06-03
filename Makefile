@@ -116,10 +116,13 @@ ray-train:        ## Train channels in parallel with Ray (MISSION=…, SUBSYSTEM
 	$(RUN) spacecraft-telemetry ray train --mission $(MISSION) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
-ray-score:        ## Score channels in parallel with Ray (MISSION=…, SUBSYSTEM=…, TUNED_CONFIGS=…)
+# TUNED=1 auto-derives the canonical tuned_configs path (mirrors cloud-score).
+# TUNED_CONFIGS=<path> is an explicit override that takes precedence.
+_TUNED_PATH := $(if $(TUNED_CONFIGS),$(TUNED_CONFIGS),$(if $(filter 1,$(TUNED)),models/$(MISSION)/tuned_configs.json,))
+ray-score:        ## Score channels in parallel with Ray (MISSION=…, SUBSYSTEM=…, [TUNED=1 | TUNED_CONFIGS=…])
 	$(RUN) spacecraft-telemetry ray score --mission $(MISSION) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),) \
-		$(if $(TUNED_CONFIGS),--tuned-configs $(TUNED_CONFIGS),)
+		$(if $(_TUNED_PATH),--tuned-configs $(_TUNED_PATH),)
 
 ray-tune:         ## Run Ray Tune HPO (MISSION=…, SUBSYSTEM=subsystem_6 for one subsystem)
 	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION) \
