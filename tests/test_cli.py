@@ -898,7 +898,7 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+            patch("spacecraft_telemetry.mlflow_tracking.registry.MlflowClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -936,7 +936,7 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+            patch("spacecraft_telemetry.mlflow_tracking.registry.MlflowClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -983,17 +983,19 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+            patch("spacecraft_telemetry.cli.MlflowClient") as mock_discovery_client_cls,
+            patch("spacecraft_telemetry.mlflow_tracking.registry.MlflowClient") as mock_registry_client_cls,
         ):
-            mock_client = MagicMock()
-            mock_client_cls.return_value = mock_client
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
 
             # First call: registry discovery. Subsequent calls: per-model version lookup.
             per_model_version = make_version("", "1")
-            mock_client.search_model_versions.side_effect = (
-                lambda q: discovery_versions if "LIKE" in q else [per_model_version]
-            )
-            mock_client.set_registered_model_alias.return_value = None
+            mock_discovery_client.search_model_versions.return_value = discovery_versions
+            mock_registry_client.search_model_versions.return_value = [per_model_version]
+            mock_registry_client.set_registered_model_alias.return_value = None
 
             result = runner.invoke(
                 main,
@@ -1002,7 +1004,7 @@ class TestMlflowCli:
 
         assert result.exit_code == 0, result.output
         assert f"Promoted      : {len(channel_ids)}/{len(channel_ids)}" in result.output
-        assert mock_client.set_registered_model_alias.call_count == len(channel_ids)
+        assert mock_registry_client.set_registered_model_alias.call_count == len(channel_ids)
 
     def test_mlflow_promote_all_no_registered_models_errors(
         self, runner: CliRunner, tmp_path: Path
@@ -1020,7 +1022,7 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("mlflow.tracking.MlflowClient") as mock_client_cls,
+            patch("spacecraft_telemetry.cli.MlflowClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -1110,7 +1112,7 @@ class TestDriftCommands:
         # Use Settings() defaults — test.yaml has feature_windows=[3, 5] which
         # doesn't match MONITORING_FEATURE_COLS (built from [10, 50, 100]).
         settings = Settings(
-            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=str(tmp_path)),
             mlflow=Settings().mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
             drift=DriftConfig(reference_profiles_dir=str(tmp_path / "profiles")),
         )
@@ -1133,7 +1135,7 @@ class TestDriftCommands:
 
         mission = "TEST-Mission"
         settings = Settings(
-            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
+            preprocess=PreprocessingConfig(processed_data_dir=str(tmp_path)),
             mlflow=Settings().mlflow.model_copy(
                 update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
             ),

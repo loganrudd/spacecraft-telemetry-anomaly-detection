@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.core.config import LoggingConfig, Settings, load_settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
@@ -1150,7 +1151,7 @@ def mlflow_promote(
     elif mission is not None and name is None:
         # Discover all registered models for this mission directly from the registry.
         prefix = f"telemanom-{mission}-"
-        client = mlflow.MlflowClient()
+        client = MlflowClient()
         all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
         discovered = sorted({v.name[len(prefix):] for v in all_versions})
         if not discovered:

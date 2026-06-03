@@ -259,6 +259,7 @@ def train_channel(
                 model=model,
                 name=registered_model_name(cfg.model_type, mission, channel),
                 run_id=_run.info.run_id,
+                source_run_model_name=channel,
                 version_tags={"window_size": str(cfg.window_size)},
             )
 

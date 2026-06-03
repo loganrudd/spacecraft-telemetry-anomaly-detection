@@ -30,7 +30,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import open_run
 
 _REGISTRY_CLIENT = (
     "spacecraft_telemetry.mlflow_tracking.registry"
-    ".mlflow.tracking.MlflowClient"
+    ".MlflowClient"
 )
 
 
@@ -52,25 +52,31 @@ class TestRegisterPytorchModel:
     def test_calls_log_model_with_correct_params(self, mlflow_uri: str) -> None:
         fake_model = MagicMock()
         model_name = "telemanom-ESA-Mission1-channel_1"
+        source_run_model_name = "channel_1"
         fake_run_id = "abc123"
 
-        with patch("mlflow.pytorch.log_model") as mock_log, \
+        with patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model") as mock_log, \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [MagicMock()]
 
-            register_pytorch_model(model=fake_model, name=model_name, run_id=fake_run_id)
+            register_pytorch_model(
+                model=fake_model,
+                name=model_name,
+                run_id=fake_run_id,
+                source_run_model_name=source_run_model_name,
+            )
 
         mock_log.assert_called_once()
         kwargs = mock_log.call_args.kwargs
-        assert kwargs["name"] == "model"
+        assert kwargs["name"] == source_run_model_name
         assert kwargs["registered_model_name"] == model_name
         assert kwargs["pytorch_model"] is fake_model
 
     def test_returns_model_version_from_registry_query(self, mlflow_uri: str) -> None:
         fake_version = MagicMock()
-        with patch("mlflow.pytorch.log_model"), \
+        with patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model"), \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -83,7 +89,7 @@ class TestRegisterPytorchModel:
         assert result is fake_version
 
     def test_returns_none_when_run_id_filter_empty(self, mlflow_uri: str) -> None:
-        with patch("mlflow.pytorch.log_model"), \
+        with patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model"), \
              patch(_REGISTRY_CLIENT) as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -103,7 +109,7 @@ def _create_version(name: str, run_id: str) -> None:
     string without validating an artifact file (safe to call without logging
     an actual model artifact).
     """
-    client = mlflow.tracking.MlflowClient()
+    client = mlflow.MlflowClient()
     with suppress(Exception):
         client.create_registered_model(name)
     client.create_model_version(
@@ -122,7 +128,7 @@ class TestPromote:
 
         promote(name=name)
 
-        client = mlflow.tracking.MlflowClient()
+        client = mlflow.MlflowClient()
         mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
         assert mv is not None
 
@@ -134,7 +140,7 @@ class TestPromote:
 
         promote(name=name, version=1)
 
-        client = mlflow.tracking.MlflowClient()
+        client = mlflow.MlflowClient()
         mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
         assert int(mv.version) == 1
 
@@ -149,7 +155,7 @@ class TestPromote:
 
         promote(name=name)
 
-        client = mlflow.tracking.MlflowClient()
+        client = mlflow.MlflowClient()
         mv = client.get_model_version_by_alias(name, CHAMPION_ALIAS)
         assert int(mv.version) == 2
 
