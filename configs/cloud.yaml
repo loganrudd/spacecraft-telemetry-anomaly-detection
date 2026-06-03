@@ -61,7 +61,7 @@ tune:
   num_samples: 50
   max_concurrent_trials: 4
   parallel_subsystems: true
-  max_parallel_subsystems: 4
+  max_parallel_subsystems: 2   # was 4; 4 concurrent sweeps flooded Ray GCS on 2GB head — 2 is safe with 4GB
   hpo_eval_fraction: 0.6
 
 mlflow:
