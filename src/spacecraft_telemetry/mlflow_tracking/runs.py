@@ -296,6 +296,7 @@ def log_input_dataset(
     if mlflow.active_run() is None or digest is None:
         return
     try:
+        import pandas as pd
         from mlflow.data.dataset_source_registry import resolve_dataset_source
         from mlflow.data.pandas_dataset import PandasDataset
 
@@ -312,8 +313,10 @@ def log_input_dataset(
 
         # An empty, schema-correct frame carries the column names/dtypes for the
         # dataset's schema; the row count and date range are reported via the
-        # overridden profile below (we never materialise the actual rows).
-        empty_df = schema.empty_table().to_pandas() if schema is not None else None
+        # overridden profile below (we never materialise the actual rows). When
+        # the footer can't be read (schema None), fall back to an empty frame so
+        # the dataset still logs with num_rows=0 rather than skipping lineage.
+        empty_df = schema.empty_table().to_pandas() if schema is not None else pd.DataFrame()
 
         profile: dict[str, Any] = {"num_rows": num_rows}
         if start_date is not None:

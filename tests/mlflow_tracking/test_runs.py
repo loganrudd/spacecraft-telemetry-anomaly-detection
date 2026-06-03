@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import mlflow
 import pytest
+from mlflow.tracking import MlflowClient
 
 from spacecraft_telemetry.core.config import load_settings
 from spacecraft_telemetry.mlflow_tracking.runs import (
@@ -61,7 +62,7 @@ class TestOpenRun:
             assert run is not None
             assert run.info.run_name == "run-a"
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         exp = client.get_experiment_by_name("test-exp")
         assert exp is not None
         runs = client.search_runs([exp.experiment_id])
@@ -73,7 +74,7 @@ class TestOpenRun:
             assert run is not None
             run_id = run.info.run_id
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         finished = client.get_run(run_id)
         assert finished.info.status == "FINISHED"
 
@@ -105,7 +106,7 @@ class TestLogHelpers:
         with open_run(experiment="exp", run_name="r", tags={}):
             log_params({"lr": 0.001, "epochs": 35})
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         exp = client.get_experiment_by_name("exp")
         assert exp is not None
         run = client.search_runs([exp.experiment_id])[0]
@@ -117,7 +118,7 @@ class TestLogHelpers:
             log_metrics_step({"train_loss": 0.5}, step=0)
             log_metrics_step({"train_loss": 0.3}, step=1)
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         exp = client.get_experiment_by_name("exp")
         assert exp is not None
         run = client.search_runs([exp.experiment_id])[0]
@@ -130,7 +131,7 @@ class TestLogHelpers:
         with open_run(experiment="exp", run_name="r", tags={}):
             log_metrics_final({"best_val_loss": 0.12, "f0_5": 0.88})
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         exp = client.get_experiment_by_name("exp")
         assert exp is not None
         run = client.search_runs([exp.experiment_id])[0]
@@ -150,7 +151,7 @@ class TestLogHelpers:
             run_id = mlflow.active_run().info.run_id  # type: ignore[union-attr]
             log_artifact_bytes(b'{"key": "value"}', "configs/model_config.json")
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         artifacts = client.list_artifacts(run_id, path="configs")
         names = [a.path for a in artifacts]
         assert any("model_config.json" in n for n in names)
@@ -233,7 +234,7 @@ class TestLogInputDataset:
                 context="training",
             )  # must not raise; no dataset should be logged
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         exp = client.get_experiment_by_name("exp")
         assert exp is not None
         run = client.search_runs([exp.experiment_id])[0]
@@ -252,7 +253,7 @@ class TestLogInputDataset:
                 context="training",
             )
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         finished = client.get_run(run_id)
         inputs = finished.inputs.dataset_inputs
         assert len(inputs) == 1
@@ -276,7 +277,7 @@ class TestLogInputDataset:
                 context="evaluation",
             )
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         finished = client.get_run(run_id)
         di = finished.inputs.dataset_inputs[0]
         assert di.dataset.name == "ESA-Mission1-ch1-test"
@@ -314,7 +315,7 @@ class TestLogInputDataset:
                 context="training",
             )
 
-        client = mlflow.tracking.MlflowClient()
+        client = MlflowClient()
         di = client.get_run(run_id).inputs.dataset_inputs[0]
         profile = json.loads(di.dataset.profile)
         assert profile["num_rows"] == 50
