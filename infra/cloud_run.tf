@@ -102,6 +102,62 @@ resource "google_cloud_run_v2_service" "mlflow" {
 }
 
 # ---------------------------------------------------------------------------
+# MLflow DB upgrade job — run before each MLflow image deploy to apply any
+# schema migrations introduced by the new image.  The workflow executes this
+# job via `gcloud run jobs execute --wait` before `gcloud run deploy mlflow`.
+# The job uses the same Cloud SQL volume + DSN as the MLflow service so the
+# upgrade runs against the real PostgreSQL backend.
+# CI/CD owns the image (ignore_changes) — Terraform owns everything else.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_job" "mlflow_db_upgrade" {
+  name     = "mlflow-db-upgrade"
+  location = var.region
+
+  template {
+    template {
+      service_account = google_service_account.mlflow.email
+
+      max_retries = 1
+
+      volumes {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [google_sql_database_instance.mlflow.connection_name]
+        }
+      }
+
+      containers {
+        image   = local.placeholder_image
+        command = ["mlflow"]
+        args    = ["db", "upgrade", local.mlflow_dsn]
+
+        volume_mounts {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_sql_database_instance.mlflow,
+    google_project_iam_member.mlflow_cloudsql_client,
+  ]
+
+  lifecycle {
+    ignore_changes = [template[0].template[0].containers[0].image]
+  }
+}
+
+# ---------------------------------------------------------------------------
 # API + dashboard — public ingress
 # ---------------------------------------------------------------------------
 

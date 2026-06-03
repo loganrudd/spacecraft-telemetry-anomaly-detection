@@ -146,6 +146,21 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOYER_SA }}
 
+      - name: Run MLflow DB schema migration
+        run: |
+          # Update the upgrade job to the new image, then execute it before
+          # deploying the service. This ensures schema migrations are applied
+          # before the new server starts, preventing startup failures.
+          gcloud run jobs update mlflow-db-upgrade \
+            --image "${{ needs.build-mlflow.outputs.image }}" \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --quiet
+          gcloud run jobs execute mlflow-db-upgrade \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --wait
+
       - name: Deploy mlflow service
         run: |
           gcloud run deploy mlflow \
