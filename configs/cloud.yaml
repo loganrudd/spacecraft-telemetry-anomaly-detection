@@ -66,7 +66,7 @@ tune:
 
 mlflow:
   # In cloud, point at the self-hosted MLflow Cloud Run service via env var:
-  #   SPACECRAFT_MLFLOW__TRACKING_URI=https://{mlflow-cloud-run}.run.app
+  #   SPACECRAFT_MLFLOW__TRACKING_URI=$(gcloud run services describe mlflow --region $REGION --project $PROJECT_ID --format='value(status.url)')
   # The auth hook in mlflow_tracking.runs.configure_mlflow (added in M3) injects
   # GCP ID tokens automatically when the host ends in .run.app.
   # Local fallback used when no env var is set:
@@ -89,7 +89,7 @@ drift:
 api:
   host: "0.0.0.0"
   port: 8080
-  mission: "ESA-Mission2"
+  mission: "ESA-Mission1"
   # subsystem omitted → load every channel for the mission (Plan 009b semantics).
   channels: []
   replay_speed_default: 10.0

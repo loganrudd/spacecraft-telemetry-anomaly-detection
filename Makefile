@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL         := bash
 MISSION       ?= ESA-Mission1
-CHANNEL       ?= channel_1
+CHANNEL       ?=
 SUBSYSTEM     ?=
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
@@ -141,17 +141,17 @@ ray-test:         ## Run Ray training/tuning unit tests (fast only)
 STAGE         ?= Production
 TUNED_CONFIGS ?=
 TUNED         ?=
+ENV           ?= local
 
 mlflow-server:    ## Start MLflow tracking server — required before parallel training (port 5001)
 	$(RUN) spacecraft-telemetry mlflow ui
 
-mlflow-promote:   ## Set @champion alias on one model (MISSION=…, CHANNEL=…)
-	$(RUN) spacecraft-telemetry mlflow promote \
-		--mission $(MISSION) --channels $(CHANNEL)
-
-mlflow-promote-all: ## Promote @champion for all registered channels (MISSION=…, [SUBSYSTEM=…])
-	$(RUN) spacecraft-telemetry --env cloud mlflow promote \
+mlflow-promote:   ## Set @champion alias (MISSION=…, [CHANNEL=…, SUBSYSTEM=…, ENV=cloud])
+	$(if $(filter cloud,$(ENV)), \
+	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)')) \
+	$(RUN) spacecraft-telemetry --env $(ENV) mlflow promote \
 		--mission $(MISSION) \
+		$(if $(CHANNEL),--channels $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
@@ -354,10 +354,11 @@ cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… 
 		./scripts/cloud_score.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
+	SSL_CERT_FILE=$$($(RUN) python -m certifi) \
+	SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://$(PROJECT_ID)-processed-data \
 	$(RUN) python scripts/build_reference_profiles.py \
 		--env cloud \
 		--mission $(MISSION) \
-		--channels-from gs://$(PROJECT_ID)-processed-data/$(MISSION)/channels.txt \
 		--upload gs://$(PROJECT_ID)-artifacts/reference_profiles \
 		--upload-only
 

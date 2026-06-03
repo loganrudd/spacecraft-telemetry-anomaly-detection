@@ -106,7 +106,11 @@ make ray-score MISSION=ESA-Mission1 TUNED_CONFIGS=models/ESA-Mission1/tuned_conf
 make mlflow-server                      # opens at http://localhost:5001
 
 # 6) Promote a model — sets the @champion alias, required before serving
-make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22
+make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22          # local MLflow
+make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22 ENV=cloud # cloud MLflow
+# Promote all channels in a mission (or a subsystem):
+make mlflow-promote MISSION=ESA-Mission1 ENV=cloud
+make mlflow-promote MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6 ENV=cloud
 
 # 7) Run drift monitoring for a single channel
 #    Builds reference profile from train split, compares to test split,

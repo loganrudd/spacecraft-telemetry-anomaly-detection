@@ -1129,10 +1129,14 @@ def mlflow_promote(
     import mlflow
 
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 
     settings: Settings = ctx.obj["settings"]
+    # configure_mlflow (not raw set_tracking_uri) installs the GCP ID-token auth
+    # interceptor needed for the private Cloud Run MLflow — otherwise requests to
+    # the .run.app host return 403. Must run before any registry call below.
+    configure_mlflow(settings)
     tracking_uri = settings.mlflow.tracking_uri
-    mlflow.set_tracking_uri(tracking_uri)
 
     # Resolve channel list from --channels, --channels-from, or registry discovery.
     channel_list: list[str] | None = None
@@ -1145,7 +1149,7 @@ def mlflow_promote(
     elif mission is not None and name is None:
         # Discover all registered models for this mission directly from the registry.
         prefix = f"telemanom-{mission}-"
-        client = mlflow.tracking.MlflowClient()
+        client = mlflow.MlflowClient()
         all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
         discovered = sorted({v.name[len(prefix):] for v in all_versions})
         if not discovered:
