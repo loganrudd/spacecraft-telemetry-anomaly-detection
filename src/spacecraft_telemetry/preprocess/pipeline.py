@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import resource
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 import ray
@@ -208,7 +209,7 @@ def run_preprocessing(
     )
 
     _manifest = _manifest_path(str(settings.data.sample_data_dir), mission)
-    channel_list, _skipped = _filter_channels(channel_list, _manifest)
+    channel_list, _skipped = _filter_channels(channel_list, cast(Path, _manifest))
     if _skipped:
         log.info(
             "pipeline.channels.skipped",
