@@ -99,6 +99,20 @@ def _install_id_token_auth(tracking_uri: str) -> None:
     os.environ["MLFLOW_TRACKING_TOKEN"] = token
 
 
+def refresh_mlflow_auth() -> None:
+    """Refresh the GCP ID token if it is within the expiry buffer.
+
+    Call once per training epoch before log_metrics_step to ensure the token
+    in MLFLOW_TRACKING_TOKEN stays valid for the full duration of long training
+    runs on Cloud Run.  On the common path (token has ≥10 min remaining) this
+    is a single dict lookup and returns immediately.  Near expiry it refetches
+    and updates the env var before the next MLflow HTTP request goes out.
+
+    No-op when not targeting a Cloud Run MLflow backend (local SQLite, etc.).
+    """
+    _install_id_token_auth(mlflow.get_tracking_uri())
+
+
 def configure_mlflow(settings: Settings) -> None:
     """Apply tracking_uri and registry_uri from Settings to the global MLflow client.
 

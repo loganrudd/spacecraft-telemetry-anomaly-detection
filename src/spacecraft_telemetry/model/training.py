@@ -38,6 +38,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     log_metrics_step,
     log_params,
     open_run,
+    refresh_mlflow_auth,
     register_pytorch_model,
     registered_model_name,
     training_data_hash,
@@ -218,6 +219,7 @@ def train_channel(
                 train_loss=round(epoch_train_loss, 6),
                 val_loss=round(epoch_val_loss, 6),
             )
+            refresh_mlflow_auth()
             log_metrics_step(
                 {"train_loss": epoch_train_loss, "val_loss": epoch_val_loss},
                 step=epoch,

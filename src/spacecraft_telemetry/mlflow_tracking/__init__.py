@@ -29,6 +29,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
     log_metrics_step,
     log_params,
     open_run,
+    refresh_mlflow_auth,
 )
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "log_params",
     "open_run",
     "partition_hash",
+    "refresh_mlflow_auth",
     "promote",
     "register_pytorch_model",
     "registered_model_name",
