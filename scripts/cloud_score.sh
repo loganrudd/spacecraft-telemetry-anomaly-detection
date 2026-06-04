@@ -16,6 +16,9 @@
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (default: us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
+#   NUM_GPUS     GPU fraction per score task (default: 0.125 = 8-way L4 pack).
+#                A larger fraction packs fewer/heavier tasks per L4. The worker
+#                always provisions a GPU node, so 0 is not a CPU fallback.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -44,7 +47,10 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED
+# 0.125 = 8-way L4 packing (default) for the predict() forward pass. Pass a
+# larger fraction (e.g. 0.25) to pack fewer/heavier tasks per L4.
+NUM_GPUS="${NUM_GPUS:-0.125}"
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"

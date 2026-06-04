@@ -317,10 +317,15 @@ def score_all_channels(
     # metric independent of any HPO comparison.
     eval_split = "final_portion"
 
-    # Scoring is pure-numpy + CPU inference — never request GPU resources,
-    # regardless of the global num_gpus_per_task setting (which is for training).
+    # predict() is a torch LSTM forward pass — the heavy part of scoring (~20
+    # min/channel on CPU for large channels); only the downstream anomaly scoring
+    # is pure numpy. Honour num_gpus_per_task so a cloud score job can run the
+    # forward pass on the L4 (cluster_score.yaml sets NUM_GPUS=0.125 → 8-way pack).
+    # Defaults to 0.0 (CPU) locally and anywhere the knob is unset, so local dev
+    # and the CPU path are unaffected. resolve_device("auto") in score_channel
+    # picks CUDA automatically once Ray exposes a GPU to the task.
     score_task = make_score_task(
-        num_gpus=0.0,
+        num_gpus=settings.ray.num_gpus_per_task,
         max_retries=settings.ray.max_retries,
     )
     futures = [

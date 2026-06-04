@@ -7,15 +7,22 @@
 #   MISSION      Mission name (e.g. ESA-Mission2)
 #   TUNED        Set to "1" to fetch and apply tuned_configs.json from GCS.
 #                Omit (or set to "") for a clean Hundman-defaults baseline.
+#   NUM_GPUS     GPU fraction per score task (cloud_score.sh defaults to 0.125).
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_score.yaml | kubectl apply -f -
 #
 # Sizing rationale:
-#   Scoring is LSTM inference + pure-numpy anomaly scoring — CPU is sufficient.
-#   Workers: 2 vCPU / 4 GiB each, 2 tasks per node (num_cpus=1).
-#   Run after cloud-train for the Hundman-defaults baseline (TUNED unset).
-#   Run again after cloud-tune with TUNED=1 to produce the held-out comparison.
+#   Scoring runs predict() (an LSTM forward pass) on the L4, then pure-numpy
+#   anomaly scoring. On CPU the forward pass is ~20 min/channel for large
+#   channels; on the GPU it is ~1-2 min. Workers: g2-standard-8 (8 vCPU) + 1× L4
+#   spot; NUM_GPUS controls packing. Default NUM_GPUS=0.125: 8-way pack — the
+#   forward passes are light, so 8 sharing the GPU saturate it. maxReplicas: 1
+#   (NVIDIA_L4_GPUS quota = 1) — don't run scoring while a training job holds the
+#   L4; score after training. Run after cloud-train for the Hundman-defaults
+#   baseline (TUNED unset); re-run with TUNED=1 after cloud-tune for the held-out
+#   comparison. This worker group always provisions a GPU node — for a CPU-only
+#   score run (no L4), use the pre-GPU revision of this manifest from git history.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -67,6 +74,12 @@ spec:
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
+                # The driver runs score_all_channels and reads num_gpus_per_task
+                # to set each task's GPU fraction, so the head needs the knob too.
+                - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                  value: "${NUM_GPUS}"
+                - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+                  value: "30"
                 - name: TUNED
                   value: "${TUNED}"
               resources:
@@ -106,18 +119,20 @@ spec:
                 failureThreshold: 10
 
     workerGroupSpecs:
-      - groupName: cpu-workers
+      - groupName: gpu-workers
         replicas: 1
         minReplicas: 0
-        # 16 pods × 4 vCPU ÷ num_cpus=1 per task = ~64 concurrent score tasks,
-        # so a full 62-channel mission scores in one wave (~10 min). Fewer, larger
-        # nodes (vs 31×2vCPU) provision faster on Autopilot and cut per-node Ray
-        # daemon overhead. 64 vCPU + head is well under the regional CPUS quota (200).
-        maxReplicas: 16
+        maxReplicas: 1 # NVIDIA_L4_GPUS quota = 1
         rayStartParams: {}
         template:
           spec:
             serviceAccountName: ray-sa
+            nodeSelector:
+              cloud.google.com/gke-accelerator: nvidia-l4
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
             containers:
               - name: ray-worker
                 image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/training:latest
@@ -134,14 +149,23 @@ spec:
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
+                  # predict() forward passes are light, so 8-way (0.125) saturates
+                  # the L4 on 8 vCPU. resolve_device("auto") flips to CUDA once the
+                  # task is allocated a GPU fraction.
+                  - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                    value: "${NUM_GPUS}"
+                  # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
+                  # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
+                  - name: LD_LIBRARY_PATH
+                    value: /usr/local/nvidia/lib64
+                  - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+                    value: "30"
                 resources:
-                  # 4 vCPU → 4 score tasks/pod (num_cpus=1 each). 4Gi is plenty:
-                  # actual per-task usage is ~0.6GiB (mostly fixed torch overhead,
-                  # not data-proportional), so 4 tasks ≈ 2.4GiB. 4Gi is also
-                  # Autopilot's minimum at 4 vCPU (1 GiB-per-vCPU floor).
                   requests:
-                    cpu: "4"
-                    memory: "4Gi"
+                    cpu: "8"
+                    memory: "16Gi"
+                    nvidia.com/gpu: "1"
                   limits:
-                    cpu: "4"
-                    memory: "4Gi"
+                    cpu: "8"
+                    memory: "16Gi"
+                    nvidia.com/gpu: "1"
