@@ -20,7 +20,7 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, cast
 
 import mlflow
@@ -111,6 +111,49 @@ def refresh_mlflow_auth() -> None:
     No-op when not targeting a Cloud Run MLflow backend (local SQLite, etc.).
     """
     _install_id_token_auth(mlflow.get_tracking_uri())
+
+
+@contextmanager
+def keep_mlflow_auth_fresh(
+    interval_seconds: float = 300.0,
+) -> Generator[None, None, None]:
+    """Refresh MLFLOW_TRACKING_TOKEN in a background thread for the wrapped block.
+
+    Long-running *driver-side* MLflow work — notably a Ray Tune sweep, where
+    ``MLflowLoggerCallback`` logs every trial from inside a single blocking
+    ``tuner.fit()`` — makes HTTP requests to the Cloud Run backend continuously
+    but exposes no per-iteration hook to refresh the GCP ID token (unlike the
+    training epoch loop, which calls ``refresh_mlflow_auth`` directly). Without a
+    refresh the token in MLFLOW_TRACKING_TOKEN real-expires at 60 min and the
+    tail of any sweep longer than that 401s.
+
+    This context manager runs a daemon thread that calls ``refresh_mlflow_auth``
+    every ``interval_seconds`` for the duration of the block. MLFLOW_TRACKING_TOKEN
+    is process-global, so the refresh is visible to every thread (the parallel
+    per-subsystem sweeps share it) and to MLflow's HTTP client. Refresh exceptions
+    are suppressed — a transient metadata-server hiccup must not abort the sweep;
+    the next tick retries.
+
+    Cheap when not targeting Cloud Run: ``refresh_mlflow_auth`` early-returns for
+    non-``.run.app`` URIs, so the thread just sleeps.
+    """
+    stop = Event()
+
+    def _loop() -> None:
+        # Event.wait returns True once `stop` is set and False on timeout, so
+        # looping while it returns False is a cleanly cancellable interval timer
+        # (no busy-wait, wakes immediately on stop instead of after a full tick).
+        while not stop.wait(interval_seconds):
+            with suppress(Exception):
+                refresh_mlflow_auth()
+
+    thread = Thread(target=_loop, name="mlflow-auth-refresh", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 def configure_mlflow(settings: Settings) -> None:

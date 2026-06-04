@@ -41,6 +41,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     log_params,
     open_run,
     partition_hash,
+    refresh_mlflow_auth,
     registered_model_name,
 )
 
@@ -471,6 +472,12 @@ def score_channel(
             settings.preprocess.processed_data_dir, mission, channel, "test"
         )
 
+    # The CPU forward pass above can run tens of minutes for a large channel —
+    # long enough to outlive the GCP ID token fetched by configure_mlflow at the
+    # top of this task. Refresh before the logging block so the artifact/metric
+    # writes below don't 401 at the tail (mirrors the per-epoch refresh in
+    # training; no-op for local SQLite backends).
+    refresh_mlflow_auth()
     with open_run(experiment=_exp, run_name=channel, tags=_tags):
         # Log the test partition as the evaluation dataset so the Dataset
         # column in the MLflow UI records which data produced these scores.

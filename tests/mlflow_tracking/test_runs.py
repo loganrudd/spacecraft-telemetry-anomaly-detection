@@ -6,6 +6,7 @@ Uses a per-test SQLite store (mlflow_uri fixture from conftest).
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -19,6 +20,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
     _install_id_token_auth,
     _parquet_stats,
     configure_mlflow,
+    keep_mlflow_auth_fresh,
     log_artifact_bytes,
     log_input_dataset,
     log_metrics_final,
@@ -383,4 +385,49 @@ class TestInstallIdTokenAuth:
 
         _install_id_token_auth("https://mlflow-xxxx-uc.a.run.app")  # must not raise
 
+        assert "MLFLOW_TRACKING_TOKEN" not in os.environ
+
+
+class TestKeepMlflowAuthFresh:
+    """The background refresher used to keep a long Ray Tune sweep's token valid."""
+
+    def test_refreshes_periodically_then_stops_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # keep_mlflow_auth_fresh should call refresh_mlflow_auth on its interval
+        # for the duration of the block, and stop on exit. Count delegations to
+        # _install_id_token_auth (what refresh_mlflow_auth calls) instead of
+        # hitting the metadata server.
+        from spacecraft_telemetry.mlflow_tracking import runs
+
+        calls: list[float] = []
+        monkeypatch.setattr(
+            runs, "_install_id_token_auth", lambda _uri: calls.append(time.monotonic())
+        )
+
+        with keep_mlflow_auth_fresh(interval_seconds=0.02):
+            time.sleep(0.1)
+
+        # ~20ms cadence over ~100ms fires several times; assert >=2 (timing-tolerant).
+        assert len(calls) >= 2
+
+        # The daemon must stop once the context exits — no further refreshes.
+        n_at_exit = len(calls)
+        time.sleep(0.06)
+        assert len(calls) == n_at_exit
+
+    def test_noop_thread_for_local_uri_exits_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # For a local SQLite backend the refresh is a no-op; the manager must
+        # still enter and exit without error and install no token. delenv first
+        # so a token leaked by an earlier auth test doesn't mask the assertion
+        # (production code sets MLFLOW_TRACKING_TOKEN directly, outside monkeypatch).
+        from spacecraft_telemetry.mlflow_tracking import runs
+
+        runs._token_cache.clear()
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        mlflow.set_tracking_uri("sqlite:///mlflow.db")
+        with keep_mlflow_auth_fresh(interval_seconds=0.01):
+            time.sleep(0.03)
         assert "MLFLOW_TRACKING_TOKEN" not in os.environ

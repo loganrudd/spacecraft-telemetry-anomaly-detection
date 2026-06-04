@@ -22,6 +22,7 @@ from spacecraft_telemetry.mlflow_tracking.registry import (
 )
 from spacecraft_telemetry.mlflow_tracking.runs import (
     configure_mlflow,
+    keep_mlflow_auth_fresh,
     log_artifact_bytes,
     log_dict,
     log_input_dataset,
@@ -36,6 +37,7 @@ __all__ = [
     "common_tags",
     "configure_mlflow",
     "experiment_name",
+    "keep_mlflow_auth_fresh",
     "latest_uri",
     "log_artifact_bytes",
     "log_dict",

@@ -43,6 +43,7 @@ from spacecraft_telemetry.mlflow_tracking.conventions import (
 )
 from spacecraft_telemetry.mlflow_tracking.runs import (
     configure_mlflow as _configure_mlflow,
+    keep_mlflow_auth_fresh as _keep_mlflow_auth_fresh,
     log_artifact_bytes as _log_artifact_bytes,
     open_run as _open_run,
 )
@@ -491,19 +492,27 @@ def run_all_sweeps(
         }
 
     sweep_results: dict[str, dict[str, Any]] = {}
-    if settings.tune.parallel_subsystems and len(eligible) > 1:
-        max_workers = min(settings.tune.max_parallel_subsystems, len(eligible))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(run_hpo_sweep, sub, sub_channels, settings, mission): sub
-                for sub, sub_channels in eligible.items()
-            }
-            for future in concurrent.futures.as_completed(futures):
-                subsystem = futures[future]
-                sweep_results[subsystem] = _to_entry(future.result())
-    else:
-        for sub, sub_channels in eligible.items():
-            sweep_results[sub] = _to_entry(run_hpo_sweep(sub, sub_channels, settings, mission))
+    # Keep the GCP ID token fresh for the whole sweep. MLflowLoggerCallback logs
+    # every trial from inside the blocking tuner.fit() calls below, with no
+    # per-trial hook to refresh — a multi-subsystem sweep can exceed the 60-min
+    # token lifetime, after which the tail 401s (the same failure mode the
+    # per-epoch refresh fixed for training). The background refresher covers both
+    # the parallel (ThreadPoolExecutor) and sequential paths; the env var is
+    # process-global so all worker threads see the refreshed token.
+    with _keep_mlflow_auth_fresh():
+        if settings.tune.parallel_subsystems and len(eligible) > 1:
+            max_workers = min(settings.tune.max_parallel_subsystems, len(eligible))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(run_hpo_sweep, sub, sub_channels, settings, mission): sub
+                    for sub, sub_channels in eligible.items()
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    subsystem = futures[future]
+                    sweep_results[subsystem] = _to_entry(future.result())
+        else:
+            for sub, sub_channels in eligible.items():
+                sweep_results[sub] = _to_entry(run_hpo_sweep(sub, sub_channels, settings, mission))
 
     write_tuned_configs(sweep_results, output)
 
