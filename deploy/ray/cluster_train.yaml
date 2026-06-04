@@ -11,9 +11,10 @@
 #
 # Sizing rationale:
 #   Head: 1 vCPU / 4 GiB — driver only, no model work.
-#   Workers: g2-standard-8 (8 vCPU) + 1× L4 spot; num_gpus=0.125 packs 8 LSTMs per GPU.
-#   8 tasks × 1 CPU + 0.125 GPU each = fully utilises both the 8 CPUs and the L4.
-#   GPU is the bottleneck (runs at ~99% util); epoch wall-clock per channel ~15-18 min at 8-way pack.
+#   Workers: g2-standard-8 (8 vCPU) + 1× L4 spot; NUM_GPUS controls packing.
+#   Default NUM_GPUS=0.125: 8-way pack, 8 tasks × 1 CPU + 0.125 GPU — fully utilises both.
+#   NUM_GPUS=1: 1 channel at a time on the full GPU — use for outlier channels that
+#     exceed the 60-min token window or are high preemption targets at 8-way pack.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -24,7 +25,7 @@ spec:
   entrypoint: >-
     spacecraft-telemetry --env cloud ray train
     --mission ${MISSION}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
+    ${CHANNELS_ARG}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -55,7 +56,7 @@ spec:
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
                 - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                  value: "0.125"
+                  value: "${NUM_GPUS}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
               resources:
@@ -125,7 +126,7 @@ spec:
                     value: auto
                   # Pack 8 channel models per L4 (24 GB VRAM, each LSTM <50 MB).
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                    value: "0.125"
+                    value: "${NUM_GPUS}"
                   # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
                   # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
                   - name: LD_LIBRARY_PATH

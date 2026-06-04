@@ -25,10 +25,15 @@ resource "google_container_cluster" "ray" {
     enable_components = ["SYSTEM_COMPONENTS"]
   }
 
-  # Suppress workload logs (Ray worker verbosity); retain system component logs
-  # for node/pod lifecycle events only.
+  # Capture Ray worker stdout/stderr (app + per-channel training logs) so a run
+  # is debuggable in Cloud Logging AFTER the cluster is torn down — kubectl logs
+  # die with the head pod, but ingested logs persist at the project level for the
+  # 30-day retention. WORKLOADS adds ingestion volume (Ray is verbose) but stays
+  # within the 50 GiB/mo free tier for portfolio-scale runs. If volume climbs,
+  # add a log exclusion filter for noisy Ray system logs rather than disabling.
+  # Metrics stay SYSTEM-only (monitoring_config above) — that is the costly part.
   logging_config {
-    enable_components = ["SYSTEM_COMPONENTS"]
+    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
   }
 
   # Allow `terraform destroy` without manual cluster deletion.

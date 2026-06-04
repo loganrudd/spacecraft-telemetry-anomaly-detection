@@ -344,8 +344,9 @@ cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=�
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) \
 		./scripts/cloud_preprocess.sh
 
-cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) \
 		./scripts/cloud_train.sh
 
 cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)

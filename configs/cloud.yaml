@@ -49,11 +49,10 @@ model:
   threshold_window: 250
   threshold_z: 3.0
   threshold_min_anomaly_len: 3
-  num_workers: 0  # 4 channels packed per GPU pod (num_gpus_per_task=0.25) × 4 vCPUs — avoid DataLoader oversubscription
+  num_workers: 0  # num_gpus_per_task set via SPACECRAFT_RAY__NUM_GPUS_PER_TASK env var in cluster_train.yaml
   inference_batch_size: 2048  # ~1M test windows/channel on CPU — larger batches cut Python-loop overhead (was 256)
 
 ray:
-  num_gpus_per_task: 0.25
   max_retries: 3
   address: auto
 

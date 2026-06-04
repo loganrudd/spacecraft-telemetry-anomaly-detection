@@ -25,9 +25,10 @@ DELETE_AFTER=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --mission)     MISSION="$2"; shift 2 ;;
-    --no-wait)     NO_WAIT=true; shift ;;
-    --delete-after) DELETE_AFTER=true; shift ;;
+    --mission)       MISSION="$2"; shift 2 ;;
+    --channels-from) CHANNELS_FROM="$2"; shift 2 ;;
+    --no-wait)       NO_WAIT=true; shift ;;
+    --delete-after)  DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -35,7 +36,21 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MLFLOW_URL MISSION
+# 0.125 = 8-way L4 packing (default). Pass 1 for slow/large channels that need
+# the full GPU to finish within token/preemption windows.
+NUM_GPUS="${NUM_GPUS:-0.125}"
+
+# Build the channel-selection argument for the RayJob entrypoint.
+# Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.
+if [[ -n "${CHANNELS:-}" ]]; then
+  CHANNELS_ARG="--channels ${CHANNELS}"
+elif [[ -n "${CHANNELS_FROM:-}" ]]; then
+  CHANNELS_ARG="--channels-from ${CHANNELS_FROM}"
+else
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+fi
+
+export PROJECT_ID REGION MLFLOW_URL MISSION CHANNELS_ARG NUM_GPUS
 
 echo "==> Submitting spacecraft-train RayJob (mission=${MISSION})"
 
