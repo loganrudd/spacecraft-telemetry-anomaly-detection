@@ -16,9 +16,10 @@
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (default: us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
-#   NUM_GPUS     GPU fraction per score task (default: 0.125 = 8-way L4 pack).
-#                A larger fraction packs fewer/heavier tasks per L4. The worker
-#                always provisions a GPU node, so 0 is not a CPU fallback.
+#   NUM_GPUS     GPU fraction per score task (default: 0.2 = 5-way L4 pack).
+#                Each task is a separate ~3.6 GiB CUDA process, so ~5 fit on the
+#                22 GiB L4; 8-way OOMs. The worker always provisions a GPU node,
+#                so 0 is not a CPU fallback.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -47,9 +48,12 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-# 0.125 = 8-way L4 packing (default) for the predict() forward pass. Pass a
-# larger fraction (e.g. 0.25) to pack fewer/heavier tasks per L4.
-NUM_GPUS="${NUM_GPUS:-0.125}"
+# GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
+# Packing is bounded by GPU MEMORY, not vCPUs: each task is a separate process
+# holding ~3.6 GiB (CUDA context + batch-2048 activations), so ~5 fit on the
+# 22 GiB L4. 0.2 = 5-way leaves ~4 GiB headroom; 0.125 (8-way) OOMs (8 × 3.6 ≈
+# 29 GiB). Raise toward 0.25 (4-way) for more margin.
+NUM_GPUS="${NUM_GPUS:-0.2}"
 export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS
 
 if [[ "${TUNED}" = "1" ]]; then

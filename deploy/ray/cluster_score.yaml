@@ -15,9 +15,11 @@
 # Sizing rationale:
 #   Scoring runs predict() (an LSTM forward pass) on the L4, then pure-numpy
 #   anomaly scoring. On CPU the forward pass is ~20 min/channel for large
-#   channels; on the GPU it is ~1-2 min. Workers: g2-standard-8 (8 vCPU) + 1× L4
-#   spot; NUM_GPUS controls packing. Default NUM_GPUS=0.125: 8-way pack — the
-#   forward passes are light, so 8 sharing the GPU saturate it. maxReplicas: 1
+#   channels; on the GPU it is far faster. Workers: g2-standard-8 (8 vCPU) + 1× L4
+#   spot. Packing is bounded by GPU MEMORY, not vCPUs: each score task is a
+#   separate process holding ~3.6 GiB (CUDA context + batch-2048 activations), so
+#   only ~5 fit on the 22 GiB L4. cloud_score.sh defaults NUM_GPUS=0.2 (5-way);
+#   0.125 (8-way) overcommits (8 × 3.6 ≈ 29 GiB) and OOMs. maxReplicas: 1
 #   (NVIDIA_L4_GPUS quota = 1) — don't run scoring while a training job holds the
 #   L4; score after training. Run after cloud-train for the Hundman-defaults
 #   baseline (TUNED unset); re-run with TUNED=1 after cloud-tune for the held-out
@@ -149,11 +151,17 @@ spec:
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
-                  # predict() forward passes are light, so 8-way (0.125) saturates
-                  # the L4 on 8 vCPU. resolve_device("auto") flips to CUDA once the
-                  # task is allocated a GPU fraction.
+                  # Packing is bounded by GPU MEMORY, not vCPUs: each score task
+                  # is a separate process with its own ~3.6 GiB CUDA context +
+                  # batch-2048 activations, so only ~5 fit on the 22 GiB L4
+                  # (cloud_score.sh defaults NUM_GPUS=0.2 → 5-way; 8-way OOMs).
+                  # resolve_device("auto") flips to CUDA once a GPU fraction is set.
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                     value: "${NUM_GPUS}"
+                  # Reduce CUDA allocator fragmentation under fractional GPU
+                  # sharing to prevent OOM error.
+                  - name: PYTORCH_CUDA_ALLOC_CONF
+                    value: expandable_segments:True
                   # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
                   # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
                   - name: LD_LIBRARY_PATH
