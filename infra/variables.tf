@@ -39,7 +39,10 @@ variable "api_cpu" {
 variable "api_memory" {
   description = "Memory allocation for the api Cloud Run service"
   type        = string
-  default     = "2Gi"
+  # 4Gi (up from 2Gi): whole-mission serving holds 60+ LSTM engines plus, while
+  # streaming, the lazily-loaded test-series for every concurrently-open SSE
+  # stream (the frontend opens one for all channels at once). 2Gi SIGKILLed.
+  default     = "4Gi"
 }
 
 variable "api_min_instances" {

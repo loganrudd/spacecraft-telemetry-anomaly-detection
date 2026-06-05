@@ -13,10 +13,13 @@ Startup sequence (Phase 10 deferred-load design):
 
   Background task (runs concurrently while the app serves requests):
     6. Load LSTM + scoring params per channel (semaphore-limited concurrency)
-    7. Load replay Parquet for each engine
-    8. Load Evidently drift reference profiles
-    9. Attach AppState to app.state.app_state
-   10. Mark LoadingState.is_complete = True
+    7. Load Evidently drift reference profiles
+    8. Attach AppState to app.state.app_state
+    9. Mark LoadingState.is_complete = True
+
+  Replay series are loaded lazily per SSE stream (replay_channel), NOT at
+  startup — eagerly loading every channel's full test-series OOM-killed the
+  2 GiB Cloud Run instance at whole-mission scale.
 
 During steps 6-9, GET /health returns status="loading" with progress counters
 so the React dashboard can show a progress bar instead of a blank screen.
@@ -43,7 +46,6 @@ from mlflow.tracking.client import MlflowClient
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
-from spacecraft_telemetry.api.replay import ReplayData
 from spacecraft_telemetry.api.state import AppState, LoadingState
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
@@ -55,7 +57,6 @@ from spacecraft_telemetry.evidently_monitoring.reference import (
 from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
 from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
-from spacecraft_telemetry.model.dataset import load_series_parquet
 from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import (
     ModelNotFoundError,
@@ -254,20 +255,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ch: eng for ch, eng in engine_results if eng is not None
             }
 
-            replay_data: dict[str, ReplayData] = {}
-            for ch in engines:
-                try:
-                    values, _seg, anom, timestamps = await asyncio.to_thread(
-                        load_series_parquet,
-                        settings.preprocess.processed_data_dir,
-                        settings.api.mission,
-                        ch,
-                        "test",
-                    )
-                    replay_data[ch] = (values, anom, timestamps)
-                except (OSError, FileNotFoundError, ValueError) as exc:
-                    log.warning("api.lifespan.replay_data.failed", channel=ch, error=str(exc))
-
+            # Replay series are NOT loaded here. Eagerly reading every channel's
+            # full test-series into memory at startup OOM-killed the 2 GiB Cloud
+            # Run instance at whole-mission scale (62 channels → SIGKILL). Instead
+            # replay_channel() loads a channel's series on demand when its SSE
+            # stream opens and releases it when the stream closes, so resident
+            # memory tracks active streams rather than the whole mission. AppState
+            # keeps an empty replay_data; streaming.py's .get() returns None and
+            # falls back to the on-demand parquet read.
             if not engines:
                 scope = (f"subsystem={settings.api.subsystem!r}"
                          if settings.api.subsystem else "whole mission")
@@ -297,7 +292,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 device=device,
                 engines=MappingProxyType(engines),
                 channel_subsystem_map=MappingProxyType(channel_subsystem_map),
-                replay_data=MappingProxyType(replay_data),
+                replay_data=MappingProxyType({}),  # lazy per-stream; see note above
                 startup_monotonic_ns=time.monotonic_ns(),
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
                 drift_references=MappingProxyType(drift_references),

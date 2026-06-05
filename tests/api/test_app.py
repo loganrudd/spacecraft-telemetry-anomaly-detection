@@ -192,7 +192,6 @@ _STUB_MAP = {"ch-a": "sub1", "ch-b": "sub2", "ch-c": "sub1"}
 @pytest.fixture()
 def _lifespan_patches(mocker):
     """Patch all external I/O in the lifespan to boot with no real deps."""
-    import numpy as np
     import torch
 
     from spacecraft_telemetry.model.io import ScoringParams
@@ -209,13 +208,6 @@ def _lifespan_patches(mocker):
         error_smoothing_window=5,
         threshold_min_anomaly_len=2,
     )
-    N = 20
-    stub_replay = (
-        np.zeros(N, dtype=np.float32),   # values
-        np.zeros(N, dtype=np.int32),     # segment_ids
-        np.zeros(N, dtype=bool),         # is_anomaly
-        np.empty(N, dtype=object),       # timestamps
-    )
 
     mocker.patch("spacecraft_telemetry.api.app.configure_mlflow")
     mocker.patch(
@@ -226,10 +218,8 @@ def _lifespan_patches(mocker):
         "spacecraft_telemetry.api.app.load_scoring_params",
         return_value=stub_params,
     )
-    mocker.patch(
-        "spacecraft_telemetry.api.app.load_series_parquet",
-        return_value=stub_replay,
-    )
+    # Replay series are no longer loaded in the lifespan (lazy per-stream now), so
+    # there is nothing to patch for it here.
     # Default: behave as if the champion registry is unreachable, so resolution
     # falls back to the full channel list (the behaviour these branch tests were
     # written against). Tests exercising champion-gating override this return value.
