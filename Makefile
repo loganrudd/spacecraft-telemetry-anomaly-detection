@@ -151,7 +151,8 @@ mlflow-server:    ## Start MLflow tracking server — required before parallel t
 
 mlflow-promote:   ## Set @champion alias (MISSION=…, [CHANNEL=…, SUBSYSTEM=…, ENV=cloud])
 	$(if $(filter cloud,$(ENV)), \
-	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)')) \
+	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)') \
+	  MLFLOW_TRACKING_TOKEN=$$(gcloud auth print-identity-token),) \
 	$(RUN) spacecraft-telemetry --env $(ENV) mlflow promote \
 		--mission $(MISSION) \
 		$(if $(CHANNEL),--channels $(CHANNEL),) \
@@ -353,7 +354,7 @@ cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MI
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [NUM_GPUS=0.125]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune).
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [NUM_GPUS=0.2]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune).
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) \
 		./scripts/cloud_score.sh
 
