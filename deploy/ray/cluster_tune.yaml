@@ -10,10 +10,15 @@
 #   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
 #
 # Sizing rationale:
-#   Tune trials are pure-numpy scoring (Plan 005) — no GPU needed.
-#   n1-standard-4 CPU workers are ~5× cheaper than T4 nodes for this workload.
-#   Head: 1 vCPU / 2 GiB — lightweight Tune driver + MLflow logging.
-#   Workers: 2 vCPU / 4 GiB each, max 4 concurrent (one trial per CPU).
+#   Tune trials are pure-numpy scoring — no GPU needed.
+#   Head: 2 vCPU / 8 GiB. The driver process holds errors.npy + labels for all
+#   channels in each running subsystem sweep in its Python heap for the full
+#   tuner.fit() duration. With max_parallel_subsystems=2, two subsystem datasets
+#   live in the heap simultaneously; on a full mission this peaks at ~3.8 GiB
+#   driver + ~0.7 GiB Ray daemons. 8 GiB gives ~3.5 GiB headroom. The extra
+#   vCPU is required by GKE Autopilot's ≤6.5 GiB/vCPU floor, not for compute
+#   (num-cpus=0 so Ray never schedules tasks on the head).
+#   Workers: 4 vCPU / 4 GiB each, max 4 concurrent (one trial per CPU).
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -61,11 +66,11 @@ spec:
                   value: auto
               resources:
                 requests:
-                  cpu: "1"
-                  memory: "4Gi"
+                  cpu: "2"
+                  memory: "8Gi"
                 limits:
-                  cpu: "1"
-                  memory: "4Gi"
+                  cpu: "2"
+                  memory: "8Gi"
               livenessProbe:
                 exec:
                   command:
