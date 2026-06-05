@@ -9,10 +9,16 @@ on:
   push:
     branches:
       - main
+    # Only rebuild when something baked INTO the image changes. The
+    # deploy/ray/cluster_*.yaml manifests are applied at runtime by cloud_*.sh
+    # (envsubst | kubectl apply), not copied into the image, so they must NOT
+    # trigger a rebuild. configs/ IS copied in (Dockerfile), so it must.
     paths:
-      - "deploy/ray/**"
+      - "deploy/ray/Dockerfile"
       - "src/**"
+      - "configs/**"
       - "pyproject.toml"
+      - ".github/workflows/build-training.yml"
   workflow_dispatch:
     inputs:
       tag:
