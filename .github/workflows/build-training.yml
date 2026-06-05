@@ -9,13 +9,19 @@ on:
   push:
     branches:
       - main
-    # Only rebuild when something baked INTO the image changes. The
-    # deploy/ray/cluster_*.yaml manifests are applied at runtime by cloud_*.sh
-    # (envsubst | kubectl apply), not copied into the image, so they must NOT
-    # trigger a rebuild. configs/ IS copied in (Dockerfile), so it must.
+    # Only rebuild when something baked INTO the image AND used by training
+    # changes. The deploy/ray/cluster_*.yaml manifests are applied at runtime by
+    # cloud_*.sh (envsubst | kubectl apply), not copied into the image, so they
+    # must NOT trigger a rebuild. configs/ IS copied in (Dockerfile), so it must.
+    # The src/.../api/** subtree is copied in too but only the Cloud Run API runs
+    # it — the training entrypoints (ray train/score/tune) never import it — so an
+    # api-only change yields a functionally identical training image. Excluded via
+    # a negation: a commit that also touches a shared module (core/, model/, …)
+    # still matches src/** and rebuilds; an api-only commit does not.
     paths:
       - "deploy/ray/Dockerfile"
       - "src/**"
+      - "!src/spacecraft_telemetry/api/**"
       - "configs/**"
       - "pyproject.toml"
       - ".github/workflows/build-training.yml"
