@@ -39,7 +39,7 @@ describe("fetchHealth", () => {
     const degraded: HealthResponse = {
       status: "degraded",
       mission: "ESA-Mission1",
-      subsystem: null,
+      subsystems: null,
       channels_loaded: [],
       channels_total: 0,
       channels_ready: 0,
