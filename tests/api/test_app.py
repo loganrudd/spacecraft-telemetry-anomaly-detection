@@ -230,6 +230,13 @@ def _lifespan_patches(mocker):
         "spacecraft_telemetry.api.app.load_series_parquet",
         return_value=stub_replay,
     )
+    # Default: behave as if the champion registry is unreachable, so resolution
+    # falls back to the full channel list (the behaviour these branch tests were
+    # written against). Tests exercising champion-gating override this return value.
+    mocker.patch(
+        "spacecraft_telemetry.api.app._resolve_champion_channels",
+        return_value=None,
+    )
 
 
 class TestLifespanBranchCoverage:
@@ -310,3 +317,106 @@ class TestLifespanBranchCoverage:
         body = resp.json()
         assert body["status"] == "degraded"
         assert body["missing"] == ["ch-bad"]
+
+    def test_whole_mission_resolves_from_champions(self, mocker, _lifespan_patches) -> None:
+        """Whole-mission load list = the promoted-champion set, so channels_total
+        counts only servable models and the frontend's ready==total gate completes
+        (regression for the '62 / 76' stuck-loading bug)."""
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value={"ch-a": "sub1", "ch-b": "sub1", "ch-unpromoted": "sub1"},
+        )
+        mocker.patch(
+            "spacecraft_telemetry.api.app._resolve_champion_channels",
+            return_value={"ch-a", "ch-b"},  # ch-unpromoted has no @champion
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": [], "subsystem": None}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            _wait_for_ready(app)
+            assert set(app.state.app_state.engines.keys()) == {"ch-a", "ch-b"}
+            assert app.state.loading_state.channels_total == 2
+            assert app.state.loading_state.channels_ready == 2
+
+    def test_explicit_channels_gated_by_champion(self, mocker, _lifespan_patches) -> None:
+        """An explicitly requested channel with no @champion model is dropped, so
+        channels_total stays equal to what can actually load."""
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value=_STUB_MAP,
+        )
+        mocker.patch(
+            "spacecraft_telemetry.api.app._resolve_champion_channels",
+            return_value={"ch-a"},  # ch-b requested below but not promoted
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": ["ch-a", "ch-b"], "subsystem": None}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            _wait_for_ready(app)
+            assert set(app.state.app_state.engines.keys()) == {"ch-a"}
+            assert app.state.loading_state.channels_total == 1
+
+    def test_registry_unavailable_falls_back_to_full_list(self, mocker, _lifespan_patches) -> None:
+        """When the champion query fails (None), resolution falls back to the full
+        channel list; the loader's require_champion gate is the serving backstop."""
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value={"ch-a": "sub1", "ch-b": "sub1"},
+        )
+        mocker.patch(
+            "spacecraft_telemetry.api.app._resolve_champion_channels",
+            return_value=None,
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": [], "subsystem": None}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            _wait_for_ready(app)
+            assert app.state.loading_state.channels_total == 2  # both attempted
+
+
+class TestResolveChampionChannels:
+    """Unit tests for the registry query that backs champion resolution."""
+
+    def test_returns_only_channels_with_champion_alias(self, mocker) -> None:
+        from types import SimpleNamespace
+
+        from spacecraft_telemetry.api.app import _resolve_champion_channels
+        from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
+
+        settings = load_settings("test")
+        prefix = registered_model_name(settings.model.model_type, "ESA-Mission1", "")
+        fake_client = mocker.Mock()
+        fake_client.search_registered_models.return_value = [
+            SimpleNamespace(name=f"{prefix}ch-a", aliases={"champion": "3"}),
+            SimpleNamespace(name=f"{prefix}ch-b", aliases={}),  # registered, not promoted
+            SimpleNamespace(name=f"{prefix}ch-c", aliases={"champion": "1", "candidate": "2"}),
+        ]
+        mocker.patch("spacecraft_telemetry.api.app.MlflowClient", return_value=fake_client)
+
+        result = _resolve_champion_channels(settings, "ESA-Mission1", mocker.Mock())
+        assert result == {"ch-a", "ch-c"}
+
+    def test_returns_none_when_registry_query_fails(self, mocker) -> None:
+        from spacecraft_telemetry.api.app import _resolve_champion_channels
+
+        fake_client = mocker.Mock()
+        fake_client.search_registered_models.side_effect = RuntimeError("mlflow down")
+        mocker.patch("spacecraft_telemetry.api.app.MlflowClient", return_value=fake_client)
+
+        settings = load_settings("test")
+        assert _resolve_champion_channels(settings, "ESA-Mission1", mocker.Mock()) is None

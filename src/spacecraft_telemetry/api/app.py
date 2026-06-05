@@ -38,6 +38,7 @@ import torch
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
@@ -52,6 +53,7 @@ from spacecraft_telemetry.evidently_monitoring.reference import (
     reference_profile_path,
 )
 from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
+from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 from spacecraft_telemetry.model.dataset import load_series_parquet
 from spacecraft_telemetry.model.device import resolve_device
@@ -140,6 +142,59 @@ async def _load_drift_ref(
             return ch, None
 
 
+def _has_champion_alias(model: Any) -> bool:
+    """True when a RegisteredModel carries the @champion alias.
+
+    MLflow's ``RegisteredModel.aliases`` is a ``{alias: version}`` dict in 3.x;
+    tolerate a list of objects with ``.alias`` for version resilience.
+    """
+    aliases = getattr(model, "aliases", None) or {}
+    if isinstance(aliases, dict):
+        return CHAMPION_ALIAS in aliases
+    return any(getattr(a, "alias", None) == CHAMPION_ALIAS for a in aliases)
+
+
+def _resolve_champion_channels(
+    settings: Settings, mission: str, log: Any
+) -> set[str] | None:
+    """Return the channel IDs that have a ``@champion`` model in the registry.
+
+    The serving loader requires the ``@champion`` alias (``load_model_for_scoring``,
+    ``require_champion=True``), so the promoted set is the authoritative list of
+    servable channels — it excludes degenerate, untrained, and not-yet-promoted
+    channels alike, with no dependency on any side file.
+
+    Returns ``None`` when the registry query itself fails (MLflow unreachable) so
+    the caller can fall back to the full channel list rather than booting empty.
+    Returns an empty set when the query succeeds but nothing is promoted yet.
+    """
+    prefix = registered_model_name(settings.model.model_type, mission, "")
+    try:
+        client = MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+        models = client.search_registered_models(filter_string=f"name LIKE '{prefix}%'")
+    except Exception as exc:
+        log.warning("api.lifespan.champion_query.failed", error=str(exc))
+        return None
+    champions = {m.name.removeprefix(prefix) for m in models if _has_champion_alias(m)}
+    log.info("api.lifespan.champions.resolved", mission=mission, count=len(champions))
+    return champions
+
+
+def _gate_by_champion(
+    candidates: list[str], champions: set[str] | None
+) -> tuple[list[str], list[str]]:
+    """Split ``candidates`` into (servable, no_champion) using the champion set.
+
+    When ``champions`` is None (registry unavailable) all candidates pass through —
+    the loader's ``require_champion`` gate is the backstop.
+    """
+    if champions is None:
+        return sorted(candidates), []
+    servable = sorted(c for c in candidates if c in champions)
+    no_champion = sorted(c for c in candidates if c not in champions)
+    return servable, no_champion
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan — fast sync setup, then deferred background model load."""
@@ -152,17 +207,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     device = resolve_device(settings.model.device)
     channel_subsystem_map = load_channel_subsystem_map(settings, settings.api.mission)
 
+    # The serving loader accepts only @champion versions, so the promoted-champion
+    # set is the source of truth for which channels are servable. Resolving the
+    # load list from it (instead of channels.csv) keeps channels_total equal to
+    # what can actually load — otherwise degenerate / untrained / unpromoted
+    # channels inflate the total and the frontend's ready==total gate never
+    # completes (the "62 / 76" stuck-loading bug).
+    champions = _resolve_champion_channels(settings, settings.api.mission, log)
+
     if settings.api.channels:
-        resolved = list(settings.api.channels)
+        # Explicit override — intersect with champions so the progress gate stays
+        # honest; a requested channel with no promoted model could never load.
+        resolved, _no_champion = _gate_by_champion(list(settings.api.channels), champions)
+        if _no_champion:
+            log.warning("api.lifespan.channels.no_champion",
+                        scope="explicit", channels=_no_champion)
         log.info("api.lifespan.channels.explicit", count=len(resolved))
     elif settings.api.subsystem is not None:
-        resolved = [ch for ch, sub in channel_subsystem_map.items()
-                    if sub == settings.api.subsystem]
+        in_subsystem = [ch for ch, sub in channel_subsystem_map.items()
+                        if sub == settings.api.subsystem]
+        resolved, _ = _gate_by_champion(in_subsystem, champions)
         log.info("api.lifespan.channels.from_subsystem",
                  subsystem=settings.api.subsystem, count=len(resolved))
-    else:
-        resolved = sorted(channel_subsystem_map.keys())
+    elif champions is not None:
+        # Whole mission = exactly the promoted models; the registry is authoritative.
+        resolved = sorted(champions)
         log.info("api.lifespan.channels.whole_mission", count=len(resolved))
+    else:
+        # Registry query failed — fall back to the full channel list. The loader's
+        # require_champion gate still prevents serving anything unpromoted; this
+        # only means channels_total may overcount until MLflow is reachable again.
+        resolved = sorted(channel_subsystem_map.keys())
+        log.warning("api.lifespan.channels.whole_mission_fallback",
+                    count=len(resolved), reason="champion registry query unavailable")
 
     loading = LoadingState(channels_total=len(resolved))
     app.state.loading_state = loading
