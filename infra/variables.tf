@@ -57,6 +57,18 @@ variable "api_cpu_idle" {
   default     = false
 }
 
+variable "api_subsystems" {
+  description = <<-EOT
+    Serving scope: list of subsystem names to load on startup.
+    null (default) = whole-mission mode, all promoted channels.
+    Set to a non-empty list to restrict serving to those subsystems only
+    — no image rebuild needed, just a `terraform apply`.
+    Example: ["subsystem_1"] or ["subsystem_1", "subsystem_2"]
+  EOT
+  type        = list(string)
+  default     = null
+}
+
 variable "mlflow_admin_invokers" {
   description = "IAM principals allowed to invoke the private MLflow Cloud Run service for operator access (for example, user:alice@example.com or group:mlflow-admins@example.com)"
   type        = set(string)

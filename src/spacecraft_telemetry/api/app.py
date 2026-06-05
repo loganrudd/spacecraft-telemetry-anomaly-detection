@@ -224,12 +224,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.warning("api.lifespan.channels.no_champion",
                         scope="explicit", channels=_no_champion)
         log.info("api.lifespan.channels.explicit", count=len(resolved))
-    elif settings.api.subsystem is not None:
+    elif settings.api.subsystems is not None:
         in_subsystem = [ch for ch, sub in channel_subsystem_map.items()
-                        if sub == settings.api.subsystem]
+                        if sub in settings.api.subsystems]
         resolved, _ = _gate_by_champion(in_subsystem, champions)
         log.info("api.lifespan.channels.from_subsystem",
-                 subsystem=settings.api.subsystem, count=len(resolved))
+                 subsystems=settings.api.subsystems, count=len(resolved))
     elif champions is not None:
         # Whole mission = exactly the promoted models; the registry is authoritative.
         resolved = sorted(champions)
@@ -264,8 +264,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # keeps an empty replay_data; streaming.py's .get() returns None and
             # falls back to the on-demand parquet read.
             if not engines:
-                scope = (f"subsystem={settings.api.subsystem!r}"
-                         if settings.api.subsystem else "whole mission")
+                scope = (f"subsystems={settings.api.subsystems!r}"
+                         if settings.api.subsystems else "whole mission")
                 loading.error = (
                     f"No channels loaded for mission={settings.api.mission!r} ({scope}). "
                     "Train, score, and promote at least one channel first "
@@ -288,7 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.app_state = AppState(
                 settings=settings,
                 mission=settings.api.mission,
-                subsystem=settings.api.subsystem,
+                subsystems=settings.api.subsystems,
                 device=device,
                 engines=MappingProxyType(engines),
                 channel_subsystem_map=MappingProxyType(channel_subsystem_map),

@@ -34,7 +34,7 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok", "degraded", "loading"]
     mission: str
-    subsystem: str | None = None
+    subsystems: list[str] | None = None
     channels_loaded: list[str] = []
     channels_total: int = 0    # target channel count (set once channels are resolved)
     channels_ready: int = 0    # successfully loaded so far (== len(channels_loaded) when ok)

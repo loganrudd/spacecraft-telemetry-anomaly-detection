@@ -14,7 +14,7 @@ export type TelemetryEvent = {
 export type HealthResponse = {
   status: "ok" | "degraded" | "loading";
   mission: string;
-  subsystem: string | null;
+  subsystems: string[] | null;
   channels_loaded: string[];
   channels_total: number;   // target count; use for progress bar denominator
   channels_ready: number;   // loaded so far; equals len(channels_loaded) when ok

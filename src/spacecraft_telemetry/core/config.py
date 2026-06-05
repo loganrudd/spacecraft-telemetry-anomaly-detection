@@ -384,9 +384,10 @@ class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8000
     mission: str = "ESA-Mission1"
-    # None → load every channel for the mission; a subsystem name restricts to that subsystem.
-    subsystem: str | None = None
-    # Explicit channel list; when non-empty, overrides subsystem/mission discovery.
+    # None → load every channel for the mission; a list of names restricts to those subsystems.
+    # Example: ["subsystem_1"] or ["subsystem_1", "subsystem_2"].
+    subsystems: list[str] | None = None
+    # Explicit channel list; when non-empty, overrides subsystems/mission discovery.
     channels: list[str] = []
     replay_speed_default: float = 10.0
     replay_tick_interval_seconds: float = 1.0

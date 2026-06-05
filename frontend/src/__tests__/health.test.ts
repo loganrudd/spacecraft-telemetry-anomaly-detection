@@ -5,7 +5,7 @@ import type { HealthResponse } from "../api/types";
 const SAMPLE_HEALTH: HealthResponse = {
   status: "ok",
   mission: "ESA-Mission1",
-  subsystem: "subsystem_6",
+  subsystems: ["subsystem_6"],
   channels_loaded: ["channel_12", "channel_13"],
   channels_total: 2,
   channels_ready: 2,

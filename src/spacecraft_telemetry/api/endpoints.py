@@ -92,7 +92,7 @@ async def health(request: Request) -> JSONResponse:
                 content=HealthResponse(
                     status="degraded",
                     mission=settings.api.mission,
-                    subsystem=settings.api.subsystem,
+                    subsystems=settings.api.subsystems,
                     channels_total=loading.channels_total,
                     channels_ready=loading.channels_ready,
                     uptime_s=loading.uptime_seconds(),
@@ -102,7 +102,7 @@ async def health(request: Request) -> JSONResponse:
             content=HealthResponse(
                 status="loading",
                 mission=settings.api.mission,
-                subsystem=settings.api.subsystem,
+                subsystems=settings.api.subsystems,
                 channels_total=loading.channels_total,
                 channels_ready=loading.channels_ready,
                 uptime_s=loading.uptime_seconds(),
@@ -115,7 +115,7 @@ async def health(request: Request) -> JSONResponse:
             content=HealthResponse(
                 status="degraded",
                 mission=app_state.mission,
-                subsystem=app_state.subsystem,
+                subsystems=app_state.subsystems,
                 channels_total=loading.channels_total if loading else 0,
                 uptime_s=app_state.uptime_seconds(),
                 mlflow_tracking_uri=app_state.mlflow_tracking_uri,
@@ -130,7 +130,7 @@ async def health(request: Request) -> JSONResponse:
         content=HealthResponse(
             status=status,
             mission=app_state.mission,
-            subsystem=app_state.subsystem,
+            subsystems=app_state.subsystems,
             channels_loaded=app_state.channels_loaded,
             channels_total=len(app_state.resolved_channels) or n,
             channels_ready=n,

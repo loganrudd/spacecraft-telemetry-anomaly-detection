@@ -240,6 +240,16 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "SPACECRAFT_API__STATIC_DIR"
         value = "/app/frontend/dist"
       }
+
+      # Serving scope — restricts which subsystems are loaded at startup.
+      # null (default) = whole-mission.  Override via api_subsystems in tfvars.
+      dynamic "env" {
+        for_each = var.api_subsystems != null ? [1] : []
+        content {
+          name  = "SPACECRAFT_API__SUBSYSTEMS"
+          value = jsonencode(var.api_subsystems)
+        }
+      }
     }
   }
 
