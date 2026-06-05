@@ -282,7 +282,7 @@ expected behaviour.
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
-| 11 | Documentation + polish | Planned |
+| 11 | Documentation + polish | In Progress |
 
 ## Links
 
