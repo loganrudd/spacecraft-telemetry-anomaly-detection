@@ -13,13 +13,17 @@ Startup sequence (Phase 10 deferred-load design):
 
   Background task (runs concurrently while the app serves requests):
     6. Load LSTM + scoring params per channel (semaphore-limited concurrency)
-    7. Load Evidently drift reference profiles
+    7. Load Evidently drift reference profiles + anomaly-dense replay slices
+       (concurrently — both are I/O-bound GCS reads under the same semaphore)
     8. Attach AppState to app.state.app_state
     9. Mark LoadingState.is_complete = True
 
-  Replay series are loaded lazily per SSE stream (replay_channel), NOT at
-  startup — eagerly loading every channel's full test-series OOM-killed the
-  2 GiB Cloud Run instance at whole-mission scale.
+  Replay slices (api.replay_max_rows rows per channel, centred on the first
+  labeled anomaly) are pre-cached at step 7.  Caching is safe because slicing
+  reduces each channel from 9M+ rows to ~3k (~1 MB total vs a SIGKILL when
+  the full test series was eagerly loaded).  Pre-caching eliminates per-stream
+  GCS reads and makes SSE streams start instantly.  Pass replay_max_rows=0 in
+  config to disable slicing and replay the full test set.
 
 During steps 6-9, GET /health returns status="loading" with progress counters
 so the React dashboard can show a progress bar instead of a blank screen.
@@ -46,6 +50,7 @@ from mlflow.tracking.client import MlflowClient
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
+from spacecraft_telemetry.api.replay import ReplayData, _anomaly_slice
 from spacecraft_telemetry.api.state import AppState, LoadingState
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
@@ -57,6 +62,7 @@ from spacecraft_telemetry.evidently_monitoring.reference import (
 from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
 from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS
 from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+from spacecraft_telemetry.model.dataset import load_series_parquet
 from spacecraft_telemetry.model.device import resolve_device
 from spacecraft_telemetry.model.io import (
     ModelNotFoundError,
@@ -140,6 +146,42 @@ async def _load_drift_ref(
             return ch, ref
         except FileNotFoundError:
             log.warning("api.lifespan.drift_reference.missing", channel=ch)
+            return ch, None
+
+
+async def _load_replay_slice(
+    ch: str,
+    settings: Settings,
+    sem: asyncio.Semaphore,
+    log: Any,
+) -> tuple[str, ReplayData | None]:
+    """Pre-load and slice the replay series for one channel at startup.
+
+    With replay_max_rows limiting each channel to ~3k rows (vs 9M+ for the
+    full test series), the whole-mission pre-cache is ~1 MB — safe in the
+    2 GiB Cloud Run instance.  Pre-caching here eliminates per-stream GCS
+    reads and makes streams start instantly instead of blocking on a parquet
+    read from GCS.
+    """
+    async with sem:
+        try:
+            values, _seg, anom, timestamps = await asyncio.to_thread(
+                load_series_parquet,
+                settings.preprocess.processed_data_dir,
+                settings.api.mission,
+                ch,
+                "test",
+            )
+            sl = _anomaly_slice(
+                anom,
+                warmup_rows=settings.api.replay_warmup_rows,
+                max_rows=settings.api.replay_max_rows,
+            )
+            data: ReplayData = (values[sl], anom[sl], timestamps[sl])
+            log.info("api.lifespan.replay_slice.loaded", channel=ch, rows=len(data[0]))
+            return ch, data
+        except Exception as exc:  # GCS unavailable, missing partition, etc.
+            log.warning("api.lifespan.replay_slice.failed", channel=ch, error=str(exc))
             return ch, None
 
 
@@ -255,14 +297,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ch: eng for ch, eng in engine_results if eng is not None
             }
 
-            # Replay series are NOT loaded here. Eagerly reading every channel's
-            # full test-series into memory at startup OOM-killed the 2 GiB Cloud
-            # Run instance at whole-mission scale (62 channels → SIGKILL). Instead
-            # replay_channel() loads a channel's series on demand when its SSE
-            # stream opens and releases it when the stream closes, so resident
-            # memory tracks active streams rather than the whole mission. AppState
-            # keeps an empty replay_data; streaming.py's .get() returns None and
-            # falls back to the on-demand parquet read.
             if not engines:
                 scope = (f"subsystems={settings.api.subsystems!r}"
                          if settings.api.subsystems else "whole mission")
@@ -276,14 +310,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 return
 
             drift_references: dict[str, object] = {}
-            if settings.drift.enabled:
-                for ch, ref in await asyncio.gather(
-                    *[_load_drift_ref(ch, settings, sem, log) for ch in engines]
-                ):
-                    if ref is not None:
-                        drift_references[ch] = ref
-            else:
+            replay_slices: dict[str, ReplayData] = {}
+
+            # Load drift references and replay slices concurrently — both are
+            # I/O-bound GCS reads and fit under the same semaphore. Replay
+            # slices are safe to pre-cache now that replay_max_rows limits each
+            # channel to ~3k rows (~1 MB total vs 9M+ rows / SIGKILL before).
+            load_results = await asyncio.gather(
+                *[_load_drift_ref(ch, settings, sem, log) for ch in engines],
+                *[_load_replay_slice(ch, settings, sem, log) for ch in engines],
+                return_exceptions=False,
+            )
+            n = len(engines)
+            for ch, ref in load_results[:n]:
+                if ref is not None:
+                    drift_references[ch] = ref
+            if not settings.drift.enabled:
                 log.info("api.lifespan.drift.disabled")
+                drift_references = {}
+            for ch, data in load_results[n:]:
+                if data is not None:
+                    replay_slices[ch] = data
 
             app.state.app_state = AppState(
                 settings=settings,
@@ -292,7 +339,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 device=device,
                 engines=MappingProxyType(engines),
                 channel_subsystem_map=MappingProxyType(channel_subsystem_map),
-                replay_data=MappingProxyType({}),  # lazy per-stream; see note above
+                replay_data=MappingProxyType(replay_slices),
                 startup_monotonic_ns=time.monotonic_ns(),
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
                 drift_references=MappingProxyType(drift_references),

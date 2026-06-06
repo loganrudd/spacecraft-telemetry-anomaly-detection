@@ -150,7 +150,7 @@ def running_app(test_settings: Settings, api_parquet: Path) -> FastAPI:
     app.state.app_state = AppState(
         settings=settings,
         mission=_MISSION,
-        subsystem=_SUBSYSTEM,
+        subsystems=[_SUBSYSTEM],
         device=torch.device("cpu"),
         engines=MappingProxyType({_CHANNEL: engine}),
         channel_subsystem_map=MappingProxyType({_CHANNEL: _SUBSYSTEM}),
@@ -243,7 +243,7 @@ def running_app_with_spike(test_settings: Settings, tmp_path: Path) -> FastAPI:
     app.state.app_state = AppState(
         settings=settings,
         mission=_MISSION,
-        subsystem=_SUBSYSTEM,
+        subsystems=[_SUBSYSTEM],
         device=torch.device("cpu"),
         engines=MappingProxyType({_CHANNEL: engine}),
         channel_subsystem_map=MappingProxyType({_CHANNEL: _SUBSYSTEM}),
@@ -314,7 +314,7 @@ def running_app_multi_ch(test_settings: Settings, tmp_path: Path) -> FastAPI:
     app.state.app_state = AppState(
         settings=settings,
         mission=_MISSION,
-        subsystem=_SUBSYSTEM,
+        subsystems=[_SUBSYSTEM],
         device=torch.device("cpu"),
         engines=MappingProxyType(engines),
         channel_subsystem_map=MappingProxyType(
@@ -342,7 +342,7 @@ def running_app_empty(test_settings: Settings) -> FastAPI:
     app.state.app_state = AppState(
         settings=test_settings,
         mission=_MISSION,
-        subsystem=_SUBSYSTEM,
+        subsystems=[_SUBSYSTEM],
         device=torch.device("cpu"),
         engines=MappingProxyType({}),
         channel_subsystem_map=MappingProxyType({}),

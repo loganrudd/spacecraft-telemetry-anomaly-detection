@@ -44,7 +44,7 @@ class TestHealthOk:
     def test_subsystem_field_present(self, running_app: FastAPI) -> None:
         body = TestClient(running_app).get("/health").json()
         # subsystem may be a string or null (whole-mission mode).
-        assert "subsystem" in body
+        assert "subsystems" in body
 
 
 class TestHealthDegraded:

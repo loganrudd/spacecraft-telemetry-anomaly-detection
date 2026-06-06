@@ -239,7 +239,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": ["ch-a", "ch-b"], "subsystem": "sub1"}
+                update={"channels": ["ch-a", "ch-b"], "subsystems": ["sub1"]}
             )}
         )
         app = create_app(settings)
@@ -256,7 +256,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": [], "subsystem": "sub1"}
+                update={"channels": [], "subsystems": ["sub1"]}
             )}
         )
         app = create_app(settings)
@@ -292,7 +292,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": [], "subsystem": "sub1"}
+                update={"channels": [], "subsystems": ["sub1"]}
             )}
         )
         app = create_app(settings)
@@ -323,7 +323,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": [], "subsystem": None}
+                update={"channels": [], "subsystems": None}
             )}
         )
         app = create_app(settings)
@@ -347,7 +347,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": ["ch-a", "ch-b"], "subsystem": None}
+                update={"channels": ["ch-a", "ch-b"], "subsystems": None}
             )}
         )
         app = create_app(settings)
@@ -370,7 +370,7 @@ class TestLifespanBranchCoverage:
         settings = load_settings("test")
         settings = settings.model_copy(
             update={"api": settings.api.model_copy(
-                update={"channels": [], "subsystem": None}
+                update={"channels": [], "subsystems": None}
             )}
         )
         app = create_app(settings)
