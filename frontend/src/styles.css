@@ -8,8 +8,9 @@
   --border: #30363d;
   --accent: #388bfd;
   --prediction: #3fb950;
-  --anomaly-true: rgba(248, 81, 73, 0.25);
-  --anomaly-predicted: rgba(210, 153, 34, 0.3);
+  --anomaly-true: rgba(248, 81, 73, 0.18);
+  --anomaly-predicted: rgba(210, 153, 34, 0.55);
+  --anomaly-predicted-stroke: rgba(210, 153, 34, 0.9);
   --alert: #d29922;
   --danger: #f85149;
   --success: #3fb950;

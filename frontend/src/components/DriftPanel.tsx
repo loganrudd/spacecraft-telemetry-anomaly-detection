@@ -1,5 +1,6 @@
 import DriftFeatureBar from "./DriftFeatureBar";
 import { useChannelDrift, useDriftedSince, useSubsystemDrift } from "../state/driftStore";
+import { formatChannel } from "../utils/formatChannel";
 
 type Props = {
   channels: string[];
@@ -47,7 +48,7 @@ function ChannelDriftRow({ channel }: { channel: string }) {
   if (!event) {
     return (
       <div className="drift-panel__channel drift-panel__channel--waiting">
-        <span className="drift-panel__channel-name">{channel}</span>
+        <span className="drift-panel__channel-name">{formatChannel(channel)}</span>
         <span className="drift-panel__channel-status">waiting…</span>
       </div>
     );
@@ -58,7 +59,7 @@ function ChannelDriftRow({ channel }: { channel: string }) {
       className={`drift-panel__channel${event.drifted ? " drift-panel__channel--drifted" : ""}`}
     >
       <div className="drift-panel__channel-header">
-        <span className="drift-panel__channel-name">{channel}</span>
+        <span className="drift-panel__channel-name">{formatChannel(channel)}</span>
         <span
           className={`drift-panel__channel-badge${event.drifted ? " drift-panel__channel-badge--alert" : ""}`}
         >

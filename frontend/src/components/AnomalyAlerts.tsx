@@ -1,5 +1,6 @@
 import { useEffect, useReducer } from "react";
 import { telemetryStore, ANOMALY_TTL_MS } from "../state/telemetryStore";
+import { formatChannel } from "../utils/formatChannel";
 
 type Props = {
   channels: string[];
@@ -50,7 +51,7 @@ export default function AnomalyAlerts({ channels }: Props) {
                 <td className="anomaly-alerts__ts">
                   {a.timestamp.replace("T", " ").replace("Z", "")}
                 </td>
-                <td>{a.channel}</td>
+                <td>{formatChannel(a.channel)}</td>
                 <td>
                   {a.smoothed_error !== null
                     ? a.smoothed_error.toFixed(3)

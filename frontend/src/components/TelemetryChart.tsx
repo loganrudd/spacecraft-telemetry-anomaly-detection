@@ -111,7 +111,9 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
               x1={iv.startTs}
               x2={iv.endTs}
               fill="var(--anomaly-predicted)"
-              strokeOpacity={0}
+              stroke="var(--anomaly-predicted-stroke)"
+              strokeWidth={1.5}
+              strokeOpacity={1}
             />
           ))}
 

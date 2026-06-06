@@ -1,3 +1,5 @@
+import { formatChannel } from "../utils/formatChannel";
+
 type Props = {
   allChannels: string[];  // channels in the current subsystem
   selected: string[];
@@ -52,7 +54,7 @@ export default function ChannelPicker({ allChannels, selected, onChange }: Props
               }}
               tabIndex={0}
             >
-              {ch}
+              {formatChannel(ch)}
             </li>
           );
         })}
