@@ -39,10 +39,12 @@ variable "api_cpu" {
 variable "api_memory" {
   description = "Memory allocation for the api Cloud Run service"
   type        = string
-  # 4Gi (up from 2Gi): whole-mission serving holds 60+ LSTM engines plus, while
-  # streaming, the lazily-loaded test-series for every concurrently-open SSE
-  # stream (the frontend opens one for all channels at once). 2Gi SIGKILLed.
-  default     = "4Gi"
+  # 2.5Gi: baseline usage is ~1.85 GiB (30 LSTM engines + drift references +
+  # pre-cached 3k-row replay slices). The full-series lazy load that SIGKILLed
+  # the 2Gi instance is gone — replay is now pre-cached at startup from slices
+  # (~1 MB total vs 9M+ rows). 2.5Gi gives ~650 MB headroom for inference
+  # spikes and GC pressure. 2Gi is too tight at ~92% baseline utilisation.
+  default     = "2.5Gi"
 }
 
 variable "api_min_instances" {
