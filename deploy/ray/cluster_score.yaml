@@ -7,7 +7,9 @@
 #   MISSION      Mission name (e.g. ESA-Mission2)
 #   TUNED        Set to "1" to fetch and apply tuned_configs.json from GCS.
 #                Omit (or set to "") for a clean Hundman-defaults baseline.
-#   NUM_GPUS     GPU fraction per score task (cloud_score.sh defaults to 0.125).
+#   NUM_GPUS     GPU fraction per score task (cloud_score.sh defaults to 0.2).
+#   EVAL_SPLIT   Test slice the metrics cover (cloud_score.sh defaults to
+#                final_portion; set full_test for a coverage view).
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_score.yaml | kubectl apply -f -
@@ -39,11 +41,13 @@ spec:
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
+    --eval-split ${EVAL_SPLIT}
     --tuned-configs /tmp/tuned_configs.json;
     else
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt;
+    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
+    --eval-split ${EVAL_SPLIT};
     fi'
 
   shutdownAfterJobFinishes: true

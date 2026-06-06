@@ -810,6 +810,15 @@ def ray_train(
     default=None,
     help="Path to JSON file with per-subsystem scoring param overrides (Phase 5 output).",
 )
+@click.option(
+    "--eval-split",
+    type=click.Choice(["final_portion", "full_test", "hpo_portion"]),
+    default="final_portion",
+    show_default=True,
+    help="Which test slice the reported metrics cover. final_portion = held-out "
+    "last 40% (leakage-free baseline-vs-tuned comparison); full_test = every "
+    "window (coverage view, scores channels whose anomalies fall outside the held-out slice).",
+)
 @click.pass_context
 def ray_score(
     ctx: click.Context,
@@ -819,6 +828,7 @@ def ray_score(
     subsystem: str | None,
     max_channels: int | None,
     tuned_configs: Path | None,
+    eval_split: str,
 ) -> None:
     """Score channels in parallel using Ray Core.
 
@@ -858,6 +868,7 @@ def ray_score(
             mission=mission,
             n_channels=len(channel_list),
             subsystem=subsystem,
+            eval_split=eval_split,
         )
         results = score_all_channels(
             settings,
@@ -865,6 +876,7 @@ def ray_score(
             channel_list,
             max_channels=max_channels,
             tuned_configs=tuned,
+            eval_split=eval_split,
         )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")

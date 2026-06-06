@@ -207,6 +207,7 @@ def score_all_channels(
     *,
     max_channels: int | None = None,
     tuned_configs: dict[str, dict[str, Any]] | None = None,
+    eval_split: str = "final_portion",
 ) -> list[dict[str, Any]]:
     """Fan out score_channel across channels using Ray Core.
 
@@ -309,13 +310,13 @@ def score_all_channels(
         run_id = meta.get("run_id")
         return str(run_id) if run_id is not None else None
 
-    # Both baseline and tuned scoring evaluate on the same held-out final
-    # portion so F0.5 comparisons are apples-to-apples. HPO only saw
-    # hpo_portion (first hpo_eval_fraction of test windows), so final_portion
-    # is genuinely unseen for both default and tuned params.
-    # Use eval_split="full_test" only when you want an overall-model-quality
-    # metric independent of any HPO comparison.
-    eval_split = "final_portion"
+    # eval_split (default "final_portion") selects which temporal slice the
+    # reported metrics cover. "final_portion" is the held-out last 40%: HPO only
+    # saw hpo_portion (first hpo_eval_fraction), so this keeps baseline-vs-tuned
+    # F0.5 apples-to-apples and leakage-free. Pass "full_test" for a coverage /
+    # deployment-readiness view that scores every test window (mildly optimistic
+    # for tuned params, which saw the first 60%) — use it to evaluate channels
+    # whose anomalies fall outside the held-out slice, not for the HPO comparison.
 
     # predict() is a torch LSTM forward pass — the heavy part of scoring (~20
     # min/channel on CPU for large channels); only the downstream anomaly scoring
