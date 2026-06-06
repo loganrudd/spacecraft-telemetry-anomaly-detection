@@ -384,12 +384,14 @@ class TestApiConfig:
         assert cfg.host == "127.0.0.1"
         assert cfg.port == 8000
         assert cfg.mission == "ESA-Mission1"
-        assert cfg.subsystem is None
+        assert cfg.subsystems is None
         assert cfg.channels == []
-        assert cfg.replay_speed_default == 10.0
+        assert cfg.replay_speed_default == 100.0
         assert cfg.replay_tick_interval_seconds == 1.0
         assert cfg.stream_buffer_max_events == 256
         assert cfg.request_timeout_seconds == 30
+        assert cfg.replay_warmup_rows == 500
+        assert cfg.replay_max_rows == 3000
 
     def test_port_negative_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="port"):
@@ -438,7 +440,7 @@ class TestApiConfig:
             "api:\n"
             "  host: \"0.0.0.0\"\n"
             "  port: 9000\n"
-            "  subsystem: \"subsystem_1\"\n"
+            "  subsystems: [\"subsystem_1\"]\n"
         )
         monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
         monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
@@ -447,21 +449,21 @@ class TestApiConfig:
 
         assert settings.api.host == "0.0.0.0"
         assert settings.api.port == 9000
-        assert settings.api.subsystem == "subsystem_1"
+        assert settings.api.subsystems == ["subsystem_1"]
 
     def test_api_env_var_override(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         config_dir = tmp_path / "configs"
         config_dir.mkdir()
-        (config_dir / "local.yaml").write_text("api:\n  subsystem: \"subsystem_6\"\n")
+        (config_dir / "local.yaml").write_text("api:\n  subsystems: [\"subsystem_6\"]\n")
         monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
-        monkeypatch.setenv("SPACECRAFT_API__SUBSYSTEM", "subsystem_1")
+        monkeypatch.setenv("SPACECRAFT_API__SUBSYSTEMS", '["subsystem_1"]')
         monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
 
         settings = load_settings("local")
 
-        assert settings.api.subsystem == "subsystem_1"  # env var wins
+        assert settings.api.subsystems == ["subsystem_1"]  # env var wins
 
     def test_test_env_loads_correct_api_defaults(
         self, monkeypatch: pytest.MonkeyPatch

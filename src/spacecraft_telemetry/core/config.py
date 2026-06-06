@@ -389,9 +389,19 @@ class ApiConfig(BaseModel):
     subsystems: list[str] | None = None
     # Explicit channel list; when non-empty, overrides subsystems/mission discovery.
     channels: list[str] = []
-    replay_speed_default: float = 10.0
+    replay_speed_default: float = 100.0
     replay_tick_interval_seconds: float = 1.0
     stream_buffer_max_events: int = 256
+    # Slice the test-split replay to a short, anomaly-dense window so demos
+    # show an anomaly quickly without streaming the full test series (which is
+    # 9M+ rows for large channels and keeps the Cloud Run instance alive for
+    # hours). When the channel has labeled anomalies, the slice starts
+    # replay_warmup_rows before the first anomaly run (so the dynamic threshold
+    # is warm on arrival) and ends at replay_max_rows total. Channels with no
+    # is_anomaly=True rows fall back to the first replay_max_rows rows.
+    # Set replay_max_rows=0 to disable slicing (replay the full test set).
+    replay_warmup_rows: int = 500
+    replay_max_rows: int = 3000
     request_timeout_seconds: int = 30
     # CORS allowed origins — empty list disables CORS middleware entirely.
     # Populate in local.yaml for Vite dev server; set prod origin in cloud.yaml.

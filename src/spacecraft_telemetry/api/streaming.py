@@ -188,6 +188,8 @@ async def telemetry_stream(
             speed=speed,
             tick_interval_seconds=state.settings.api.replay_tick_interval_seconds,
             cached_data=state.replay_data.get(channel),
+            warmup_rows=state.settings.api.replay_warmup_rows,
+            max_rows=state.settings.api.replay_max_rows,
         ):
             event = engine.step(val, ts, anom_true)
             payload = (
@@ -267,6 +269,8 @@ async def drift_stream(
             speed=speed,
             tick_interval_seconds=state.settings.api.replay_tick_interval_seconds,
             cached_data=state.replay_data.get(channel),
+            warmup_rows=state.settings.api.replay_warmup_rows,
+            max_rows=state.settings.api.replay_max_rows,
         ):
             monitor.push({"value_normalized": float(val)})
 
