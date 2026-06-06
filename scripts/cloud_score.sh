@@ -20,6 +20,9 @@
 #                Each task is a separate ~3.6 GiB CUDA process, so ~5 fit on the
 #                22 GiB L4; 8-way OOMs. The worker always provisions a GPU node,
 #                so 0 is not a CPU fallback.
+#   EVAL_SPLIT   Test slice the metrics cover (default: final_portion = held-out
+#                last 40%). Set full_test for a coverage view that also scores
+#                channels whose anomalies fall outside the held-out slice.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -54,7 +57,11 @@ REGION="${REGION:-us-central1}"
 # 22 GiB L4. 0.2 = 5-way leaves ~4 GiB headroom; 0.125 (8-way) OOMs (8 × 3.6 ≈
 # 29 GiB). Raise toward 0.25 (4-way) for more margin.
 NUM_GPUS="${NUM_GPUS:-0.2}"
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS
+# final_portion = held-out last 40% (leakage-free baseline-vs-tuned comparison).
+# full_test scores every window — a coverage view that also evaluates channels
+# whose anomalies fall outside the held-out slice.
+EVAL_SPLIT="${EVAL_SPLIT:-final_portion}"
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"
