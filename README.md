@@ -250,6 +250,50 @@ make cloud-deploy
 
 Architecture decisions: [docs/architecture/phase-10-gcp.md](docs/architecture/phase-10-gcp.md)
 
+## Evaluation
+
+The model is an off-the-shelf Telemanom LSTM — the value of this project is the
+platform around it, so evaluation is built for **honest, leakage-free measurement**
+rather than a headline number.
+
+**Protocol.** Scoring thresholds are tuned (per-subsystem Ray Tune HPO) on the
+first 60% of each channel's test set; reported metrics are computed on the
+untouched final 40%. The metric is **segment-overlap F0.5** (β=0.5 — false alarms
+are operationally costlier than late detections), deliberately *not* the
+point-adjust convention common in the SMAP/MSL literature, which inflates scores
+by crediting an entire anomaly segment for a single detected point.
+
+**Results (ESA-Mission1, held-out 40%, tuned).** Of 31 channels with labeled
+anomalies in the held-out window, **30 register detection** (segment-F0.5 > 0):
+
+| metric (mean over detected channels) | value |
+|---|---|
+| segment recall | 0.56 |
+| segment precision | 0.22 |
+| segment F0.5 | 0.19 |
+
+Detection is **precision-limited**: the forecaster recalls over half the true
+anomaly segments, but most predicted segments don't overlap a *labeled* one. On
+[ESA-ADB](https://arxiv.org/abs/2406.17826) — built specifically to be harder and
+more realistic than SMAP/MSL, where Telemanom reports ~0.7 — segment-F0.5 in the
+~0.2–0.4 range is in-family for this model class, and the low precision is
+consistent with the benchmark's known label sparsity (real-but-unlabeled
+anomalies counted as false positives). The number is reported as-is, not tuned
+upward against the held-out split.
+
+**Channel accounting.** A single fleet average hides the structure, so a
+diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
+ground truth:
+
+| bucket | count | meaning |
+|---|---:|---|
+| detected | 30 | anomalies in held-out window, segment-F0.5 > 0 |
+| outside eval window | 23 | trained & serving, but labeled anomalies fall in the first-60% / pre-test era — not scoreable on the held-out split |
+| no labeled anomalies | 8 | nothing to detect in the dataset — excluded |
+| forecaster blind spot | 1 | forecasts the channel *and its anomalies* accurately, so the error never spikes — a known Telemanom limitation, confirmed with `scripts/inspect_channel.py` |
+
+The live demo serves the 30 validated channels.
+
 ## Known Limitations
 
 **Channel toggle restarts replay from row 0.**  
