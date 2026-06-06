@@ -12,6 +12,7 @@ import {
 import type { TooltipProps } from "recharts";
 import { useTelemetryChannel } from "../state/telemetryStore";
 import { collapseFlags } from "../utils/anomalyIntervals";
+import { formatChannel } from "../utils/formatChannel";
 import type { TelemetryEvent } from "../api/types";
 
 type DensityTier = "comfortable" | "compact" | "dense";
@@ -21,6 +22,11 @@ const CHART_HEIGHTS: Record<DensityTier, number> = {
   compact: 150,
   dense: 100,
 };
+
+// Number of most-recent events visible in the chart. The store retains more
+// history (ring buffer), but showing all of it squeezes the X axis progressively
+// as data arrives. A fixed window keeps the scale stable from the first tick.
+const CHART_WINDOW = 200;
 
 type Props = { channel: string; density?: DensityTier };
 
@@ -47,15 +53,18 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
 
 function TelemetryChart({ channel, density = "comfortable" }: Props) {
   const events = useTelemetryChannel(channel);
+  // Slice to the most recent CHART_WINDOW events so the X axis scale stays
+  // stable as data arrives instead of squeezing all history into view.
+  const visible = events.slice(-CHART_WINDOW);
 
-  const trueIntervals = collapseFlags(events, "is_anomaly");
-  const predIntervals = collapseFlags(events, "is_anomaly_predicted");
+  const trueIntervals = collapseFlags(visible, "is_anomaly");
+  const predIntervals = collapseFlags(visible, "is_anomaly_predicted");
   const chartHeight = CHART_HEIGHTS[density];
 
   if (events.length === 0) {
     return (
       <section className={`telemetry-chart telemetry-chart--${density}`}>
-        <h2 className="telemetry-chart__title">{channel}</h2>
+        <h2 className="telemetry-chart__title">{formatChannel(channel)}</h2>
         <p className="telemetry-chart__waiting">Waiting for data…</p>
       </section>
     );
@@ -66,7 +75,7 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
       <h2 className="telemetry-chart__title">{channel}</h2>
       <ResponsiveContainer width="100%" height={chartHeight}>
         <LineChart
-          data={events}
+          data={visible}
           margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
         >
           <XAxis

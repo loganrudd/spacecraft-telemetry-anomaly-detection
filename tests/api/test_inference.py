@@ -354,3 +354,31 @@ def test_event_serialisable_to_json() -> None:
     json_str = event.model_dump_json()
     assert "test-mission" in json_str
     assert "test-channel" in json_str
+
+
+def test_reset_produces_identical_output_to_fresh_engine() -> None:
+    """reset() must restore exactly the same state as a freshly constructed engine.
+
+    Without reset(), state from one stream leaks into the next connection —
+    if the previous stream ended during an anomaly, _s_prev is elevated and
+    anomalies fire immediately on the first tick of the new replay.
+    """
+    ts = datetime(2000, 1, 1, tzinfo=UTC)
+    dt = timedelta(seconds=1)
+
+    # Run a fresh engine through a spike (elevated error) to dirty its state.
+    dirty = _build_engine()
+    for i in range(50):
+        dirty.step(100.0 if i > 20 else 0.0, ts + i * dt, False)
+
+    # Reset and re-run with the same inputs as a parallel fresh engine.
+    dirty.reset()
+    fresh = _build_engine()
+
+    for i in range(30):
+        v = float(i % 3)
+        e_dirty = dirty.step(v, ts + i * dt, False)
+        e_fresh = fresh.step(v, ts + i * dt, False)
+        assert e_dirty.prediction == e_fresh.prediction, f"prediction mismatch at tick {i}"
+        assert e_dirty.smoothed_error == e_fresh.smoothed_error, f"smoothed_error mismatch at tick {i}"
+        assert e_dirty.is_anomaly_predicted == e_fresh.is_anomaly_predicted, f"flag mismatch at tick {i}"

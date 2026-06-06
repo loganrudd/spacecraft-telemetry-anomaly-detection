@@ -119,6 +119,23 @@ class ChannelInferenceEngine:
             maxlen=params.threshold_min_anomaly_len
         )
 
+    def reset(self) -> None:
+        """Reset all rolling state so the next stream replay starts cold.
+
+        Must be called at the start of each SSE stream connection before the
+        first step().  Without a reset, state from a previous stream leaks into
+        the new one: if the previous stream ended during an anomaly, _s_prev is
+        elevated, the threshold is distorted, and anomalies fire immediately on
+        the very first tick of the new replay — producing inconsistent timing
+        across page refreshes.
+        """
+        self._window_buf.clear()
+        self._input_buf.zero_()
+        self._s_prev = None
+        self._smoothed_pos = 0
+        self._smoothed_count = 0
+        self._raw_flag_buf.clear()
+
     @torch.no_grad()
     def step(
         self, value: float, timestamp: datetime, is_anomaly: bool

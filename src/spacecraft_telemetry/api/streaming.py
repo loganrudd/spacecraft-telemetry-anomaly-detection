@@ -181,6 +181,10 @@ async def telemetry_stream(
         """Replay one channel and push SSE payloads into its queue."""
         structlog.contextvars.bind_contextvars(channel_id=channel)
         engine = state.engines[channel]
+        # Reset rolling state so each stream connection starts cold. Without
+        # this, state from a previous stream leaks in and anomaly timing is
+        # non-deterministic across page refreshes.
+        engine.reset()
         async for ts, val, anom_true in replay_channel(
             state.settings.preprocess.processed_data_dir,
             state.mission,
