@@ -39,6 +39,9 @@ from spacecraft_telemetry.api.drift import DriftSnapshot, RollingDriftMonitor
 from spacecraft_telemetry.api.models import DriftEvent, DriftFeature
 from spacecraft_telemetry.api.replay import replay_channel
 from spacecraft_telemetry.api.state import AppState
+
+# EventBroadcaster imported lazily in subscriber_stream to avoid circular
+# imports; AppState.broadcaster is typed Any at runtime via TYPE_CHECKING.
 from spacecraft_telemetry.core.logging import get_logger
 
 _log = get_logger("api.streaming")
@@ -140,6 +143,49 @@ async def _merge_queues(
                 result, asyncio.CancelledError
             ):
                 _log.error(log_event, channel=ch, error=str(result))
+
+
+async def subscriber_stream(
+    state: AppState,
+    request: Request,
+    selected_channels: list[str],
+) -> AsyncGenerator[bytes, None]:
+    """Attach to the shared replay loop and yield events for ``selected_channels``.
+
+    Each SSE connection subscribes to the shared ``EventBroadcaster`` (started
+    once at container startup) rather than spawning its own engine pumps.
+    Refresh/reconnect attaches to the in-progress stream — no per-connection
+    warmup.  On disconnect the subscription is cleaned up automatically.
+
+    Falls through to ``telemetry_stream`` when no broadcaster is available
+    (test fixtures that construct AppState directly without lifespan).
+    """
+    broadcaster = state.broadcaster
+    assert broadcaster is not None  # caller checks this
+
+    client_id, q = await broadcaster.subscribe(frozenset(selected_channels))
+
+    disconnect = asyncio.Event()
+
+    async def _watch_disconnect() -> None:
+        while True:
+            msg = await request.receive()
+            if msg["type"] == "http.disconnect":
+                disconnect.set()
+                return
+
+    watcher = asyncio.create_task(_watch_disconnect())
+    try:
+        while not disconnect.is_set():
+            try:
+                payload = await asyncio.wait_for(q.get(), timeout=1.0)
+                yield payload
+            except TimeoutError:
+                pass  # re-check disconnect flag
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        await broadcaster.unsubscribe(client_id)
 
 
 async def telemetry_stream(

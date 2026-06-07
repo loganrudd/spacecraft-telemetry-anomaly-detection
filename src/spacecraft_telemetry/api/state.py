@@ -18,11 +18,18 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+
+# TYPE_CHECKING import avoids a circular dependency at runtime:
+# broadcast.py imports state.py (for the AppState type hint), so importing
+# EventBroadcaster here at runtime would create a cycle.
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from spacecraft_telemetry.core.config import Settings
+
+if TYPE_CHECKING:
+    from spacecraft_telemetry.api.broadcast import EventBroadcaster
 
 
 @dataclass
@@ -71,6 +78,11 @@ class AppState:
     drift_references: MappingProxyType[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    # Shared SSE fan-out hub.  Set when the shared replay loop is running
+    # (production lifespan).  None in tests that construct AppState directly
+    # without going through the lifespan — those fall back to the per-connection
+    # pump in telemetry_stream().
+    broadcaster: EventBroadcaster | None = None
 
     @property
     def channels_loaded(self) -> list[str]:

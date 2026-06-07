@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from spacecraft_telemetry.api.models import HealthResponse, StreamQueryParams
 from spacecraft_telemetry.api.state import AppState, LoadingState
-from spacecraft_telemetry.api.streaming import drift_stream, telemetry_stream
+from spacecraft_telemetry.api.streaming import drift_stream, subscriber_stream, telemetry_stream
 
 router = APIRouter()
 
@@ -184,13 +184,16 @@ async def stream(
             detail=f"unknown channels: {unknown}",
         )
 
+    # Use the shared broadcaster loop when available (production lifespan).
+    # Fall back to the per-connection pump for test fixtures that construct
+    # AppState directly without starting the loop.
+    generator = (
+        subscriber_stream(state, request, selected)
+        if state.broadcaster is not None
+        else telemetry_stream(state, request, speed=effective_speed, selected_channels=selected)
+    )
     return StreamingResponse(
-        telemetry_stream(
-            state,
-            request,
-            speed=effective_speed,
-            selected_channels=selected,
-        ),
+        generator,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -48,6 +48,7 @@ from fastapi.staticfiles import StaticFiles
 from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.api import endpoints
+from spacecraft_telemetry.api.broadcast import EventBroadcaster, run_shared_loop
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.replay import ReplayData, _anomaly_slice
@@ -332,6 +333,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if data is not None:
                     replay_slices[ch] = data
 
+            broadcaster = EventBroadcaster()
             app.state.app_state = AppState(
                 settings=settings,
                 mission=settings.api.mission,
@@ -344,6 +346,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
                 drift_references=MappingProxyType(drift_references),
                 resolved_channels=resolved,
+                broadcaster=broadcaster,
+            )
+            # Start the shared replay loop.  All SSE subscribers attach to the
+            # in-progress stream — no per-connection warmup.  The task runs until
+            # the lifespan shuts down (FastAPI cancels it on exit).
+            app.state.loop_task = asyncio.create_task(
+                run_shared_loop(app.state.app_state),
+                name="shared-replay-loop",
             )
             log.info("api.lifespan.startup.complete", channels_loaded=sorted(engines.keys()))
 
@@ -365,6 +375,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        loop_task = getattr(app.state, "loop_task", None)
+        if loop_task is not None and not loop_task.done():
+            loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop_task
         log.info("api.lifespan.shutdown")
 
 
