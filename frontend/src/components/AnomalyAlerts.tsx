@@ -1,5 +1,5 @@
 import { useEffect, useReducer } from "react";
-import { telemetryStore, ANOMALY_TTL_MS } from "../state/telemetryStore";
+import { telemetryStore, CHART_WINDOW } from "../state/telemetryStore";
 import { formatChannel } from "../utils/formatChannel";
 
 type Props = {
@@ -10,17 +10,17 @@ export default function AnomalyAlerts({ channels }: Props) {
   const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
+    // Store notifies on every rAF flush, so alerts clear automatically when
+    // their triggering event scrolls off the chart — no polling needed.
     const unsub = telemetryStore.subscribe(forceUpdate);
-    // 1 Hz tick so expired alerts clear from the list even when no SSE events arrive,
-    // matching the same timer pattern used by the overview badge in useSubsystemRollup.
-    const id = setInterval(forceUpdate, 1_000);
-    return () => { unsub(); clearInterval(id); };
+    return () => unsub();
   }, []);
 
   const channelSet = new Set(channels);
-  const nowMs = Date.now();
   const alerts = telemetryStore.recentAlerts.filter(
-    (a) => channelSet.has(a.channel) && nowMs - a.capturedAtMs < ANOMALY_TTL_MS,
+    (a) =>
+      channelSet.has(a.channel) &&
+      telemetryStore.pushCount(a.channel) - a.capturedAtCount < CHART_WINDOW,
   );
 
   return (

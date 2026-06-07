@@ -3,16 +3,21 @@ import type { TelemetryEvent } from "../api/types";
 
 const BUFFER_SIZE = 600;
 
-// Shared TTL for anomaly recency — used by both the overview badge and the
-// per-channel Anomaly Alerts list so both clear on the same schedule.
+// Number of events shown in the chart's rolling window.  Alerts are visible
+// exactly as long as their triggering event remains in this window.  Must
+// match CHART_WINDOW in TelemetryChart.tsx.
+export const CHART_WINDOW = 200;
+
+// Shared TTL for anomaly recency — used by the overview badge in
+// useSubsystemRollup to keep the badge lit for 60 s after an anomaly.
 export const ANOMALY_TTL_MS = 60_000;
 const MAX_ALERTS = 50;
 let _alertId = 0;
 
 export type StoredAlert = {
   id: number;
-  capturedAtMs: number; // wall-clock epoch ms — used for TTL comparison
-  timestamp: string;    // telemetry event timestamp (display only)
+  capturedAtCount: number; // per-channel push count at capture — used for chart-window visibility
+  timestamp: string;       // telemetry event timestamp (display only)
   channel: string;
   smoothed_error: number | null;
   threshold: number | null;
@@ -65,9 +70,12 @@ export class TelemetryStore {
   // Epoch-ms of the most recent tick per channel. Used by useSubsystemRollup to
   // determine whether a channel is actively streaming without reading the full buffer.
   lastTickAtMs: Record<string, number> = {};
+  // Monotonically increasing push count per channel.  Stored in each alert so
+  // AnomalyAlerts can tell whether the alert is still within the chart window.
+  private _pushCount: Record<string, number> = {};
   // Rising-edge anomaly alerts captured globally (regardless of which channel view
-  // is mounted). AnomalyAlerts reads from here and filters by TTL so the list and
-  // the overview badge clear on the same 60-second schedule.
+  // is mounted). AnomalyAlerts reads from here and removes alerts whose triggering
+  // event has scrolled off the chart window.
   recentAlerts: StoredAlert[] = [];
   private prevPredicted: Record<string, boolean> = {};
 
@@ -80,6 +88,8 @@ export class TelemetryStore {
     ringPush(ring, event);
     const nowMs = Date.now();
     this.lastTickAtMs[event.channel] = nowMs;
+    const count = (this._pushCount[event.channel] ?? 0) + 1;
+    this._pushCount[event.channel] = count;
     if (event.is_anomaly_predicted) {
       this.lastAnomalyAtMs[event.channel] = nowMs;
     }
@@ -88,7 +98,7 @@ export class TelemetryStore {
     if (!prevPred && event.is_anomaly_predicted) {
       const alert: StoredAlert = {
         id: ++_alertId,
-        capturedAtMs: nowMs,
+        capturedAtCount: count,
         timestamp: event.timestamp,
         channel: event.channel,
         smoothed_error: event.smoothed_error,
@@ -122,12 +132,17 @@ export class TelemetryStore {
     return Array.from(this.buffers.keys());
   }
 
+  pushCount(channel: string): number {
+    return this._pushCount[channel] ?? 0;
+  }
+
   clear(): void {
     this.buffers.clear();
     this.snapshots.clear();
     this.dirty.clear();
     this.lastAnomalyAtMs = {};
     this.lastTickAtMs = {};
+    this._pushCount = {};
     this.recentAlerts = [];
     this.prevPredicted = {};
     this.notify();

@@ -10,7 +10,7 @@ import {
   Legend,
 } from "recharts";
 import type { TooltipProps } from "recharts";
-import { useTelemetryChannel } from "../state/telemetryStore";
+import { useTelemetryChannel, CHART_WINDOW } from "../state/telemetryStore";
 import { collapseFlags } from "../utils/anomalyIntervals";
 import { formatChannel } from "../utils/formatChannel";
 import type { TelemetryEvent } from "../api/types";
@@ -23,10 +23,7 @@ const CHART_HEIGHTS: Record<DensityTier, number> = {
   dense: 100,
 };
 
-// Number of most-recent events visible in the chart. The store retains more
-// history (ring buffer), but showing all of it squeezes the X axis progressively
-// as data arrives. A fixed window keeps the scale stable from the first tick.
-const CHART_WINDOW = 200;
+// Imported from telemetryStore so AnomalyAlerts uses the same window boundary.
 
 type Props = { channel: string; density?: DensityTier };
 
