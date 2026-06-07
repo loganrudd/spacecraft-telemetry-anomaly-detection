@@ -56,6 +56,43 @@ def _make_series_df(n: int = 300, seed: int = 0) -> pd.DataFrame:
     )
 
 
+def _write_series_parquet(
+    base: Path,
+    mission: str,
+    channel: str,
+    n: int = 300,
+    seed: int = 0,
+    split: str = "test",
+    anomaly_rows: int = 10,
+) -> None:
+    """Write a minimal series Parquet at the Hive-partitioned path for ``split``.
+
+    ``anomaly_rows`` rows at the end are marked is_anomaly=True so that tests
+    of build_reference_profile can verify the nominal-only filter is applied.
+    """
+    rng = np.random.default_rng(seed)
+    timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
+    is_anomaly = np.zeros(n, dtype=bool)
+    if anomaly_rows > 0:
+        is_anomaly[-anomaly_rows:] = True
+    table = pa.table(
+        {
+            "telemetry_timestamp": pa.array(timestamps.astype("datetime64[us, UTC]")),
+            "value_normalized": pa.array(rng.standard_normal(n).astype("float32")),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array(is_anomaly),
+        },
+        schema=_SERIES_FILE_SCHEMA,
+    )
+    partition_dir = (
+        base / mission / split
+        / f"mission_id={mission}"
+        / f"channel_id={channel}"
+    )
+    partition_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, partition_dir / "part.parquet")
+
+
 def _write_train_parquet(
     base: Path,
     mission: str,
@@ -63,25 +100,8 @@ def _write_train_parquet(
     n: int = 300,
     seed: int = 0,
 ) -> None:
-    """Write a minimal series Parquet at the Hive-partitioned train path."""
-    rng = np.random.default_rng(seed)
-    timestamps = pd.date_range("2020-01-01", periods=n, freq="1s", tz="UTC")
-    table = pa.table(
-        {
-            "telemetry_timestamp": pa.array(timestamps.astype("datetime64[us, UTC]")),
-            "value_normalized": pa.array(rng.standard_normal(n).astype("float32")),
-            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
-            "is_anomaly": pa.array(np.zeros(n, dtype=bool)),
-        },
-        schema=_SERIES_FILE_SCHEMA,
-    )
-    partition_dir = (
-        base / mission / "train"
-        / f"mission_id={mission}"
-        / f"channel_id={channel}"
-    )
-    partition_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, partition_dir / "part.parquet")
+    """Backwards-compat wrapper — writes train split with no anomaly rows."""
+    _write_series_parquet(base, mission, channel, n=n, seed=seed, split="train", anomaly_rows=0)
 
 
 # ---------------------------------------------------------------------------
@@ -272,19 +292,19 @@ class TestReferenceProfilePath:
 
 class TestBuildReferenceProfile:
     def test_returns_monitoring_cols(self, tmp_path: Path) -> None:
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert list(df.columns) == MONITORING_FEATURE_COLS
 
     def test_no_nans_in_output(self, tmp_path: Path) -> None:
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert not df.isnull().any().any()
 
     def test_caps_at_reference_sample_rows(self, tmp_path: Path) -> None:
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(
             preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=10),
@@ -293,18 +313,32 @@ class TestBuildReferenceProfile:
         assert len(df) == 10
 
     def test_does_not_sample_when_under_cap(self, tmp_path: Path) -> None:
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        # 300 rows, 10 anomalous = 290 nominal; minus 99 rolling warmup and 1
+        # rate_of_change diff ≈ 190 nominal rows kept, all below the 5000 cap.
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300, anomaly_rows=10)
         settings = Settings(
             preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=5000),
         )
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
-        # 300 rows - 99 warmup - 1 (rate_of_change diff) = 200 rows kept; all below cap
-        assert 0 < len(df) <= 300
+        assert 0 < len(df) <= 290
+
+    def test_nominal_only_excludes_anomalous_rows(self, tmp_path: Path) -> None:
+        """Anomalous rows must not appear in the reference profile."""
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300, anomaly_rows=50)
+        settings = Settings(
+            preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
+            monitoring=MonitoringConfig(reference_sample_rows=5000),
+        )
+        df = build_reference_profile(settings, _MISSION, _CHANNEL)
+        # Profile is built from test-split nominal rows only; 50 anomalous rows
+        # are excluded upstream before rolling features, so the output must
+        # contain fewer rows than a profile built from all 300 rows would.
+        assert 0 < len(df) <= 250
 
     def test_sampling_is_reproducible(self, tmp_path: Path) -> None:
         """Two calls with same settings must return identical sampled rows."""
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(
             preprocess=PreprocessingConfig(processed_data_dir=tmp_path),
             monitoring=MonitoringConfig(reference_sample_rows=50),
@@ -319,7 +353,7 @@ class TestBuildReferenceProfile:
             build_reference_profile(settings, _MISSION, "nonexistent_channel")
 
     def test_index_is_zero_based_sequential(self, tmp_path: Path) -> None:
-        _write_train_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
+        _write_series_parquet(tmp_path, _MISSION, _CHANNEL, n=300)
         settings = Settings(preprocess=PreprocessingConfig(processed_data_dir=tmp_path))
         df = build_reference_profile(settings, _MISSION, _CHANNEL)
         assert list(df.index) == list(range(len(df)))

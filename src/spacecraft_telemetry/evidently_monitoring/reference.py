@@ -115,32 +115,32 @@ def _load_channel_series(
     mission: str,
     channel: str,
     split: str,
+    nominal_only: bool = False,
 ) -> pd.DataFrame:
     """Read the tail of a channel's raw series Parquet for monitoring.
 
     Path: ``{processed_data_dir}/{mission}/{split}/mission_id={M}/channel_id={C}/``
 
-    Only ``telemetry_timestamp`` and ``value_normalized`` are loaded (half the
-    I/O vs the full SERIES_SCHEMA).  After sorting, only the last
-    ``reference_sample_rows + max(feature_windows)`` rows are retained before
-    returning — this is the minimum contiguous prefix needed to produce
-    ``reference_sample_rows`` valid rolling-feature rows after warmup.  For a
-    500K-row channel this reduces the downstream rolling-feature compute from
-    O(500K x W) to O(5100 x W).
+    When ``nominal_only=True``, loads ``is_anomaly`` alongside the value columns
+    and drops rows where ``is_anomaly=True`` before returning, so the resulting
+    distribution reflects only the normal operating regime.
 
-    The "recent tail" interpretation is intentional: the most recent training
-    rows are the relevant reference distribution when current data arrives today.
+    Only ``telemetry_timestamp`` and ``value_normalized`` (plus ``is_anomaly``
+    when ``nominal_only=True``) are loaded.  After sorting and optional anomaly
+    filtering, only the last ``reference_sample_rows + max(feature_windows)``
+    rows are retained — the minimum contiguous prefix needed for rolling-feature
+    warmup.
 
     Args:
-        settings: Runtime settings.
-        mission:  Mission identifier, e.g. ``"ESA-Mission1"``.
-        channel:  Channel identifier, e.g. ``"channel_1"``.
-        split:    ``"train"`` or ``"test"``.
+        settings:     Runtime settings.
+        mission:      Mission identifier, e.g. ``"ESA-Mission1"``.
+        channel:      Channel identifier, e.g. ``"channel_1"``.
+        split:        ``"train"`` or ``"test"``.
+        nominal_only: When True, drop anomalous rows before returning.
 
     Returns:
         DataFrame with ``telemetry_timestamp`` and ``value_normalized``, sorted
-        by timestamp, index reset to 0-based. At most
-        ``reference_sample_rows + max(feature_windows)`` rows.
+        by timestamp, index reset to 0-based.
 
     Raises:
         FileNotFoundError: If the partition directory does not exist.
@@ -157,11 +157,14 @@ def _load_channel_series(
             f"No {split} series Parquet for mission={mission!r} channel={channel!r}. "
             f"Expected: {partition_dir}"
         )
-    table = pq.read_table(
-        str(partition_dir),
-        columns=["telemetry_timestamp", "value_normalized"],
-    )
+    cols = ["telemetry_timestamp", "value_normalized"]
+    if nominal_only:
+        cols = [*cols, "is_anomaly"]
+    table = pq.read_table(str(partition_dir), columns=cols)
     df = table.to_pandas().sort_values("telemetry_timestamp")
+
+    if nominal_only:
+        df = df[~df["is_anomaly"]].drop(columns=["is_anomaly"])
 
     # Tail-slice before rolling: only contiguous rows needed for output.
     max_window = max(settings.preprocess.feature_windows)
@@ -179,10 +182,21 @@ def build_reference_profile(
 ) -> pd.DataFrame:
     """Build a reference feature DataFrame for the given channel.
 
-    Reads the train-split Parquet for ``(mission, channel)`` from the
-    Hive-partitioned directory layout written by the preprocessing pipeline::
+    Reads the **test-split nominal rows** (``is_anomaly=False``) for
+    ``(mission, channel)`` from the Hive-partitioned directory layout::
 
-        {processed_data_dir}/{mission}/train/mission_id={M}/channel_id={C}/
+        {processed_data_dir}/{mission}/test/mission_id={M}/channel_id={C}/
+
+    Using the test split (rather than the train split) aligns the reference
+    distribution with the serving regime — the API replays test-era data, so
+    real-time drift should compare current data against the *same* era.  Using
+    the train split was comparing two distinct sampling regimes (sparse 2009–2011
+    training vs dense 2011–2013 test), causing false drift alerts on every channel
+    within seconds of the stream opening.
+
+    Anomalous rows (``is_anomaly=True``) are excluded so the reference represents
+    the *normal operating* distribution.  Drift then fires when the live window
+    starts to resemble an anomaly, rather than constantly.
 
     Applies ``compute_feature_dataframe`` and samples down to at most
     ``settings.monitoring.reference_sample_rows`` rows (reproducible via
@@ -200,7 +214,7 @@ def build_reference_profile(
     Raises:
         FileNotFoundError: If the channel partition directory does not exist.
     """
-    df = _load_channel_series(settings, mission, channel, "train")
+    df = _load_channel_series(settings, mission, channel, "test", nominal_only=True)
     df = compute_feature_dataframe(df, settings)
     n = settings.monitoring.reference_sample_rows
     if len(df) > n:
