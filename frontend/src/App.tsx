@@ -37,6 +37,7 @@ export default function App() {
   const streamRef = useRef<StreamHandle | null>(null);
   const driftStreamRef = useRef<DriftStreamHandle | null>(null);
   const tickCountRef = useRef(0);
+  const autoNavigatedRef = useRef(false);
 
   // Fetch health on mount; poll every 2 s while status === "loading".
   useEffect(() => {
@@ -100,6 +101,20 @@ export default function App() {
     };
   // Re-open when health loads (channels don't change at runtime; speed is fixed).
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health]);
+
+  // If only one subsystem is served, skip the overview and go straight to it.
+  useEffect(() => {
+    if (!health || health.channels_loaded.length === 0 || autoNavigatedRef.current) return;
+    const subsystems = [...new Set(Object.values(health.channel_subsystems))];
+    if (subsystems.length === 1) {
+      const sub = subsystems[0];
+      const channels = health.channels_loaded.filter(
+        (ch) => health.channel_subsystems[ch] === sub,
+      );
+      setView({ kind: "subsystem", subsystem: sub, selected: channels });
+      autoNavigatedRef.current = true;
+    }
   }, [health]);
 
   function enterSubsystem(subsystem: string, channels: string[]) {
