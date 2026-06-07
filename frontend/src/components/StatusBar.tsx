@@ -3,13 +3,9 @@ import { fetchHealth } from "../api/health";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
-type Speed = 10 | 100 | 1000;
-
 type Props = {
   connectionState: ConnectionState;
   eventsPerSecond: number;
-  speed: Speed;
-  onSpeedChange: (speed: Speed) => void;
   mission: string | null;
   subsystem: string | null;
   onBackToOverview: () => void;
@@ -32,8 +28,6 @@ const STATE_COLORS: Record<ConnectionState, string> = {
 export default function StatusBar({
   connectionState,
   eventsPerSecond,
-  speed,
-  onSpeedChange,
   mission,
   subsystem,
   onBackToOverview,
@@ -84,17 +78,6 @@ export default function StatusBar({
         ● {STATE_LABELS[connectionState]}
       </span>
       <span className="status-bar__rate">{eventsPerSecond} ev/s</span>
-      <label className="status-bar__speed">
-        Speed:&nbsp;
-        <select
-          value={speed}
-          onChange={(e) => onSpeedChange(Number(e.target.value) as Speed)}
-        >
-          <option value={10}>10×</option>
-          <option value={100}>100×</option>
-          <option value={1000}>1000×</option>
-        </select>
-      </label>
       {apiOnline ? (
         uptime !== null && (
           <span className="status-bar__uptime">

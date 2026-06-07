@@ -21,8 +21,10 @@ type View =
   | { kind: "overview" }
   | { kind: "subsystem"; subsystem: string; selected: string[] };
 
-const SPEED_OPTIONS = [10, 100, 1000] as const;
-type Speed = (typeof SPEED_OPTIONS)[number];
+// Replay speed is fixed server-side (api.replay_speed_default = 100×).
+// The speed dropdown is intentionally removed — higher values don't help
+// because CPU-bound inference caps effective throughput regardless.
+const REPLAY_SPEED = 100 as const;
 
 function getDensity(count: number): DensityTier {
   if (count <= 4) return "comfortable";
@@ -34,7 +36,6 @@ export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [view, setView] = useState<View>({ kind: "overview" });
   const [connState, setConnState] = useState<ConnectionState>("closed");
-  const [speed, setSpeed] = useState<Speed>(100);
   const [evPerSec, setEvPerSec] = useState(0);
   const [driftDisabled, setDriftDisabled] = useState(false);
   const streamRef = useRef<StreamHandle | null>(null);
@@ -75,7 +76,7 @@ export default function App() {
 
     const handle = openTelemetryStream({
       channels: allChannels,
-      speed,
+      speed: REPLAY_SPEED,
       onEvent: (e) => {
         telemetryStore.push(e);
         tickCountRef.current += 1;
@@ -102,9 +103,9 @@ export default function App() {
       streamRef.current = null;
       driftStreamRef.current = null;
     };
-  // Re-open only when health loads or speed changes (channels don't change at runtime).
+  // Re-open when health loads (channels don't change at runtime; speed is fixed).
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health, speed]);
+  }, [health]);
 
   function enterSubsystem(subsystem: string, channels: string[]) {
     setView({ kind: "subsystem", subsystem, selected: channels });
@@ -162,8 +163,6 @@ export default function App() {
       <StatusBar
         connectionState={connState}
         eventsPerSecond={evPerSec}
-        speed={speed}
-        onSpeedChange={setSpeed}
         mission={health?.mission ?? null}
         subsystem={subsystem}
         onBackToOverview={backToOverview}
