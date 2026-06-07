@@ -30,6 +30,7 @@ import argparse
 import io
 import sys
 from pathlib import Path
+from typing import BinaryIO, cast
 
 # Allow running as a script without installing the package.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -138,11 +139,11 @@ def main() -> None:
                     )
                     fs = gcsfs.GCSFileSystem()
                     with fs.open(remote, "wb") as f:
-                        f.write(buf.read())
+                        cast(BinaryIO, f).write(buf.read())
                     log.info("profile.uploaded", channel=channel, dest=remote)
                 else:
                     path = reference_profile_path(settings, args.mission, channel)
-                    _upload_to_gcs(path, args.upload, args.mission, channel)
+                    _upload_to_gcs(Path(str(path)), args.upload, args.mission, channel)
 
             ok += 1
         except Exception as exc:
