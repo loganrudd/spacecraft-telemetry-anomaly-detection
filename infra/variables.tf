@@ -33,7 +33,7 @@ variable "billing_account" {
 variable "api_cpu" {
   description = "vCPU allocation for the api Cloud Run service"
   type        = string
-  default     = "2"
+  default     = "1"
 }
 
 variable "api_memory" {

@@ -23,10 +23,12 @@ resource "google_cloud_run_v2_service" "mlflow" {
     service_account = google_service_account.mlflow.email
 
     scaling {
-      # min=1 keeps one warm instance (cpu_idle=false default: request-based CPU
-      # billing only, ~$8-10/mo).  Removes container-start latency from the API
-      # cold-start chain; the API depends_on this service at Terraform level.
-      min_instance_count = 1
+      # min=0: scale-to-zero. MLflow cold-start adds ~10-20s to the first API
+      # request after idle — acceptable for a portfolio demo. min=1 triggers
+      # instance-based CPU billing ($0.000018/vCPU-s always-on) which costs
+      # ~$3/day for 2 vCPU regardless of traffic; request-based billing does not
+      # apply to minimum instances.
+      min_instance_count = 0
       max_instance_count = 2
     }
 
@@ -43,10 +45,11 @@ resource "google_cloud_run_v2_service" "mlflow" {
       resources {
         limits = {
           # 3 uvicorn workers need ~1.1 GiB (each ~360 MiB); 1Gi OOMs at startup.
-          # 2 vCPU lets workers run in parallel instead of time-slicing one core.
+          # 1 vCPU is sufficient for single-user read-only UI access; 2 vCPU was
+          # only needed for parallel workers under experiment write load.
           # NOTE: applied via `terraform apply` (Makefile), NOT deploy.yml — CI
           # only updates the image. Memory/CPU changes require a manual TF apply.
-          cpu    = "2"
+          cpu    = "1"
           memory = "2Gi"
         }
       }
@@ -169,8 +172,7 @@ resource "google_cloud_run_v2_service" "api" {
   template {
     service_account = google_service_account.api.email
 
-    # M1.5 measurements: 18s cold-start, 586 MiB at 100 channels.
-    # Defaults: 2 vCPU / 2 GiB, scale-to-zero.  Override via TF vars if needed.
+    # Defaults: 1 vCPU / 2.5 GiB, scale-to-zero.  Override via TF vars if needed.
     scaling {
       min_instance_count = var.api_min_instances
       max_instance_count = 3
