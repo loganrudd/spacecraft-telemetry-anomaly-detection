@@ -95,6 +95,11 @@ api:
   replay_tick_interval_seconds: 1.0
   stream_buffer_max_events: 256
   request_timeout_seconds: 30
+  # warmup_rows must exceed window_size + max(HPO threshold_window) = 250 + 500 = 750.
+  # 1000 gives a 250-tick margin so every per-channel HPO-tuned threshold_window
+  # finishes its warmup before the first labeled anomaly arrives in the stream.
+  replay_warmup_rows: 1000
+  replay_max_rows: 3500
   # Path inside the Docker image where the built React dashboard lives.
   # create_app mounts this at / via StaticFiles(html=True).
   static_dir: /app/frontend/dist

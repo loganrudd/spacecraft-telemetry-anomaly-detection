@@ -94,6 +94,8 @@ api:
   replay_tick_interval_seconds: 1.0
   stream_buffer_max_events: 256
   request_timeout_seconds: 30
+  replay_warmup_rows: 1000
+  replay_max_rows: 3500
   cors_allowed_origins:
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
