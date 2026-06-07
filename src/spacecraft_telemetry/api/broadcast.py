@@ -140,7 +140,6 @@ async def run_shared_loop(state: AppState) -> None:
             if ch in state.engines:
                 state.engines[ch].reset()
 
-        intra_delay = delay / len(channels) if len(channels) > 1 else delay
         for i in range(n_ticks):
             for ch in channels:
                 if ch not in replay or ch not in state.engines:
@@ -155,7 +154,7 @@ async def run_shared_loop(state: AppState) -> None:
                     .encode()
                 )
                 broadcaster.publish(ch, payload)
-                await asyncio.sleep(intra_delay)
+            await asyncio.sleep(delay)
 
         _log.info(
             "broadcast.loop.pass_end",
