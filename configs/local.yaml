@@ -90,7 +90,7 @@ api:
   mission: "ESA-Mission1"
   subsystem: null   # null = load all trained channels for the mission
   channels: []
-  replay_speed_default: 100.0
+  replay_speed_default: 15.0
   replay_tick_interval_seconds: 1.0
   stream_buffer_max_events: 256
   request_timeout_seconds: 30

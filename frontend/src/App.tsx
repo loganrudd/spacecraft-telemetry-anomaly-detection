@@ -21,10 +21,6 @@ type View =
   | { kind: "overview" }
   | { kind: "subsystem"; subsystem: string; selected: string[] };
 
-// Replay speed is fixed server-side (api.replay_speed_default = 100×).
-// The speed dropdown is intentionally removed — higher values don't help
-// because CPU-bound inference caps effective throughput regardless.
-const REPLAY_SPEED = 100 as const;
 
 function getDensity(count: number): DensityTier {
   if (count <= 4) return "comfortable";
@@ -76,7 +72,6 @@ export default function App() {
 
     const handle = openTelemetryStream({
       channels: allChannels,
-      speed: REPLAY_SPEED,
       onEvent: (e) => {
         telemetryStore.push(e);
         tickCountRef.current += 1;
