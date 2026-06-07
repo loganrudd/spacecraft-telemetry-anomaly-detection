@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import mlflow.exceptions
 import torch
@@ -329,7 +329,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if not settings.drift.enabled:
                 log.info("api.lifespan.drift.disabled")
                 drift_references = {}
-            for ch, data in load_results[n:]:
+            for ch, data in cast(list[tuple[str, ReplayData | None]], load_results[n:]):
                 if data is not None:
                     replay_slices[ch] = data
 
