@@ -21,6 +21,7 @@ export type HealthResponse = {
   channel_subsystems: Record<string, string>;
   uptime_s: number;
   mlflow_tracking_uri: string;
+  replay_tick_ms: number; // wall-clock ms between ticks — drives the jitter buffer release rate
 };
 
 export type DriftFeature = {

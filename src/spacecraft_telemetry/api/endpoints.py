@@ -142,6 +142,10 @@ async def health(request: Request) -> JSONResponse:
             },
             uptime_s=app_state.uptime_seconds(),
             mlflow_tracking_uri=app_state.mlflow_tracking_uri,
+            replay_tick_ms=(
+                settings.api.replay_tick_interval_seconds * 1000
+                / settings.api.replay_speed_default
+            ),
         ).model_dump(),
     )
 

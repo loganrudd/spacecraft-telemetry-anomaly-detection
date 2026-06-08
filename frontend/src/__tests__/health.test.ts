@@ -12,6 +12,7 @@ const SAMPLE_HEALTH: HealthResponse = {
   channel_subsystems: { channel_12: "subsystem_6", channel_13: "subsystem_6" },
   uptime_s: 42.5,
   mlflow_tracking_uri: "sqlite:///mlflow.db",
+  replay_tick_ms: 50,
 };
 
 describe("fetchHealth", () => {
@@ -46,6 +47,7 @@ describe("fetchHealth", () => {
       channel_subsystems: {},
       uptime_s: 1.2,
       mlflow_tracking_uri: "",
+      replay_tick_ms: 0,
     };
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(JSON.stringify(degraded), {
