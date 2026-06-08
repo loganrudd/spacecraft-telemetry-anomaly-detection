@@ -64,9 +64,13 @@ export class TelemetryStore {
   // rAF throttle state — tracks which channels need a new snapshot minted.
   private dirty = new Set<string>();
   private rafScheduled = false;
-  // Epoch-ms of the most recent anomaly tick per channel. Used by useSubsystemRollup
-  // to implement the 60-second rolling anomaly badge without re-reading history.
+  // Epoch-ms of the most recent anomaly tick per channel. Kept for reference;
+  // the overview badge now uses lastAnomalyPushCount instead.
   lastAnomalyAtMs: Record<string, number> = {};
+  // Per-channel push count of the most recent predicted-anomaly event. Used by
+  // useSubsystemRollup so the overview badge clears when the event scrolls off
+  // the chart window (same boundary as the alerts panel).
+  lastAnomalyPushCount: Record<string, number> = {};
   // Epoch-ms of the most recent tick per channel. Used by useSubsystemRollup to
   // determine whether a channel is actively streaming without reading the full buffer.
   lastTickAtMs: Record<string, number> = {};
@@ -92,6 +96,7 @@ export class TelemetryStore {
     this._pushCount[event.channel] = count;
     if (event.is_anomaly_predicted) {
       this.lastAnomalyAtMs[event.channel] = nowMs;
+      this.lastAnomalyPushCount[event.channel] = count;
     }
     // Rising-edge detection: false → true transition triggers a stored alert.
     const prevPred = this.prevPredicted[event.channel] ?? false;
@@ -141,6 +146,7 @@ export class TelemetryStore {
     this.snapshots.clear();
     this.dirty.clear();
     this.lastAnomalyAtMs = {};
+    this.lastAnomalyPushCount = {};
     this.lastTickAtMs = {};
     this._pushCount = {};
     this.recentAlerts = [];

@@ -105,18 +105,18 @@ describe("useSubsystemRollup", () => {
     ).toBe(false);
   });
 
-  it("anomaly badge is still active at 59 s", () => {
+  it("anomaly badge stays active while the event is within the chart window", () => {
     const { result } = renderHook(() =>
       useSubsystemRollup(CHANNEL_SUBSYSTEMS),
     );
 
     act(() => {
-      telemetryStore.push(makeTelemetryEvent("channel_1", true));
+      telemetryStore.push(makeTelemetryEvent("channel_1", true)); // push 1
+      // Push 198 more non-anomaly events — anomaly is 199 pushes old, still in window.
+      for (let i = 0; i < 198; i++)
+        telemetryStore.push(makeTelemetryEvent("channel_1", false));
       telemetryStore.flushForTest();
-    });
-
-    act(() => {
-      vi.advanceTimersByTime(59_000);
+      vi.advanceTimersByTime(250);
     });
 
     expect(
@@ -124,18 +124,18 @@ describe("useSubsystemRollup", () => {
     ).toBe(true);
   });
 
-  it("anomaly badge clears after the 60 s TTL", () => {
+  it("anomaly badge clears once the event scrolls off the chart window", () => {
     const { result } = renderHook(() =>
       useSubsystemRollup(CHANNEL_SUBSYSTEMS),
     );
 
     act(() => {
-      telemetryStore.push(makeTelemetryEvent("channel_1", true));
+      telemetryStore.push(makeTelemetryEvent("channel_1", true)); // push 1
+      // Push 200 more — anomaly is now exactly 200 pushes old, off the window.
+      for (let i = 0; i < 200; i++)
+        telemetryStore.push(makeTelemetryEvent("channel_1", false));
       telemetryStore.flushForTest();
-    });
-
-    act(() => {
-      vi.advanceTimersByTime(61_000);
+      vi.advanceTimersByTime(250);
     });
 
     expect(

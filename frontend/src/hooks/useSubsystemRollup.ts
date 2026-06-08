@@ -1,9 +1,9 @@
 import { useEffect, useReducer, useRef } from "react";
-import { telemetryStore, ANOMALY_TTL_MS } from "../state/telemetryStore";
+import { telemetryStore, CHART_WINDOW } from "../state/telemetryStore";
 import { driftStore } from "../state/driftStore";
 
 export type ChannelStatus = {
-  anomaly: boolean;   // is_anomaly_predicted in the last 60 seconds
+  anomaly: boolean;   // is_anomaly_predicted within the current chart window
   drifted: boolean;   // most recent DriftEvent.drifted
   lastUpdated: number | null; // epoch ms of the latest telemetry tick
 };
@@ -15,16 +15,18 @@ const ROLLUP_THROTTLE_MS = 250;
 
 function computeRollup(
   channelSubsystems: Record<string, string>,
-  nowMs: number,
 ): SubsystemRollup {
   const rollup: SubsystemRollup = new Map();
 
   for (const [ch, sub] of Object.entries(channelSubsystems)) {
     if (!rollup.has(sub)) rollup.set(sub, new Map());
 
-    const lastAnomalyAt = telemetryStore.lastAnomalyAtMs[ch] ?? null;
+    // Badge is lit while the most recent predicted-anomaly event is still
+    // within the chart window — same boundary as the alerts panel.
+    const lastPush = telemetryStore.lastAnomalyPushCount[ch] ?? null;
     const anomaly =
-      lastAnomalyAt !== null && nowMs - lastAnomalyAt < ANOMALY_TTL_MS;
+      lastPush !== null &&
+      telemetryStore.pushCount(ch) - lastPush < CHART_WINDOW;
 
     const latestDrift = driftStore.latestForChannel(ch);
     const drifted = latestDrift?.drifted ?? false;
@@ -57,7 +59,8 @@ export function useSubsystemRollup(
 
     const unsub1 = telemetryStore.subscribe(throttled);
     const unsub2 = driftStore.subscribe(throttled);
-    // 1 Hz tick so expired anomaly badges clear even when no SSE events arrive.
+    // 1 Hz tick ensures badges clear in overview mode when no new events push
+    // the count forward (e.g. stream paused or very slow).
     const id = setInterval(throttled, 1_000);
 
     return () => {
@@ -68,5 +71,5 @@ export function useSubsystemRollup(
     };
   }, []); // forceUpdate and pendingRef are stable across renders
 
-  return computeRollup(channelSubsystems, Date.now());
+  return computeRollup(channelSubsystems);
 }
