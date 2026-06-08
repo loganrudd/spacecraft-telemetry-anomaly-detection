@@ -33,7 +33,7 @@ variable "billing_account" {
 variable "api_cpu" {
   description = "vCPU allocation for the api Cloud Run service"
   type        = string
-  default     = "1"
+  default     = "2"
 }
 
 variable "api_memory" {
@@ -44,7 +44,7 @@ variable "api_memory" {
   # the 2Gi instance is gone — replay is now pre-cached at startup from slices
   # (~1 MB total vs 9M+ rows). 2.5Gi gives ~650 MB headroom for inference
   # spikes and GC pressure. 2Gi is too tight at ~92% baseline utilisation.
-  default     = "2.5Gi"
+  default     = "4Gi"
 }
 
 variable "api_min_instances" {
