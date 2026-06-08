@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { collapseFlags } from "../utils/anomalyIntervals";
+import {
+  collapseFlags,
+  labeledIntervalsWithDetection,
+} from "../utils/anomalyIntervals";
 import type { TelemetryEvent } from "../api/types";
 
 function event(
@@ -75,5 +78,52 @@ describe("collapseFlags — is_anomaly_predicted", () => {
     expect(collapseFlags(events, "is_anomaly_predicted")).toEqual([
       { startTs: "t1", endTs: "t2" },
     ]);
+  });
+});
+
+describe("labeledIntervalsWithDetection", () => {
+  it("marks a labeled window detected when any point inside was flagged", () => {
+    // Labeled t2..t4; model flagged only t3 (a smaller sub-window).
+    const events = [
+      event("t1", false, false),
+      event("t2", true, false),
+      event("t3", true, true),
+      event("t4", true, false),
+      event("t5", false, false),
+    ];
+    expect(labeledIntervalsWithDetection(events)).toEqual([
+      { startTs: "t2", endTs: "t4", detected: true },
+    ]);
+  });
+
+  it("marks a labeled window missed when no point inside was flagged", () => {
+    const events = [
+      event("t1", true, false),
+      event("t2", true, false),
+    ];
+    expect(labeledIntervalsWithDetection(events)).toEqual([
+      { startTs: "t1", endTs: "t2", detected: false },
+    ]);
+  });
+
+  it("classifies multiple windows independently (hit, miss)", () => {
+    const events = [
+      event("t1", true, true), // hit (single point)
+      event("t2", false, false),
+      event("t3", true, false), // miss window start
+      event("t4", true, false),
+    ];
+    expect(labeledIntervalsWithDetection(events)).toEqual([
+      { startTs: "t1", endTs: "t1", detected: true },
+      { startTs: "t3", endTs: "t4", detected: false },
+    ]);
+  });
+
+  it("ignores predicted flags outside labeled windows (false positives)", () => {
+    const events = [
+      event("t1", false, true), // false positive — no labeled window
+      event("t2", false, false),
+    ];
+    expect(labeledIntervalsWithDetection(events)).toEqual([]);
   });
 });

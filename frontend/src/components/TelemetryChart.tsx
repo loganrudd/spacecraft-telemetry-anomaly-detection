@@ -11,7 +11,8 @@ import {
 } from "recharts";
 import type { TooltipProps } from "recharts";
 import { useTelemetryChannel, CHART_WINDOW } from "../state/telemetryStore";
-import { collapseFlags } from "../utils/anomalyIntervals";
+import { collapseFlags, labeledIntervalsWithDetection } from "../utils/anomalyIntervals";
+import type { DetectedInterval } from "../utils/anomalyIntervals";
 import { formatChannel } from "../utils/formatChannel";
 import type { TelemetryEvent } from "../api/types";
 
@@ -27,10 +28,27 @@ const CHART_HEIGHTS: Record<DensityTier, number> = {
 
 type Props = { channel: string; density?: DensityTier };
 
-function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
+type TooltipExtra = { labeledIntervals: DetectedInterval[] };
+
+function CustomTooltip({
+  active,
+  payload,
+  labeledIntervals = [],
+}: TooltipProps<number, string> & Partial<TooltipExtra>) {
   if (!active || !payload?.length) return null;
   const ev = payload[0]?.payload as TelemetryEvent | undefined;
   if (!ev) return null;
+
+  // For a labeled point, report detection at the SEGMENT level (was this
+  // labeled window flagged anywhere?), not just at this exact timestep — that
+  // matches how the model is scored and avoids "not detected" reading inside a
+  // window the model actually caught.
+  const segment = ev.is_anomaly
+    ? labeledIntervals.find(
+        (iv) => iv.startTs <= ev.timestamp && ev.timestamp <= iv.endTs,
+      )
+    : undefined;
+
   return (
     <div className="chart-tooltip">
       <p className="chart-tooltip__ts">{ev.timestamp}</p>
@@ -42,8 +60,29 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
       {ev.smoothed_error !== null && (
         <p>smoothed_error: {ev.smoothed_error.toFixed(4)}</p>
       )}
-      <p>anomaly (labeled): {ev.is_anomaly ? "yes" : "no"}</p>
-      <p>anomaly (predicted): {ev.is_anomaly_predicted ? "yes" : "no"}</p>
+      {ev.is_anomaly ? (
+        <>
+          <p>anomaly (labeled): yes</p>
+          <p>
+            detected:{" "}
+            {segment?.detected ? (
+              <span style={{ color: "var(--success)" }}>
+                yes — flagged in this segment
+              </span>
+            ) : (
+              "no — missed"
+            )}
+          </p>
+          <p style={{ color: "var(--fg-muted)" }}>
+            flagged at this point: {ev.is_anomaly_predicted ? "yes" : "no"}
+          </p>
+        </>
+      ) : (
+        <p>
+          anomaly (predicted):{" "}
+          {ev.is_anomaly_predicted ? "yes (false positive)" : "no"}
+        </p>
+      )}
     </div>
   );
 }
@@ -54,7 +93,7 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
   // stable as data arrives instead of squeezing all history into view.
   const visible = events.slice(-CHART_WINDOW);
 
-  const trueIntervals = collapseFlags(visible, "is_anomaly");
+  const labeledIntervals = labeledIntervalsWithDetection(visible);
   const predIntervals = collapseFlags(visible, "is_anomaly_predicted");
   const chartHeight = CHART_HEIGHTS[density];
 
@@ -85,19 +124,25 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
             tick={{ fill: "var(--fg-muted)", fontSize: density === "dense" ? 9 : 11 }}
             axisLine={{ stroke: "var(--border)" }}
           />
-          {density !== "dense" && <Tooltip content={<CustomTooltip />} />}
+          {density !== "dense" && (
+            <Tooltip content={<CustomTooltip labeledIntervals={labeledIntervals} />} />
+          )}
           {density === "comfortable" && (
             <Legend wrapperStyle={{ fontSize: 11, color: "var(--fg-muted)" }} />
           )}
 
-          {/* Ground-truth anomaly bands (labeled, red) */}
-          {trueIntervals.map((iv, i) => (
+          {/* Ground-truth anomaly bands (labeled, red). A green border marks a
+              window the model caught (flagged anywhere inside) — segment-level
+              detection; no border means the window was missed. */}
+          {labeledIntervals.map((iv, i) => (
             <ReferenceArea
               key={`true-${i}`}
               x1={iv.startTs}
               x2={iv.endTs}
               fill="var(--anomaly-true)"
-              strokeOpacity={0}
+              stroke={iv.detected ? "var(--success)" : undefined}
+              strokeWidth={iv.detected ? 1.5 : 0}
+              strokeOpacity={iv.detected ? 0.9 : 0}
             />
           ))}
 
