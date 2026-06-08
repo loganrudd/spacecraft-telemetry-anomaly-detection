@@ -1497,7 +1497,7 @@ def api_serve(
     if mission is not None:
         api_overrides["mission"] = mission
     if subsystem is not None:
-        api_overrides["subsystems"] = [subsystem]
+        api_overrides["subsystem"] = subsystem
     if channels is not None:
         api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
 
