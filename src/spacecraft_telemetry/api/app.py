@@ -73,7 +73,7 @@ from spacecraft_telemetry.model.io import (
 
 # Maximum concurrent MLflow model loads during lifespan startup.  Unbounded
 # gather causes OOM or MLflow throttling at whole-mission scale (100+ channels).
-_LIFESPAN_LOAD_CONCURRENCY = 8
+_LIFESPAN_LOAD_CONCURRENCY = 4
 
 # Exceptions that indicate a transient or expected channel-load failure (missing
 # model, registry unavailable, network blip).  Programming errors (TypeError,
