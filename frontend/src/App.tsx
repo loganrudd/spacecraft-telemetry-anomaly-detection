@@ -9,6 +9,7 @@ import { fetchHealth } from "./api/health";
 import { openTelemetryStream } from "./api/telemetryStream";
 import { openDriftStream } from "./api/driftStream";
 import { telemetryStore } from "./state/telemetryStore";
+import { telemetryJitterBuffer } from "./state/jitterBuffer";
 import { driftStore } from "./state/driftStore";
 import type { HealthResponse } from "./api/types";
 import type { StreamHandle } from "./api/telemetryStream";
@@ -69,12 +70,16 @@ export default function App() {
     const allChannels = health.channels_loaded;
     setConnState("connecting");
     telemetryStore.clear();
+    telemetryJitterBuffer.reset();
     driftStore.clear();
 
     const handle = openTelemetryStream({
       channels: allChannels,
       onEvent: (e) => {
-        telemetryStore.push(e);
+        // Route through the jitter buffer, which replays events to the store on
+        // a steady local clock to absorb clumped network delivery. The tick
+        // counter tracks raw arrival throughput, so it stays on the SSE path.
+        telemetryJitterBuffer.enqueue(e);
         tickCountRef.current += 1;
       },
       onOpen: () => setConnState("open"),
@@ -96,6 +101,7 @@ export default function App() {
     return () => {
       handle.close();
       driftHandle.close();
+      telemetryJitterBuffer.reset();
       streamRef.current = null;
       driftStreamRef.current = null;
     };
