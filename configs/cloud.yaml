@@ -93,8 +93,8 @@ api:
   channels: []
   replay_speed_default: 20.0
   replay_tick_interval_seconds: 1.0
-  replay_warmup_rows: -1000
-  replay_max_rows: 1000
+  replay_warmup_rows: -1350
+  replay_max_rows: 1350
   stream_buffer_max_events: 256
   request_timeout_seconds: 30
   # Path inside the Docker image where the built React dashboard lives.

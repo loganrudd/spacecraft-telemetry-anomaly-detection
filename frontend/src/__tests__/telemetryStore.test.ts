@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { telemetryStore } from "../state/telemetryStore";
+import { telemetryStore, TelemetryStore } from "../state/telemetryStore";
 import type { TelemetryEvent } from "../api/types";
+
+function anomEvent(
+  is_anomaly: boolean,
+  is_anomaly_predicted: boolean,
+): TelemetryEvent {
+  return {
+    timestamp: "t",
+    mission: "test",
+    channel: "ch-x",
+    value_normalized: 0,
+    prediction: null,
+    residual: null,
+    smoothed_error: null,
+    threshold: null,
+    is_anomaly,
+    is_anomaly_predicted,
+  };
+}
 
 function makeEvent(channel: string, idx: number): TelemetryEvent {
   return {
@@ -73,6 +91,45 @@ describe("TelemetryStore", () => {
     expect(telemetryStore.snapshot("ch-a")).toEqual([]);
     expect(listener).toHaveBeenCalledTimes(1);
     unsub();
+  });
+});
+
+describe("TelemetryStore — alert anchoring", () => {
+  it("anchors a true-positive alert to the labeled window end, not the detection point", () => {
+    const store = new TelemetryStore();
+    for (let i = 0; i < 5; i++) store.push(anomEvent(false, false)); // counts 1..5
+    store.push(anomEvent(true, false)); // 6  labeled window starts
+    store.push(anomEvent(true, true)); // 7  detection rising edge → alert
+    store.push(anomEvent(true, false)); // 8
+    store.push(anomEvent(true, false)); // 9
+    store.push(anomEvent(true, false)); // 10
+    store.push(anomEvent(true, false)); // 11 last labeled point (window end)
+    store.push(anomEvent(false, false)); // 12 label clears → window closes
+
+    expect(store.recentAlerts).toHaveLength(1);
+    // Anchored to the window end (11), not the detection point (7).
+    expect(store.recentAlerts[0].anchorCount).toBe(11);
+  });
+
+  it("anchors a false-positive alert to the detection point", () => {
+    const store = new TelemetryStore();
+    for (let i = 0; i < 3; i++) store.push(anomEvent(false, false)); // 1..3
+    store.push(anomEvent(false, true)); // 4 detection with NO label → false positive
+    for (let i = 0; i < 3; i++) store.push(anomEvent(false, false)); // 5..7
+
+    expect(store.recentAlerts).toHaveLength(1);
+    expect(store.recentAlerts[0].anchorCount).toBe(4);
+  });
+
+  it("stops extending the anchor once the labeled window closes", () => {
+    const store = new TelemetryStore();
+    store.push(anomEvent(true, true)); // 1 window start + detection → alert
+    store.push(anomEvent(true, false)); // 2 window continues → anchor extends to 2
+    store.push(anomEvent(false, false)); // 3 window closes
+    store.push(anomEvent(false, false)); // 4 must NOT extend further
+    store.push(anomEvent(false, false)); // 5
+
+    expect(store.recentAlerts[0].anchorCount).toBe(2);
   });
 });
 
