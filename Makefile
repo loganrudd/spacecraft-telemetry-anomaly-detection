@@ -151,8 +151,11 @@ mlflow-server:    ## Start MLflow tracking server — required before parallel t
 
 mlflow-promote:   ## Set @champion alias (MISSION=…, [CHANNEL=…, SUBSYSTEM=…, ENV=cloud])
 	$(if $(filter cloud,$(ENV)), \
+	  SSL_CERT_FILE=$(SSL_CERT_FILE) \
 	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)') \
-	  MLFLOW_TRACKING_TOKEN=$$(gcloud auth print-identity-token),) \
+	  MLFLOW_TRACKING_TOKEN=$$(gcloud auth print-identity-token) \
+	  SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://$(PROJECT_ID)-processed-data \
+	  SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://$(PROJECT_ID)-sample-data,) \
 	$(RUN) spacecraft-telemetry --env $(ENV) mlflow promote \
 		--mission $(MISSION) \
 		$(if $(CHANNEL),--channels $(CHANNEL),) \
@@ -220,6 +223,10 @@ frontend-test:    ## Run dashboard unit tests (Vitest)
 IMAGE_TAG     ?= dev
 PROJECT_ID    ?=
 REGION        ?= us-central1
+# Python (via uv) uses its own CA bundle and ignores the macOS system keychain.
+# Pointing SSL_CERT_FILE at certifi fixes HTTPS to Cloud Run / GCS without
+# requiring a system-level certificate install.
+SSL_CERT_FILE ?= $(shell uv run python -m certifi 2>/dev/null)
 AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
 
 docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
