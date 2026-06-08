@@ -42,7 +42,6 @@ class HealthResponse(BaseModel):
     channel_subsystems: dict[str, str] = {}
     uptime_s: float = 0.0
     mlflow_tracking_uri: str = ""
-    replay_tick_ms: float = 0.0  # wall-clock ms between ticks (tick_interval_s / speed)
 
 
 class StreamQueryParams(BaseModel):

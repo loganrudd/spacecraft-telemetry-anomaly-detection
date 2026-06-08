@@ -71,11 +71,6 @@ export default function App() {
     setConnState("connecting");
     telemetryStore.clear();
     telemetryJitterBuffer.reset();
-    // Tell the buffer the server's exact tick cadence before any events arrive.
-    // health is fetched before this effect runs, so this is always set first.
-    if (health.replay_tick_ms > 0) {
-      telemetryJitterBuffer.setTickIntervalMs(health.replay_tick_ms);
-    }
     driftStore.clear();
 
     const handle = openTelemetryStream({
