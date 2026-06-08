@@ -154,10 +154,8 @@ async def subscriber_stream(
 
     Each SSE connection subscribes to the shared ``EventBroadcaster`` (started
     once at container startup) rather than spawning its own engine pumps.
-    On connect, the broadcaster's per-channel backlog is drained first so the
-    chart appears mid-flight instead of starting from an empty canvas.
-    Subsequent live ticks follow without gap or duplication.
-    On disconnect the subscription is cleaned up automatically.
+    Refresh/reconnect attaches to the in-progress stream — no per-connection
+    warmup.  On disconnect the subscription is cleaned up automatically.
 
     Falls through to ``telemetry_stream`` when no broadcaster is available
     (test fixtures that construct AppState directly without lifespan).
@@ -165,9 +163,7 @@ async def subscriber_stream(
     broadcaster = state.broadcaster
     assert broadcaster is not None  # caller checks this
 
-    client_id, q, backlog = await broadcaster.subscribe_with_backlog(
-        frozenset(selected_channels)
-    )
+    client_id, q = await broadcaster.subscribe(frozenset(selected_channels))
 
     disconnect = asyncio.Event()
 
@@ -180,13 +176,6 @@ async def subscriber_stream(
 
     watcher = asyncio.create_task(_watch_disconnect())
     try:
-        # Drain the backlog first so the chart fills immediately on connect.
-        for payload in backlog:
-            if disconnect.is_set():
-                return
-            yield payload
-
-        # Then follow the live broadcast.
         while not disconnect.is_set():
             try:
                 payload = await asyncio.wait_for(q.get(), timeout=1.0)

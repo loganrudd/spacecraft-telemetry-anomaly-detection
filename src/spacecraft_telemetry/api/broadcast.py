@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections import deque
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
@@ -43,13 +42,6 @@ _log = get_logger("api.broadcast")
 # back-pressuring the shared loop.
 _SUBSCRIBER_QUEUE_SIZE = 256
 
-# Rolling backlog depth per channel.  New subscribers receive this many
-# recent events before live ticks so the chart appears mid-flight on
-# page refresh instead of starting from an empty canvas.  Matches the
-# chart's CHART_WINDOW constant (200) so a fresh connection sees exactly
-# what was visible in the running chart.
-_BACKLOG_SIZE = 200
-
 
 class EventBroadcaster:
     """Fan-out hub: one payload → N subscriber queues.
@@ -60,8 +52,6 @@ class EventBroadcaster:
     def __init__(self) -> None:
         self._subscribers: dict[str, tuple[frozenset[str], asyncio.Queue[bytes]]] = {}
         self._lock = asyncio.Lock()
-        # Rolling per-channel backlog for new-subscriber catch-up.
-        self._backlogs: dict[str, deque[bytes]] = {}
 
     async def subscribe(
         self,
@@ -78,34 +68,6 @@ class EventBroadcaster:
             self._subscribers[client_id] = (channels, q)
         return client_id, q
 
-    async def subscribe_with_backlog(
-        self,
-        channels: frozenset[str],
-    ) -> tuple[str, asyncio.Queue[bytes], list[bytes]]:
-        """Register a subscriber and atomically snapshot the current backlog.
-
-        Returns ``(client_id, queue, backlog_events)`` where ``backlog_events``
-        is a flat list of pre-serialised SSE payloads covering the last
-        ``_BACKLOG_SIZE`` ticks for each requested channel.
-
-        Atomicity guarantee: subscriber registration and backlog snapshot both
-        happen inside the same ``async with self._lock`` block with no
-        ``await`` in between.  Because asyncio is single-threaded and
-        ``publish()`` is synchronous, no new events can be inserted into the
-        backlog or fan-out to this subscriber's queue between the two
-        operations — so callers that drain backlog first, then drain the queue,
-        see a gapless, duplicate-free event stream.
-        """
-        client_id = str(uuid.uuid4())
-        q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_SIZE)
-        async with self._lock:
-            self._subscribers[client_id] = (channels, q)
-            backlog: list[bytes] = []
-            for ch, b_deque in self._backlogs.items():
-                if not channels or ch in channels:
-                    backlog.extend(b_deque)
-        return client_id, q, backlog
-
     async def unsubscribe(self, client_id: str) -> None:
         """Remove a subscriber.  No-op if already gone."""
         async with self._lock:
@@ -115,28 +77,12 @@ class EventBroadcaster:
         """Push ``payload`` to every subscriber that wants ``channel``.
 
         Called synchronously from the loop; uses ``put_nowait`` so a slow
-        subscriber never blocks the shared clock.  Also appends to the
-        per-channel backlog so new subscribers can catch up on connect.
+        subscriber never blocks the shared clock.
         """
-        backlog = self._backlogs.get(channel)
-        if backlog is None:
-            backlog = deque(maxlen=_BACKLOG_SIZE)
-            self._backlogs[channel] = backlog
-        backlog.append(payload)
-
         for _cid, (channels, q) in list(self._subscribers.items()):
             if not channels or channel in channels:
                 with suppress(asyncio.QueueFull):  # slow subscriber — drop event
                     q.put_nowait(payload)
-
-    def clear_backlogs(self) -> None:
-        """Discard all per-channel backlog history.
-
-        Called at the start of each replay pass so a new subscriber never
-        receives a mix of tail events from the previous pass and head events
-        from the new one.
-        """
-        self._backlogs.clear()
 
     @property
     def subscriber_count(self) -> int:
@@ -189,11 +135,7 @@ async def run_shared_loop(state: AppState) -> None:
         pass_count += 1
         _log.info("broadcast.loop.pass_start", pass_count=pass_count)
 
-        # Reset all engines and clear backlogs so each pass starts from a
-        # clean state.  Clearing the backlogs prevents a new subscriber from
-        # receiving a mix of tail events from the previous pass and head events
-        # from the new one, which would give the chart a discontinuous jump.
-        broadcaster.clear_backlogs()
+        # Reset all engines so each pass starts from a clean state.
         for ch in channels:
             if ch in state.engines:
                 state.engines[ch].reset()
