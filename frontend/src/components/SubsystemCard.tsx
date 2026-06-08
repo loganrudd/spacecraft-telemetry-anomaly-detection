@@ -39,7 +39,7 @@ export default function SubsystemCard({
       <div className="subsystem-card__header">
         <span className="subsystem-card__name">{subsystem}</span>
         <span className="subsystem-card__count">
-          {channelList.length} ch
+          {channelList.length} channels
         </span>
       </div>
 
