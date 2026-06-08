@@ -50,7 +50,7 @@ resource "google_cloud_run_v2_service" "mlflow" {
           # NOTE: applied via `terraform apply` (Makefile), NOT deploy.yml — CI
           # only updates the image. Memory/CPU changes require a manual TF apply.
           cpu    = "2"
-          memory = "4Gi"
+          memory = "3Gi"
         }
       }
 
@@ -241,6 +241,16 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "SPACECRAFT_API__STATIC_DIR"
         value = "/app/frontend/dist"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_WARMUP_ROWS"
+        value = "-1350"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_MAX_ROWS"
+        value = "1350"
       }
 
       # Serving scope — restricts which subsystems are loaded at startup.
