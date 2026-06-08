@@ -20,7 +20,7 @@ export default function AnomalyAlerts({ channels }: Props) {
   const alerts = telemetryStore.recentAlerts.filter(
     (a) =>
       channelSet.has(a.channel) &&
-      telemetryStore.pushCount(a.channel) - a.anchorCount < CHART_WINDOW,
+      telemetryStore.pushCount(a.channel) - a.capturedAtCount < CHART_WINDOW,
   );
 
   return (

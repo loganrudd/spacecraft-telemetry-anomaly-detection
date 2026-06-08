@@ -16,11 +16,7 @@ let _alertId = 0;
 
 export type StoredAlert = {
   id: number;
-  // Per-channel push count that anchors chart-window visibility. For a true
-  // positive this tracks the labeled window's latest point (extended while the
-  // window stays open), so the alert lives as long as the window is on-chart.
-  // For a false positive it stays at the detection point.
-  anchorCount: number;
+  capturedAtCount: number; // per-channel push count at capture — used for chart-window visibility
   timestamp: string;       // telemetry event timestamp (display only)
   channel: string;
   smoothed_error: number | null;
@@ -82,10 +78,6 @@ export class TelemetryStore {
   // event has scrolled off the chart window.
   recentAlerts: StoredAlert[] = [];
   private prevPredicted: Record<string, boolean> = {};
-  // True-positive alerts whose labeled window is still open, per channel. Their
-  // anchorCount is extended to the window's latest point on each tick until the
-  // label clears, so the alert outlives the (smaller) detection sub-window.
-  private _openAlerts: Record<string, StoredAlert[]> = {};
 
   push(event: TelemetryEvent): void {
     let ring = this.buffers.get(event.channel);
@@ -101,24 +93,12 @@ export class TelemetryStore {
     if (event.is_anomaly_predicted) {
       this.lastAnomalyAtMs[event.channel] = nowMs;
     }
-
-    // Keep true-positive alerts alive while their labeled window is on-chart,
-    // not just until the (smaller) detection sub-window scrolls off. While the
-    // labeled run stays open, extend each open alert's anchor to the window's
-    // latest point; close the run when the label clears.
-    const openAlerts = this._openAlerts[event.channel];
-    if (event.is_anomaly) {
-      if (openAlerts) for (const a of openAlerts) a.anchorCount = count;
-    } else if (openAlerts && openAlerts.length > 0) {
-      this._openAlerts[event.channel] = [];
-    }
-
     // Rising-edge detection: false → true transition triggers a stored alert.
     const prevPred = this.prevPredicted[event.channel] ?? false;
     if (!prevPred && event.is_anomaly_predicted) {
       const alert: StoredAlert = {
         id: ++_alertId,
-        anchorCount: count,
+        capturedAtCount: count,
         timestamp: event.timestamp,
         channel: event.channel,
         smoothed_error: event.smoothed_error,
@@ -126,12 +106,6 @@ export class TelemetryStore {
         ground_truth_match: event.is_anomaly,
       };
       this.recentAlerts = [alert, ...this.recentAlerts].slice(0, MAX_ALERTS);
-      // A detection inside a labeled window (true positive) tracks the window;
-      // a false positive (no label) stays anchored to the detection point.
-      if (event.is_anomaly) {
-        if (!this._openAlerts[event.channel]) this._openAlerts[event.channel] = [];
-        this._openAlerts[event.channel].push(alert);
-      }
     }
     this.prevPredicted[event.channel] = event.is_anomaly_predicted;
     this.dirty.add(event.channel);
@@ -171,7 +145,6 @@ export class TelemetryStore {
     this._pushCount = {};
     this.recentAlerts = [];
     this.prevPredicted = {};
-    this._openAlerts = {};
     this.notify();
   }
 
