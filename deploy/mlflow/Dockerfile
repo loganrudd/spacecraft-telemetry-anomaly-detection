@@ -23,5 +23,5 @@ CMD mlflow server \
     --backend-store-uri "${BACKEND_STORE_URI}" \
     --default-artifact-root "${DEFAULT_ARTIFACT_ROOT}" \
     --no-serve-artifacts \
-    --workers 3 \
+    --workers 1 \
     --allowed-hosts "*"
