@@ -232,8 +232,8 @@ AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
 docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
 	docker build -t st-api:$(IMAGE_TAG) .
 
-docker-build-ray:  ## Build the Ray training/tuning image locally (IMAGE_TAG=dev)
-	docker build -f deploy/ray/Dockerfile -t st-training:$(IMAGE_TAG) .
+docker-build-ray:  ## Build the Ray image locally (IMAGE_TAG=dev)
+	docker build -f deploy/ray/Dockerfile -t st-ray:$(IMAGE_TAG) .
 
 docker-run-local: ## Run the API container locally against local MLflow (IMAGE_TAG=dev)
 	docker run --rm -p 8080:8080 \

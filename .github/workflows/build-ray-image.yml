@@ -1,21 +1,20 @@
-name: Build Ray training image
+name: Build Ray image
 
-# Builds and pushes the Ray training/tuning image when training-related files
+# Builds and pushes the Ray image when Ray-fanout related files
 # change on main, or on demand via workflow_dispatch (e.g. before make cloud-train).
 #
-# Does NOT run training — training is operator-triggered via `make cloud-train`.
 
 on:
   push:
     branches:
       - main
-    # Only rebuild when something baked INTO the image AND used by training
+    # Only rebuild when something baked INTO the image AND used by Ray
     # changes. The deploy/ray/cluster_*.yaml manifests are applied at runtime by
     # cloud_*.sh (envsubst | kubectl apply), not copied into the image, so they
     # must NOT trigger a rebuild. configs/ IS copied in (Dockerfile), so it must.
     # The src/.../api/** subtree is copied in too but only the Cloud Run API runs
-    # it — the training entrypoints (ray train/score/tune) never import it — so an
-    # api-only change yields a functionally identical training image. Excluded via
+    # it — the ray entrypoints (ray train/score/tune) never import it — so an
+    # api-only change yields a functionally identical ray image. Excluded via
     # a negation: a commit that also touches a shared module (core/, model/, …)
     # still matches src/** and rebuilds; an api-only commit does not.
     paths:
@@ -24,7 +23,7 @@ on:
       - "!src/spacecraft_telemetry/api/**"
       - "configs/**"
       - "pyproject.toml"
-      - ".github/workflows/build-training.yml"
+      - ".github/workflows/build-ray-image.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -56,15 +55,15 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      - name: Build and push Ray training image
+      - name: Build and push Ray image
         run: |
           AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
-          IMAGE="${AR_REPO}/training:${{ github.sha }}"
-          docker build -f deploy/ray/Dockerfile -t "${IMAGE}" -t "${AR_REPO}/training:latest" .
+          IMAGE="${AR_REPO}/ray:${{ github.sha }}"
+          docker build -f deploy/ray/Dockerfile -t "${IMAGE}" -t "${AR_REPO}/ray:latest" .
           docker push "${IMAGE}"
-          docker push "${AR_REPO}/training:latest"
+          docker push "${AR_REPO}/ray:latest"
           if [ -n "${{ inputs.tag }}" ]; then
-            docker tag "${IMAGE}" "${AR_REPO}/training:${{ inputs.tag }}"
-            docker push "${AR_REPO}/training:${{ inputs.tag }}"
+            docker tag "${IMAGE}" "${AR_REPO}/ray:${{ inputs.tag }}"
+            docker push "${AR_REPO}/ray:${{ inputs.tag }}"
           fi
           echo "Pushed: ${IMAGE}"
