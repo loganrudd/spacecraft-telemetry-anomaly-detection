@@ -82,8 +82,24 @@ export class TelemetryStore {
   // event has scrolled off the chart window.
   recentAlerts: StoredAlert[] = [];
   private prevPredicted: Record<string, boolean> = {};
+  // Last event timestamp (epoch-ms) per channel. Timestamps within a replay
+  // pass are strictly ascending, so a backwards jump means the server's shared
+  // loop wrapped back to the start of the slice.
+  private lastTsMs: Record<string, number> = {};
 
   push(event: TelemetryEvent): void {
+    // Detect the shared replay loop wrapping. The SSE connection stays open
+    // across the wrap (run_shared_loop never closes it), so onOpen never
+    // re-fires — we can't key the clean restart off reconnects. Instead, when
+    // a channel's timestamp jumps backwards we clear the whole store so the
+    // chart restarts from the loop's start instead of showing a backwards jump
+    // and a window that mixes the end of the old pass with the start of the new.
+    const tsMs = Date.parse(event.timestamp);
+    const prevTsMs = this.lastTsMs[event.channel];
+    if (prevTsMs !== undefined && tsMs < prevTsMs) {
+      this.clear(); // resets lastTsMs too, so sibling channels don't re-trigger
+    }
+
     let ring = this.buffers.get(event.channel);
     if (!ring) {
       ring = { items: new Array<TelemetryEvent>(BUFFER_SIZE), head: 0, size: 0 };
@@ -113,6 +129,7 @@ export class TelemetryStore {
       this.recentAlerts = [alert, ...this.recentAlerts].slice(0, MAX_ALERTS);
     }
     this.prevPredicted[event.channel] = event.is_anomaly_predicted;
+    this.lastTsMs[event.channel] = tsMs;
     this.dirty.add(event.channel);
 
     if (!this.rafScheduled) {
@@ -151,6 +168,7 @@ export class TelemetryStore {
     this._pushCount = {};
     this.recentAlerts = [];
     this.prevPredicted = {};
+    this.lastTsMs = {};
     this.notify();
   }
 

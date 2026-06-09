@@ -74,6 +74,25 @@ describe("TelemetryStore", () => {
     expect(listener).toHaveBeenCalledTimes(1);
     unsub();
   });
+
+  it("treats a backwards timestamp as a replay-loop wrap and clears all channels", () => {
+    // One replay pass across two channels.
+    for (let i = 0; i < 10; i++) telemetryStore.push(makeEvent("ch-a", i));
+    for (let i = 0; i < 10; i++) telemetryStore.push(makeEvent("ch-b", i));
+    telemetryStore.flushForTest();
+    expect(telemetryStore.snapshot("ch-a")).toHaveLength(10);
+    expect(telemetryStore.snapshot("ch-b")).toHaveLength(10);
+
+    // The shared loop wraps: ch-a's timestamp jumps back to the slice start.
+    // The whole store clears so the chart restarts cleanly instead of mixing the
+    // tail of the old pass with the head of the new one. (The SSE connection
+    // stays open across the wrap, so onOpen can't drive this.)
+    telemetryStore.push(makeEvent("ch-a", 0));
+    telemetryStore.flushForTest();
+
+    expect(telemetryStore.snapshot("ch-a")).toHaveLength(1); // repopulated from i=0
+    expect(telemetryStore.snapshot("ch-b")).toHaveLength(0); // sibling cleared too
+  });
 });
 
 describe("TelemetryStore — EMPTY sentinel", () => {

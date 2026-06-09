@@ -95,18 +95,23 @@ describe("AnomalyAlerts", () => {
     render(<AnomalyAlerts channels={["ch-a"]} />);
 
     // Generate 60 rising edges: false → true, true → false, ...
-    push(makeEvent("ch-a", false, false, "seed"));
+    // Timestamps must be ascending: the store treats a backwards timestamp jump
+    // as a replay-loop wrap and clears, so use real monotonic ISO timestamps
+    // (matching production telemetry) rather than arbitrary labels.
+    push(makeEvent("ch-a", false, false, "2000-01-01T00:00:00Z"));
     for (let i = 0; i < 60; i++) {
-      push(makeEvent("ch-a", true, false, `alert-${i}`));
-      push(makeEvent("ch-a", false, false, `gap-${i}`));
+      const alertTs = new Date(Date.UTC(2000, 0, 1, 0, 0, i * 2 + 1)).toISOString();
+      const gapTs = new Date(Date.UTC(2000, 0, 1, 0, 0, i * 2 + 2)).toISOString();
+      push(makeEvent("ch-a", true, false, alertTs));
+      push(makeEvent("ch-a", false, false, gapTs));
     }
 
     // 1 header + 50 alerts (oldest 10 dropped)
     const rows = screen.getAllByRole("row");
     expect(rows).toHaveLength(51);
-    // Newest alert is first (alerts are prepended); its timestamp is alert-59
+    // Newest alert is first (alerts are prepended); it's the i=59 edge at 00:01:59.
     const firstCell = rows[1].querySelector("td");
-    expect(firstCell?.textContent).toContain("alert-59");
+    expect(firstCell?.textContent).toContain("00:01:59");
   });
 
   it("clears alerts when the channel set changes (T3)", () => {
