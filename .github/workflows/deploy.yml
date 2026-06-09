@@ -8,7 +8,7 @@ on:
       - "src/**"
       - "frontend/**"
       - "configs/**"
-      - "Dockerfile"
+      - "deploy/api/Dockerfile"
       - "deploy/mlflow/**"
       - ".github/workflows/deploy.yml"
 
@@ -63,7 +63,7 @@ jobs:
               - 'src/**'
               - 'frontend/**'
               - 'configs/**'
-              - 'Dockerfile'
+              - 'deploy/api/Dockerfile'
               - '.github/workflows/deploy.yml'
             mlflow:
               - 'deploy/mlflow/**'
