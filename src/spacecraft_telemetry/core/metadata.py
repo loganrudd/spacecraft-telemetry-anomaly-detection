@@ -1,15 +1,15 @@
 """Lightweight mission metadata helpers — no Ray, no MLflow, no torch.
 
 Placed in `core/` so that `model/training.py`, `model/scoring.py`, and
-`ray_training/tune.py` can all import without creating a circular dependency
-through `ray_training/runner.py`.
+`ray_fanout/tune.py` can all import without creating a circular dependency
+through `ray_fanout/runner.py`.
 
-Previously, `load_channel_subsystem_map` lived in `ray_training/runner.py`.
+Previously, `load_channel_subsystem_map` lived in `ray_fanout/runner.py`.
 That forced `model/training.py` and `model/scoring.py` to use a lazy
-`try/except` import to avoid a layering violation (model/ importing ray_training/).
+`try/except` import to avoid a layering violation (model/ importing ray_fanout/).
 Moving it here restores clean layering:
 
-    core/metadata  ←  model/training, model/scoring, ray_training/tune, ray_training/runner
+    core/metadata  ←  model/training, model/scoring, ray_fanout/tune, ray_fanout/runner
 """
 
 from __future__ import annotations

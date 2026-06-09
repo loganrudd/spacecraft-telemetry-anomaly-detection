@@ -52,7 +52,7 @@ from spacecraft_telemetry.model.io import (
     download_artifact_bytes,
     find_latest_run_for_channel,
 )
-from spacecraft_telemetry.ray_training.runner import _with_abs_paths
+from spacecraft_telemetry.ray_fanout.runner import _with_abs_paths
 
 log = get_logger(__name__)
 

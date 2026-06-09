@@ -48,7 +48,7 @@ log = get_logger(__name__)
 # prune_min_decrease is intentionally absent: pruning is offline-only (the
 # online serving path cannot replicate it), so a tuned config must not carry it
 # — that keeps the served params identical to what HPO optimized. See
-# ray_training/tune.py SEARCH_SPACE and docs/architecture/online-pruning-investigation.md.
+# ray_fanout/tune.py SEARCH_SPACE and docs/architecture/online-pruning-investigation.md.
 _TUNABLE_SCORING_FIELDS = frozenset(
     {"threshold_z", "threshold_window", "error_smoothing_window", "threshold_min_anomaly_len"}
 )
@@ -87,8 +87,8 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
 
 
 # load_channel_subsystem_map is defined in core.metadata and re-exported here
-# for backward-compatibility with callers that import from ray_training.runner.
-# (ray_training/__init__.py and cli.py import it from here.)
+# for backward-compatibility with callers that import from ray_fanout.runner.
+# (ray_fanout/__init__.py and cli.py import it from here.)
 __all_runner_exports__ = ["load_channel_subsystem_map"]
 
 
@@ -175,7 +175,7 @@ def train_all_channels(
     """
     import ray
 
-    from spacecraft_telemetry.ray_training.tasks import make_train_task
+    from spacecraft_telemetry.ray_fanout.tasks import make_train_task
 
     work = channels[:max_channels] if max_channels is not None else channels
     if not work:
@@ -236,7 +236,7 @@ def score_all_channels(
     """
     import ray
 
-    from spacecraft_telemetry.ray_training.tasks import make_score_task
+    from spacecraft_telemetry.ray_fanout.tasks import make_score_task
 
     work = channels[:max_channels] if max_channels is not None else channels
     if not work:

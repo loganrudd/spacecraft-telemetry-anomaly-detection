@@ -135,7 +135,7 @@ ray-tune-smoke:   ## Smoke test: tune one subsystem with 3 trials (fast local ch
 	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION) --subsystem subsystem_1 --num-samples 3
 
 ray-test:         ## Run Ray training/tuning unit tests (fast only)
-	$(RUN) pytest tests/ray_training/ -m "not slow" -v
+	$(RUN) pytest tests/ray_fanout/ -m "not slow" -v
 
 # ---------------------------------------------------------------------------
 # MLflow (Phase 7)

@@ -130,7 +130,7 @@ def train_channel(
     patience_counter = 0
 
     # Subsystem lookup — best-effort metadata; never breaks training on failure.
-    # load_channel_subsystem_map is in core.metadata (no ray_training dep).
+    # load_channel_subsystem_map is in core.metadata (no ray_fanout dep).
     _subsystem: str | None = None
     with suppress(Exception):
         _subsystem = load_channel_subsystem_map(settings, mission).get(channel)

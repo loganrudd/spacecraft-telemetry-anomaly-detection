@@ -603,7 +603,7 @@ def _filter_channels_by_subsystem(
     Raises ``click.ClickException`` if the subsystem metadata file is missing
     or no channels survive the filter.
     """
-    from spacecraft_telemetry.ray_training import load_channel_subsystem_map
+    from spacecraft_telemetry.ray_fanout import load_channel_subsystem_map
 
     subsystem_map = load_channel_subsystem_map(settings, mission)
     if not subsystem_map:
@@ -647,7 +647,7 @@ def _resolve_ray_channels(
 
     Raises ``click.ClickException`` when discovery returns nothing (pipeline not yet run).
     """
-    from spacecraft_telemetry.ray_training import discover_channels
+    from spacecraft_telemetry.ray_fanout import discover_channels
 
     if channels is not None:
         return [c.strip() for c in channels.split(",") if c.strip()]
@@ -739,7 +739,7 @@ def ray_train(
             --mission ESA-Mission2 \\
             --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
     """
-    from spacecraft_telemetry.ray_training import train_all_channels
+    from spacecraft_telemetry.ray_fanout import train_all_channels
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -847,7 +847,7 @@ def ray_score(
     """
     import json
 
-    from spacecraft_telemetry.ray_training import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -970,7 +970,7 @@ def ray_tune(
     import json
 
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
-    from spacecraft_telemetry.ray_training import (
+    from spacecraft_telemetry.ray_fanout import (
         run_all_sweeps,
         run_hpo_sweep,
         write_tuned_configs,
@@ -1395,7 +1395,7 @@ def drift_batch_mission(
         # Smoke test: first 3 channels only
         spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --max-channels 3
     """
-    from spacecraft_telemetry.ray_training import discover_channels
+    from spacecraft_telemetry.ray_fanout import discover_channels
 
     log = get_logger(__name__)
     settings: Settings = ctx.obj["settings"]
