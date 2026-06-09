@@ -1,4 +1,4 @@
-"""ray_training: Ray Core parallel training + Ray Tune HPO (Phase 4/5).
+"""ray_fanout: Ray Core parallel training + Ray Tune HPO (Phase 4/5).
 
 Public API
 ----------
@@ -14,13 +14,13 @@ write_tuned_configs  Persist subsystem → best_config mapping as JSON.
 """
 
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
-from spacecraft_telemetry.ray_training.runner import (
+from spacecraft_telemetry.ray_fanout.runner import (
     discover_channels,
     score_all_channels,
     train_all_channels,
 )
-from spacecraft_telemetry.ray_training.tasks import make_score_task, make_train_task
-from spacecraft_telemetry.ray_training.tune import (
+from spacecraft_telemetry.ray_fanout.tasks import make_score_task, make_train_task
+from spacecraft_telemetry.ray_fanout.tune import (
     SEARCH_SPACE,
     run_all_sweeps,
     run_hpo_sweep,

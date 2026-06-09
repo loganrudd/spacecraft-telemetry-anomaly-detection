@@ -46,7 +46,7 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
 from spacecraft_telemetry.preprocess.io import read_labels
-from spacecraft_telemetry.ray_training import discover_channels
+from spacecraft_telemetry.ray_fanout import discover_channels
 
 log = get_logger(__name__)
 

@@ -122,7 +122,7 @@ def ray_train_result(ray_local, ray_series_parquet: Settings) -> list:
     test_train_all_channels_ok and test_train_all_channels_max_channels_cap
     don't each spin up a fresh Ray task.
     """
-    from spacecraft_telemetry.ray_training import train_all_channels
+    from spacecraft_telemetry.ray_fanout import train_all_channels
 
     return train_all_channels(ray_series_parquet, _MISSION, [_CHANNEL])
 

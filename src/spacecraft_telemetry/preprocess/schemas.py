@@ -43,7 +43,7 @@ LABELS_SCHEMA = pa.schema(
 # NOT stored in the Parquet file itself. SERIES_FILE_SCHEMA covers only the
 # columns that appear inside each part.parquet file.
 #
-# Downstream readers (model/dataset.py, ray_training/conftest.py) expect exactly
+# Downstream readers (model/dataset.py, ray_fanout/conftest.py) expect exactly
 # these four columns in this order.
 
 SERIES_FILE_SCHEMA = pa.schema(

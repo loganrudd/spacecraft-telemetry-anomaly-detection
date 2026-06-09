@@ -135,7 +135,7 @@ ray-tune-smoke:   ## Smoke test: tune one subsystem with 3 trials (fast local ch
 	$(RUN) spacecraft-telemetry ray tune --mission $(MISSION) --subsystem subsystem_1 --num-samples 3
 
 ray-test:         ## Run Ray training/tuning unit tests (fast only)
-	$(RUN) pytest tests/ray_training/ -m "not slow" -v
+	$(RUN) pytest tests/ray_fanout/ -m "not slow" -v
 
 # ---------------------------------------------------------------------------
 # MLflow (Phase 7)
@@ -232,8 +232,8 @@ AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
 docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
 	docker build -t st-api:$(IMAGE_TAG) .
 
-docker-build-ray:  ## Build the Ray training/tuning image locally (IMAGE_TAG=dev)
-	docker build -f deploy/ray/Dockerfile -t st-training:$(IMAGE_TAG) .
+docker-build-ray:  ## Build the Ray image locally (IMAGE_TAG=dev)
+	docker build -f deploy/ray/Dockerfile -t st-ray:$(IMAGE_TAG) .
 
 docker-run-local: ## Run the API container locally against local MLflow (IMAGE_TAG=dev)
 	docker run --rm -p 8080:8080 \

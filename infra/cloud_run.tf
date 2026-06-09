@@ -49,9 +49,10 @@ resource "google_cloud_run_v2_service" "mlflow" {
           # only needed for parallel workers under experiment write load.
           # NOTE: applied via `terraform apply` (Makefile), NOT deploy.yml — CI
           # only updates the image. Memory/CPU changes require a manual TF apply.
-          cpu    = "2"
-          memory = "3Gi"
+          cpu    = "1"
+          memory = "2Gi"
         }
+        startup_cpu_boost = true
       }
 
       volume_mounts {

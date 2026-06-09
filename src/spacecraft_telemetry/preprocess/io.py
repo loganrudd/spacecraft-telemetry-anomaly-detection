@@ -4,7 +4,7 @@ All reads produce DataFrames with a fixed column contract; all writes produce th
 Hive-partitioned layout:
     {output_path}/mission_id={M}/channel_id={C}/part.parquet
 
-This layout is consumed by model/dataset.py, ray_training/runner.py, and
+This layout is consumed by model/dataset.py, ray_fanout/runner.py, and
 evidently_monitoring/reference.py — none of those files change.
 """
 

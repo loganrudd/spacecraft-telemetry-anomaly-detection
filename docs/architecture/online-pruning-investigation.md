@@ -25,9 +25,9 @@ ceiling is worth chasing in the live path.
 
 ## Decision in force (Option B)
 
-- `ray_training/tune.py::SEARCH_SPACE` tunes 4 params; **`prune_min_decrease`
+- `ray_fanout/tune.py::SEARCH_SPACE` tunes 4 params; **`prune_min_decrease`
   is not tuned.** Objective = segment-overlap F0.5 on the un-pruned pipeline.
-- `_TUNABLE_SCORING_FIELDS` (`ray_training/runner.py`) excludes
+- `_TUNABLE_SCORING_FIELDS` (`ray_fanout/runner.py`) excludes
   `prune_min_decrease`, so a tuned config can never carry it into serving.
 - `model/scoring.py::score_channel` reports un-pruned headline metrics +
   `pruned_seg_*` ceiling metrics (fixed `settings.model.prune_min_decrease`).

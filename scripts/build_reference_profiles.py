@@ -42,7 +42,7 @@ from spacecraft_telemetry.evidently_monitoring import (
     reference_profile_path,
     save_reference_profile,
 )
-from spacecraft_telemetry.ray_training import discover_channels
+from spacecraft_telemetry.ray_fanout import discover_channels
 
 log = get_logger(__name__)
 

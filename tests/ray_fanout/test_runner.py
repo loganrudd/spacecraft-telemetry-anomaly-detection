@@ -1,4 +1,4 @@
-"""Unit and integration tests for ray_training/runner.py."""
+"""Unit and integration tests for ray_fanout/runner.py."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 def test_discover_channels_finds_channel(tmp_path) -> None:
     """discover_channels returns sorted channel IDs from Hive partition dirs."""
     from spacecraft_telemetry.core.config import load_settings
-    from spacecraft_telemetry.ray_training import discover_channels
+    from spacecraft_telemetry.ray_fanout import discover_channels
 
     settings = load_settings("test")
     mission = "ESA-Mission1"
@@ -39,7 +39,7 @@ def test_discover_channels_finds_channel(tmp_path) -> None:
 def test_discover_channels_empty_when_no_processed_data() -> None:
     """discover_channels returns [] when mission dir doesn't exist."""
     from spacecraft_telemetry.core.config import load_settings
-    from spacecraft_telemetry.ray_training import discover_channels
+    from spacecraft_telemetry.ray_fanout import discover_channels
 
     settings = load_settings("test")
     channels = discover_channels(settings, "ESA-NonExistent")
@@ -49,7 +49,7 @@ def test_discover_channels_empty_when_no_processed_data() -> None:
 def test_discover_channels_ignores_non_channel_dirs(tmp_path) -> None:
     """discover_channels skips dirs that don't start with 'channel_id='."""
     from spacecraft_telemetry.core.config import load_settings
-    from spacecraft_telemetry.ray_training import discover_channels
+    from spacecraft_telemetry.ray_fanout import discover_channels
 
     settings = load_settings("test")
     mission = "ESA-Mission1"
@@ -90,7 +90,7 @@ def test_train_all_channels_ok(ray_train_result) -> None:
 def test_train_all_channels_partial_failure(ray_local, ray_series_parquet) -> None:
     """train_all_channels completes the sweep even if one channel fails."""
     pytest.importorskip("ray")
-    from spacecraft_telemetry.ray_training import train_all_channels
+    from spacecraft_telemetry.ray_fanout import train_all_channels
 
     settings = ray_series_parquet
     results = train_all_channels(
@@ -107,7 +107,7 @@ def test_train_all_channels_partial_failure(ray_local, ray_series_parquet) -> No
 def test_train_all_channels_max_channels_cap(ray_local, ray_series_parquet) -> None:
     """max_channels=1 with two candidates caps the sweep to the first channel."""
     pytest.importorskip("ray")
-    from spacecraft_telemetry.ray_training import train_all_channels
+    from spacecraft_telemetry.ray_fanout import train_all_channels
 
     results = train_all_channels(
         ray_series_parquet,
@@ -123,7 +123,7 @@ def test_train_all_channels_max_channels_cap(ray_local, ray_series_parquet) -> N
 def test_score_all_channels_ok(ray_local, pretrained_channel) -> None:
     """score_all_channels returns metrics after training."""
     pytest.importorskip("ray")
-    from spacecraft_telemetry.ray_training import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels
 
     results = score_all_channels(pretrained_channel, "ESA-Mission1", ["channel_1"])
     assert len(results) == 1
@@ -140,7 +140,7 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     import csv
     import json
 
-    from spacecraft_telemetry.ray_training import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels
 
     settings = pretrained_channel
 
@@ -182,7 +182,7 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
 def test_score_all_channels_ignores_unknown_tuned_keys(ray_local, pretrained_channel) -> None:
     """tuned_configs with unrecognised keys should be silently dropped."""
     pytest.importorskip("ray")
-    from spacecraft_telemetry.ray_training import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels
 
     settings = pretrained_channel
 
@@ -201,7 +201,7 @@ def test_score_all_channels_tuned_configs_requires_subsystem_map(
 ) -> None:
     """Passing tuned_configs without a subsystem map should fail fast."""
     pytest.importorskip("ray")
-    from spacecraft_telemetry.ray_training import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels
 
     settings = pretrained_channel.model_copy(
         update={
@@ -227,7 +227,7 @@ def test_score_all_channels_tuned_configs_requires_subsystem_map(
 def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
     """_with_abs_paths converts all three path fields to absolute paths."""
     from spacecraft_telemetry.core.config import load_settings
-    from spacecraft_telemetry.ray_training.runner import _with_abs_paths
+    from spacecraft_telemetry.ray_fanout.runner import _with_abs_paths
 
     settings = load_settings("test")
     # Override with known relative paths so the assertion is meaningful.

@@ -1,4 +1,4 @@
-"""Unit and integration tests for ray_training/tune.py."""
+"""Unit and integration tests for ray_fanout/tune.py."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from spacecraft_telemetry.core.config import load_settings
 
 def test_write_tuned_configs_writes_json(tmp_path: Path) -> None:
     """write_tuned_configs writes a stable JSON mapping to disk."""
-    from spacecraft_telemetry.ray_training.tune import write_tuned_configs
+    from spacecraft_telemetry.ray_fanout.tune import write_tuned_configs
 
     out = tmp_path / "models" / "ESA-Mission1" / "tuned_configs.json"
     payload = {
@@ -33,7 +33,7 @@ def test_write_tuned_configs_writes_json(tmp_path: Path) -> None:
 
 def test_write_tuned_configs_roundtrips_meta(tmp_path: Path) -> None:
     """write_tuned_configs preserves the _meta block for HPO lineage tracking."""
-    from spacecraft_telemetry.ray_training.tune import write_tuned_configs
+    from spacecraft_telemetry.ray_fanout.tune import write_tuned_configs
 
     out = tmp_path / "tuned_configs.json"
     payload = {
@@ -53,7 +53,7 @@ def test_write_tuned_configs_roundtrips_meta(tmp_path: Path) -> None:
 
 def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Preparation should fail fast on labels/errors shape mismatch."""
-    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
+    from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
 
     settings = load_settings("test")
 
@@ -69,11 +69,11 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
             run_id = "fake-run-id"
 
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: _FakeRun(),
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        "spacecraft_telemetry.ray_fanout.tune.download_artifact_bytes",
         lambda *_args, **_kwargs: _raw,
     )
     monkeypatch.setattr(
@@ -88,7 +88,7 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
 
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     """_scoring_trial returns a final metrics dict containing f0_5."""
-    from spacecraft_telemetry.ray_training.tune import _scoring_trial
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
 
     _ = monkeypatch
 
@@ -119,7 +119,7 @@ def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch)
     """run_hpo_sweep should fail fast if caller does not own Ray session."""
     import ray
 
-    from spacecraft_telemetry.ray_training.tune import run_hpo_sweep
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
 
     monkeypatch.setattr(ray, "is_initialized", lambda: False)
     settings = load_settings("test")
@@ -134,7 +134,7 @@ def test_run_all_sweeps_no_eligible_writes_empty(
     """run_all_sweeps should write empty JSON when no scored channels are eligible."""
     import ray
 
-    from spacecraft_telemetry.ray_training.tune import run_all_sweeps
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
 
     settings = load_settings("test").model_copy(
         update={
@@ -146,12 +146,12 @@ def test_run_all_sweeps_no_eligible_writes_empty(
 
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
         lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
     )
     # No scoring run exists for any channel → all channels ineligible.
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: None,
     )
 
@@ -166,7 +166,7 @@ def test_run_all_sweeps_filters_and_runs(
     """run_all_sweeps should run only eligible scored channels per subsystem."""
     import ray
 
-    from spacecraft_telemetry.ray_training.tune import run_all_sweeps
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
 
     base_settings = load_settings("test")
     settings = base_settings.model_copy(
@@ -186,11 +186,11 @@ def test_run_all_sweeps_filters_and_runs(
 
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         _fake_find_latest_run,
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
         lambda *_args, **_kwargs: {
             "channel_1": "subsystem_1",
             "channel_2": "subsystem_1",
@@ -214,7 +214,7 @@ def test_run_all_sweeps_filters_and_runs(
         }
 
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.run_hpo_sweep",
+        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
         _fake_run_hpo_sweep,
     )
 
@@ -233,7 +233,7 @@ def test_run_all_sweeps_filters_and_runs(
 
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
     """_prepare_channel_data returns slices of length floor(N * hpo_eval_fraction)."""
-    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
+    from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
 
     settings = load_settings("test")  # hpo_eval_fraction = 0.6
     n_total = 10
@@ -249,11 +249,11 @@ def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
             run_id = "fake-run-id"
 
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: _FakeRun(),
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        "spacecraft_telemetry.ray_fanout.tune.download_artifact_bytes",
         lambda *_args, **_kwargs: _raw,
     )
     monkeypatch.setattr(
@@ -273,7 +273,7 @@ def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -> None:
     """_prepare_channel_data warns when held-out portion contains no anomalies."""
-    from spacecraft_telemetry.ray_training.tune import _prepare_channel_data
+    from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
 
     settings = load_settings("test")  # hpo_eval_fraction = 0.6
     n_total = 10  # HPO: first 6, held-out: last 4
@@ -293,11 +293,11 @@ def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -
         return labels
 
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.find_latest_run_for_channel",
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: _FakeRun(),
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_training.tune.download_artifact_bytes",
+        "spacecraft_telemetry.ray_fanout.tune.download_artifact_bytes",
         lambda *_args, **_kwargs: _raw,
     )
     monkeypatch.setattr("spacecraft_telemetry.model.dataset.load_window_labels", _fake_labels)
@@ -313,7 +313,7 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
 
     from spacecraft_telemetry.model.scoring import score_channel
     from spacecraft_telemetry.model.training import train_channel
-    from spacecraft_telemetry.ray_training.tune import run_hpo_sweep
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
 
     mission = "ESA-Mission1"
     channel = "channel_1"

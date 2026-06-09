@@ -283,11 +283,11 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1", "channel_2"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.run_all_sweeps",
+                "spacecraft_telemetry.ray_fanout.run_all_sweeps",
                 return_value=Path("models/ESA-Mission1/tuned_configs.json"),
             ) as mock_run_all,
         ):
@@ -315,15 +315,15 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1", "channel_2"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"channel_1": "subsystem_1", "channel_2": "subsystem_6"},
             ),
             patch(
-                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                "spacecraft_telemetry.ray_fanout.run_hpo_sweep",
                 return_value={
                     "config": {
                         "error_smoothing_window": 10,
@@ -335,7 +335,7 @@ class TestRayTuneCommand:
                     "run_id": "fake-run-id",
                 },
             ) as mock_run_one,
-            patch("spacecraft_telemetry.ray_training.write_tuned_configs") as mock_write,
+            patch("spacecraft_telemetry.ray_fanout.write_tuned_configs") as mock_write,
         ):
             result = runner.invoke(
                 main,
@@ -364,7 +364,7 @@ class TestRayTuneCommand:
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
-            patch("spacecraft_telemetry.ray_training.discover_channels", return_value=[]),
+            patch("spacecraft_telemetry.ray_fanout.discover_channels", return_value=[]),
         ):
             result = runner.invoke(
                 main,
@@ -384,10 +384,10 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1", "channel_2"],
             ),
-            patch("spacecraft_telemetry.ray_training.load_channel_subsystem_map", return_value={}),
+            patch("spacecraft_telemetry.ray_fanout.load_channel_subsystem_map", return_value={}),
         ):
             result = runner.invoke(
                 main,
@@ -413,11 +413,11 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1", "channel_2"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"channel_1": "subsystem_6", "channel_2": "subsystem_6"},
             ),
         ):
@@ -458,15 +458,15 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"channel_1": "subsystem_1"},
             ),
             patch(
-                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                "spacecraft_telemetry.ray_fanout.run_hpo_sweep",
                 return_value={
                     "config": {
                         "error_smoothing_window": 10,
@@ -516,15 +516,15 @@ class TestRayTuneCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["channel_1"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"channel_1": "subsystem_1"},
             ),
             patch(
-                "spacecraft_telemetry.ray_training.run_hpo_sweep",
+                "spacecraft_telemetry.ray_fanout.run_hpo_sweep",
                 return_value={
                     "config": {
                         "error_smoothing_window": 10,
@@ -570,15 +570,15 @@ class TestRayTrainCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b", "ch_c"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_6", "ch_c": "subsystem_1"},
             ),
             patch(
-                "spacecraft_telemetry.ray_training.train_all_channels",
+                "spacecraft_telemetry.ray_fanout.train_all_channels",
                 return_value=[
                     {"status": "ok", "channel": "ch_a", "best_epoch": 5, "best_val_loss": 0.01},
                     {"status": "ok", "channel": "ch_c", "best_epoch": 5, "best_val_loss": 0.01},
@@ -603,11 +603,11 @@ class TestRayTrainCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_1"},
             ),
         ):
@@ -628,11 +628,11 @@ class TestRayTrainCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={},
             ),
         ):
@@ -653,7 +653,7 @@ class TestRayTrainCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.train_all_channels",
+                "spacecraft_telemetry.ray_fanout.train_all_channels",
                 return_value=[
                     {"status": "ok", "channel": "ch_a", "best_epoch": 5, "best_val_loss": 0.01},
                     {"status": "ok", "channel": "ch_b", "best_epoch": 5, "best_val_loss": 0.01},
@@ -701,15 +701,15 @@ class TestRayScoreCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b", "ch_c"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_6", "ch_c": "subsystem_1"},
             ),
             patch(
-                "spacecraft_telemetry.ray_training.score_all_channels",
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
                 return_value=[
                     {
                         "status": "ok",
@@ -758,11 +758,11 @@ class TestRayScoreCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={"ch_a": "subsystem_1", "ch_b": "subsystem_1"},
             ),
         ):
@@ -783,11 +783,11 @@ class TestRayScoreCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.discover_channels",
+                "spacecraft_telemetry.ray_fanout.discover_channels",
                 return_value=["ch_a", "ch_b"],
             ),
             patch(
-                "spacecraft_telemetry.ray_training.load_channel_subsystem_map",
+                "spacecraft_telemetry.ray_fanout.load_channel_subsystem_map",
                 return_value={},
             ),
         ):
@@ -808,7 +808,7 @@ class TestRayScoreCommand:
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
             patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
             patch(
-                "spacecraft_telemetry.ray_training.score_all_channels",
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
                 return_value=[
                     {
                         "status": "ok",
