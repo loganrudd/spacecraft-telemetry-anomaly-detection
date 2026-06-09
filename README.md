@@ -27,22 +27,6 @@ leakage-free protocol and honest framing).
   <img src="docs/assets/dashboard.gif" alt="Live dashboard: spacecraft telemetry streaming with anomaly bands and a subsystem overview" width="900">
 </p>
 
-## Status
-
-**Phase 10 complete — GCP deployment, ESA-Mission1, live demo.**
-
-Completed:
-- Phase 1: repo scaffold + ingestion
-- Phase 2: Pandas + Ray Core preprocessing
-- Phase 3: Telemanom model drop-in
-- Phase 4: Ray parallel training + scoring
-- Phase 5: Ray Tune scoring-parameter HPO
-- Phase 6: MLflow experiment tracking + model registry
-- Phase 7: Evidently batch drift detection + MLflow artifact logging
-- Phase 8: FastAPI serving layer — SSE telemetry stream replay + `/health` endpoint
-- Phase 9: React dashboard — live telemetry charts + anomaly & real-time drift alerts
-- Phase 10: GCP deployment — Cloud Run serving, GKE/Ray training, Terraform IaC, keyless CI/CD
-
 ## What Works Today
 
 - End-to-end local workflow on sampled ESA data
@@ -78,7 +62,7 @@ Completed:
     runtime when no reference profiles are available.
 - Fast test, lint, and typecheck workflows
 
-## Quick Start
+## Quick Start / Demo Workflow
 
 Prerequisites:
 - Python 3.12
@@ -94,53 +78,45 @@ make download-sample MISSION=ESA-Mission1
 # you can also specify a specific subsystem and/or channel you want to sample/preprocess/train/score/tune
 make download-sample MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6
 
-# 3) Preprocess data (pandas + Ray Core)
+# 3) Preprocess data (pandas + Ray Core) for just channel_22 of mission 1
 make preprocess MISSION=ESA-Mission1 CHANNEL=channel_22
 
 # 4) Run test suite (fast + slow mix per project config)
 make test
 ```
 
-## Demo Workflow
-
 Full end-to-end lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
+
 ```bash
-# 1) Train all discovered channels (logged to MLflow training experiment)
+
+# 5) First start mlflow server to log train/score/tune/monitoring runs
+make mlflow-server                      # opens at http://localhost:5001
+
+# 2) Train all discovered mission 1 channels (logged to MLflow training experiment)
 make ray-train MISSION=ESA-Mission1
 
-# 2) Score with Hundman defaults on full test set (baseline)
+# 3) Score with Hundman defaults on full test set (baseline)
 make ray-score MISSION=ESA-Mission1
 
-# 3) Tune scoring parameters per subsystem via Ray Tune
+# 4) Tune scoring parameters per subsystem via Ray Tune
 #    HPO evaluates on the first 60% of each channel's test windows.
 make ray-tune MISSION=ESA-Mission1
 
-# 4) Re-score using tuned params, evaluated on the held-out final 40%
+# 5) Re-score using tuned params, evaluated on the held-out final 40%
 #    (avoids leakage between HPO search and reported metrics)
-#    TUNED=1 auto-derives models/ESA-Mission1/tuned_configs.json (mirrors cloud-score).
-#    Use TUNED_CONFIGS=<path> instead to point at a non-canonical configs file.
+#    TUNED=1 auto-derives models/ESA-Mission1/tuned_configs.json
 make ray-score MISSION=ESA-Mission1 TUNED=1
 
-# 5) Inspect experiments and registered models
-make mlflow-server                      # opens at http://localhost:5001
-
-# 6) Promote a model — sets the @champion alias, required before serving
-make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22          # local MLflow
-make mlflow-promote MISSION=ESA-Mission1 CHANNEL=channel_22 ENV=cloud # cloud MLflow
-# Promote all channels in a mission (or a subsystem):
-make mlflow-promote MISSION=ESA-Mission1 ENV=cloud
-make mlflow-promote MISSION=ESA-Mission1 SUBSYSTEM=subsystem_6 ENV=cloud
+# 6) Promote all discoverable models in a mission (or a subsystem) or specify the CHANNEL:
+make mlflow-promote MISSION=ESA-Mission1 --channel channel_22
 
 # 7) Run drift monitoring for a single channel
 #    Builds reference profile from train split, compares to test split,
 #    logs HTML report + per-feature metrics to telemanom-monitoring-ESA-Mission1 experiment.
 uv run spacecraft-telemetry drift batch --mission ESA-Mission1 --channel channel_22
 
-# 8) Run drift monitoring for all discovered channels in a mission
-uv run spacecraft-telemetry drift batch-mission --mission ESA-Mission1
-
-# 9) Start the FastAPI serving layer (separate terminal)
+# 8) Start the FastAPI serving layer (separate terminal)
 #    Only loads channels with a @champion alias — promote before starting.
 make serve
 # or with overrides:
@@ -160,10 +136,10 @@ curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
     | grep -m1 '"is_anomaly":true'
 
-# 10) Drift stream — per-channel Wasserstein drift scores (requires reference profiles built in step 8)
+# 9) Drift stream — per-channel Wasserstein drift scores (requires reference profiles built in step 8)
 curl -N 'http://127.0.0.1:8000/api/stream/drift?channels=channel_1'
 
-# 11) Run the React dashboard (second separate terminal)
+# 10) Run the React dashboard (second separate terminal)
 #     Requires: make serve running in another terminal
 #     First time only:
 make frontend-install
@@ -182,25 +158,6 @@ This prevents the tuning process from inflating held-out F0.5 scores.
 Expected key artifacts:
 - `models/ESA-Mission1/tuned_configs.json` — per-subsystem scoring params + HPO lineage
 - `mlflow.db` — local SQLite MLflow tracking store (experiments, runs, registered models)
-
-Cloud lifecycle on GKE mirrors local exactly — baseline score first, then tune, then tuned score:
-
-```bash
-# 1) Train
-make cloud-train MISSION=ESA-Mission1
-
-# 2) Baseline score — Hundman defaults, full test set (no TUNED flag)
-make cloud-score MISSION=ESA-Mission1
-
-# 3) Tune — writes tuned_configs.json to GCS
-make cloud-tune MISSION=ESA-Mission1
-
-# 4) Tuned score — HPO params, held-out final 40% only
-make cloud-score MISSION=ESA-Mission1 TUNED=1
-```
-
-`TUNED=1` fetches `tuned_configs.json` from GCS and passes it to the scorer; omitting it
-(or `TUNED=0`) always runs a clean Hundman-defaults baseline regardless of what's in the bucket.
 
 ## Repository Map
 
@@ -276,12 +233,17 @@ untouched final 40%.
 | Experiment tracking | Model registry |
 |:---:|:---:|
 | ![MLflow experiments — separate training, scoring, and HPO experiments per mission](docs/assets/mlflow-experiments.png) | ![MLflow model registry with telemanom-* models and @champion aliases](docs/assets/mlflow-registry.png) |
-| **Ray Tune HPO sweep** | **Evidently drift report** |
-| ![Ray Tune sweep over per-subsystem scoring parameters with ASHA early-stopping](docs/assets/ray-tune-sweep.png) | ![Evidently batch data-drift report logged as an MLflow artifact](docs/assets/evidently-drift-report.png) |
+| **Ray Tune HPO sweep** | **MLflow scoring** |
+| ![Ray Tune sweep over per-subsystem scoring parameters with ASHA early-stopping](docs/assets/ray-tune-sweep.png) | ![Models by pruned-segment-overlap F0.5](docs/assets/mlflow-scoring.png) |
+| **MLflow mointoring** | **Evidently drift report** |
+| ![MLflow monitoring Overview for Ch. 15](docs/assets/mlflow-monitoring.png) | ![Evidently batch data-drift report logged as an MLflow artifact](docs/assets/evidently-drift-report.png) |
 
 ## Deployment
 
-Full instructions in [docs/deployment.md](docs/deployment.md). Summary:
+Full instructions in [docs/deployment.md](docs/deployment.md). 
+Cloud lifecycle on GKE mirrors local exactly — baseline score first, then tune, then tuned score.
+
+Summary:
 
 ```bash
 # Provision infrastructure
@@ -292,7 +254,7 @@ make cloud-preprocess MISSION=ESA-Mission1
 make cloud-train      MISSION=ESA-Mission1
 make cloud-score      MISSION=ESA-Mission1          # baseline
 make cloud-tune       MISSION=ESA-Mission1
-make cloud-score      MISSION=ESA-Mission1 TUNED=1  # tuned, held-out 40%
+make cloud-score      MISSION=ESA-Mission1 TUNED=1  # TUNED=1 fetches `tuned_configs.json` from GCS and passes it to the scorer; TUNED=0 (or omitted) always runs a clean Hundman-defaults baseline regardless of what's in the bucket.
 
 # Seed drift reference profiles + promote + serve
 make seed-reference-profiles MISSION=ESA-Mission1
