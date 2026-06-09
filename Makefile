@@ -230,7 +230,7 @@ SSL_CERT_FILE ?= $(shell uv run python -m certifi 2>/dev/null)
 AR_REPO        = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/spacecraft-telemetry
 
 docker-build:     ## Build the API serving image locally (IMAGE_TAG=dev)
-	docker build -t st-api:$(IMAGE_TAG) .
+	docker build -f deploy/api/Dockerfile -t st-api:$(IMAGE_TAG) .
 
 docker-build-ray:  ## Build the Ray image locally (IMAGE_TAG=dev)
 	docker build -f deploy/ray/Dockerfile -t st-ray:$(IMAGE_TAG) .

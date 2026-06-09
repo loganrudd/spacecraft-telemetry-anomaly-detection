@@ -100,7 +100,7 @@ jobs:
         run: |
           AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
           IMAGE="${AR_REPO}/api:${{ github.sha }}"
-          docker build -t "${IMAGE}" -t "${AR_REPO}/api:latest" .
+          docker build -f deploy/api/Dockerfile -t "${IMAGE}" -t "${AR_REPO}/api:latest" .
           docker push "${IMAGE}"
           docker push "${AR_REPO}/api:latest"
           echo "ref=${IMAGE}" >> "$GITHUB_OUTPUT"
