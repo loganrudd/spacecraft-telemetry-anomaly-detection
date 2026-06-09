@@ -19,7 +19,7 @@ RUN := $(UV) run
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
         cloud-up cloud-down cloud-db-start cloud-db-stop \
-        cloud-preprocess cloud-train cloud-tune cloud-score \
+        cloud-preprocess cloud-train cloud-tune cloud-score cloud-drift \
         seed-reference-profiles \
         smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
@@ -364,6 +364,11 @@ cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MI
 cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune).
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
 		./scripts/cloud_score.sh
+
+cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [SUBSYSTEM=…] [CHANNEL=…])
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+	SUBSYSTEM=$(SUBSYSTEM) CHANNEL=$(CHANNEL) \
+		./scripts/cloud_drift.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
 	SSL_CERT_FILE=$$($(RUN) python -m certifi) \
