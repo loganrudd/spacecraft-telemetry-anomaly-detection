@@ -65,43 +65,68 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Open SSE streams for ALL loaded channels on mount (keeps overview warm).
+  // Open SSE streams for ALL loaded channels (keeps overview warm).
   // Streams stay open across subsystem navigation — no reconnect on drill-in.
+  //
+  // Visibility-gated: an open SSE connection is a long-lived in-flight request,
+  // and Cloud Run will not scale a serving instance to zero while any request is
+  // active. A left-open/backgrounded tab holds two such connections (telemetry +
+  // drift) and would pin an instance indefinitely (billed overnight). We close
+  // both streams when the tab is hidden and reopen when it's visible again, so
+  // unviewed tabs release the instance and let it scale to zero. A server-side
+  // timeout would not help here: EventSource auto-reconnects, so a backgrounded
+  // tab would immediately re-pin the instance.
   useEffect(() => {
     if (!health || health.channels_loaded.length === 0) return;
 
     const allChannels = health.channels_loaded;
-    setConnState("connecting");
-    telemetryStore.clear();
-    driftStore.clear();
 
-    const handle = openTelemetryStream({
-      channels: allChannels,
-      onEvent: (e) => {
-        telemetryStore.push(e);
-        tickCountRef.current += 1;
-      },
-      onOpen: () => setConnState("open"),
-      onError: () => setConnState("error"),
-    });
-    streamRef.current = handle;
+    const openStreams = () => {
+      if (streamRef.current) return; // already open
+      setConnState("connecting");
+      telemetryStore.clear();
+      driftStore.clear();
 
-    const driftHandle = openDriftStream({
-      channels: allChannels,
-      onEvent: (e) => driftStore.push(e),
-      onError: (err) => {
-        const es = err.target as EventSource;
-        if (es.readyState === EventSource.CLOSED) setDriftDisabled(true);
-      },
-    });
-    setDriftDisabled(false);
-    driftStreamRef.current = driftHandle;
+      streamRef.current = openTelemetryStream({
+        channels: allChannels,
+        onEvent: (e) => {
+          telemetryStore.push(e);
+          tickCountRef.current += 1;
+        },
+        onOpen: () => setConnState("open"),
+        onError: () => setConnState("error"),
+      });
 
-    return () => {
-      handle.close();
-      driftHandle.close();
+      setDriftDisabled(false);
+      driftStreamRef.current = openDriftStream({
+        channels: allChannels,
+        onEvent: (e) => driftStore.push(e),
+        onError: (err) => {
+          const es = err.target as EventSource;
+          if (es.readyState === EventSource.CLOSED) setDriftDisabled(true);
+        },
+      });
+    };
+
+    const closeStreams = () => {
+      streamRef.current?.close();
+      driftStreamRef.current?.close();
       streamRef.current = null;
       driftStreamRef.current = null;
+      setConnState("closed");
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") openStreams();
+      else closeStreams();
+    };
+
+    if (document.visibilityState === "visible") openStreams();
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      closeStreams();
     };
   // Re-open when health loads (channels don't change at runtime; speed is fixed).
   // eslint-disable-next-line react-hooks/exhaustive-deps
