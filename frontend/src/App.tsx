@@ -42,6 +42,10 @@ export default function App() {
   const driftStreamRef = useRef<DriftStreamHandle | null>(null);
   const tickCountRef = useRef(0);
   const autoNavigatedRef = useRef(false);
+  // Tracks whether the telemetry EventSource has fired onOpen at least once.
+  // On the second+ open (loop restart after server closes the replay window),
+  // we clear the store so stale data doesn't cause a backwards timestamp jump.
+  const streamHasOpenedRef = useRef(false);
 
   // Fetch health on mount; poll every 2 s while status === "loading".
   useEffect(() => {
@@ -86,6 +90,7 @@ export default function App() {
       setConnState("connecting");
       telemetryStore.clear();
       driftStore.clear();
+      streamHasOpenedRef.current = false;
 
       streamRef.current = openTelemetryStream({
         channels: allChannels,
@@ -93,7 +98,16 @@ export default function App() {
           telemetryStore.push(e);
           tickCountRef.current += 1;
         },
-        onOpen: () => setConnState("open"),
+        onOpen: () => {
+          if (streamHasOpenedRef.current) {
+            // Loop restart: server closed the replay window and EventSource
+            // reconnected. Clear stale data so charts don't show a backwards
+            // timestamp jump when new events arrive.
+            telemetryStore.clear();
+          }
+          streamHasOpenedRef.current = true;
+          setConnState("open");
+        },
         onError: () => setConnState("error"),
       });
 

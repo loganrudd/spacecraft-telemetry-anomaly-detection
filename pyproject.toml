@@ -84,5 +84,5 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pandas.*", "feast.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*"]
+module = ["pyarrow.*", "pandas.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*"]
 ignore_missing_imports = true

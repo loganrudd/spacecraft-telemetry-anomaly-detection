@@ -30,7 +30,6 @@ resource "google_project_service" "apis" {
     "billingbudgets.googleapis.com",
     "container.googleapis.com",
     "compute.googleapis.com",
-    "dataproc.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
   ])

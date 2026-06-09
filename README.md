@@ -14,9 +14,18 @@ for serving.
 
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
-**Live demo:** https://api-pb5fb25noa-uc.a.run.app
+**Results:** on the held-out final 40% of ESA-Mission1, anomalies are flagged in **30 of 31**
+labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation) for the
+leakage-free protocol and honest framing).
+
+**Live demo:** https://api-pb5fb25noa-uc.a.run.app  
+*(Cloud Run scales to zero — first load may take ~30s if the instance has been idle.)*
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
+
+<p align="center">
+  <img src="docs/assets/dashboard.gif" alt="Live dashboard: spacecraft telemetry streaming with anomaly bands and a subsystem overview" width="900">
+</p>
 
 ## Status
 
@@ -61,8 +70,12 @@ Completed:
   - Rising-edge anomaly alert panel with TP/FP indicator
   - Channel picker with performance warning above 5 simultaneous charts
   - Mission-control dark theme; single SSE connection multiplexed across channels
-  - Real-time drift panel: per-channel Evidently KS drift scores + subsystem gauge
-    (automatically hidden when no reference profiles are available)
+  - Real-time drift panel: per-channel scipy Wasserstein drift scores + subsystem gauge.
+    Built and wired end-to-end, but **disabled by default** (`DRIFT_DISABLED = true` in
+    `frontend/src/App.tsx`) because the rolling drift window never fills within a short demo
+    replay. To enable: set `DRIFT_DISABLED = false`, seed reference profiles
+    (`make seed-reference-profiles`), and run a longer replay. The panel also auto-hides at
+    runtime when no reference profiles are available.
 - Fast test, lint, and typecheck workflows
 
 ## Quick Start
@@ -90,7 +103,7 @@ make test
 
 ## Demo Workflow
 
-Full Phase 6 lifecycle (train → baseline score → HPO tune → tuned score → promote):
+Full end-to-end lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
 ```bash
 # 1) Train all discovered channels (logged to MLflow training experiment)
@@ -147,10 +160,10 @@ curl -sN "http://127.0.0.1:8000/api/stream/telemetry?speed=100&channels=channel_
 curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
     | grep -m1 '"is_anomaly":true'
 
-# 10) Drift stream — per-channel KS drift scores (requires reference profiles built in step 8)
+# 10) Drift stream — per-channel Wasserstein drift scores (requires reference profiles built in step 8)
 curl -N 'http://127.0.0.1:8000/api/stream/drift?channels=channel_1'
 
-# 12) Run the React dashboard (second separate terminal)
+# 11) Run the React dashboard (second separate terminal)
 #     Requires: make serve running in another terminal
 #     First time only:
 make frontend-install
@@ -202,30 +215,69 @@ Top-level directories:
 
 ## Architecture Overview
 
-```text
-ESA Parquet (Zenodo/GCS)
-  -> Download + Sample
-  -> Pandas + Ray Core preprocessing (per-channel fan-out)
-  -> Telemanom LSTM (per-channel)
-  -> Ray parallel train/score
-  -> Ray Tune scoring HPO
-  -> MLflow experiment tracking + model registry
-  -> Evidently drift monitoring (batch, per-channel, HTML reports in MLflow)
-  -> FastAPI + SSE serving  [Phase 8 - complete]
-       GET /health
-       GET /api/stream/telemetry  (SSE, real-time LSTM inference)
-       GET /api/stream/drift      (SSE, rolling Evidently KS drift per channel)
-  -> React dashboard (Vite/TS, Recharts)  [Phase 9 - complete]
-       Live telemetry charts + anomaly bands
-       Rising-edge anomaly alert panel
-  -> Real-time drift panel  [Phase 9.5 - complete]
-       Per-channel KS drift scores (value_normalized feature)
-       Subsystem-level gauge: % channels drifting, alert at ≥30%
-  -> GCP deployment  [Phase 10 - complete]
-       Cloud Run (API + MLflow), GKE Autopilot (Ray training), GCS
-       Terraform IaC, GitHub Actions CI/CD, Workload Identity Federation
-       Billing kill-switch, cost guardrails
+```mermaid
+flowchart TD
+    A["ESA telemetry — Zenodo / GCS Parquet"] --> B["Download + sample"]
+    B --> C["Preprocess: pandas + PyArrow<br/>Ray Core per-channel fan-out"]
+    C --> D["Telemanom LSTM — one model per channel"]
+    D --> E["Ray parallel train + score"]
+    E --> F["Ray Tune — per-subsystem scoring HPO"]
+    E --> G["MLflow — experiment tracking + model registry"]
+    F --> G
+    G --> H["Evidently — batch drift reports logged to MLflow"]
+    G --> I["FastAPI + SSE serving"]
+    I --> K["GET /api/stream/telemetry<br/>real-time LSTM inference"]
+    I --> L["GET /api/stream/drift<br/>scipy Wasserstein, rolling window"]
+    K --> M["React dashboard — Vite + TS + Recharts"]
+    L --> M
+    M --> N["Live telemetry charts + anomaly bands"]
+    M --> O["Subsystem drift gauge — alert at 30%+ channels"]
+
+    subgraph CLOUD ["GCP deployment"]
+        direction LR
+        P["Cloud Run<br/>API + MLflow, scale to zero"]
+        Q["GKE Autopilot + KubeRay<br/>preprocess / train / tune / score"]
+        R["Terraform IaC · GitHub Actions CI/CD<br/>Workload Identity Federation"]
+    end
+
+    I -. deployed on .-> P
+    E -. runs on .-> Q
 ```
+
+## How It Works
+
+**Preprocess.** Each raw channel is a univariate time series. The pipeline forward-fills
+short gaps, detects sampling gaps (`gap_multiplier × median interval`), z-score-normalizes
+against *training-split* statistics (saved to `normalization_params.json` so inference uses
+the exact same scaling), labels timesteps against ground-truth anomaly segments, and writes
+per-timestep Parquet partitioned by mission / split / channel. A `@ray.remote` task fans this
+out across hundreds of channels; the labels table is shared once via `ray.put`.
+
+**Train.** One small Telemanom LSTM (2-layer, `hidden_dim=80`) per channel, trained only on
+*nominal* data as a one-step-ahead forecaster — it learns each sensor's normal dynamics. Ray
+Core runs one task per channel (`num_cpus=1`, or `0.25` GPU to pack four models on a T4/L4),
+with `max_retries=3` for spot-VM preemption. Each run logs hyperparameters, loss, and the
+model to MLflow under `telemanom-{mission}-{channel}`.
+
+**Score.** The forecaster predicts each step; the residual is EWMA-smoothed and compared to a
+dynamic threshold (rolling mean + z·std, Hundman §3.2). Runs above threshold become anomaly
+segments, evaluated with **segment-overlap F0.5** against ground truth. Scoring is pure numpy
+with no torch dependency after predictions are obtained, so the identical code path runs
+inside the FastAPI serving layer.
+
+**Tune.** Ray Tune searches the *scoring* parameters (error-smoothing window, threshold z,
+minimum anomaly length) per subsystem — not the model architecture, which stays
+Hundman-default. ASHA early-stops weak trials and every trial logs to MLflow. To prevent
+leakage, HPO searches the first 60% of each channel's test set while reported metrics use the
+untouched final 40%.
+
+## Screenshots
+
+| Experiment tracking | Model registry |
+|:---:|:---:|
+| ![MLflow experiments — separate training, scoring, and HPO experiments per mission](docs/assets/mlflow-experiments.png) | ![MLflow model registry with telemanom-* models and @champion aliases](docs/assets/mlflow-registry.png) |
+| **Ray Tune HPO sweep** | **Evidently drift report** |
+| ![Ray Tune sweep over per-subsystem scoring parameters with ASHA early-stopping](docs/assets/ray-tune-sweep.png) | ![Evidently batch data-drift report logged as an MLflow artifact](docs/assets/evidently-drift-report.png) |
 
 ## Deployment
 
@@ -248,7 +300,7 @@ make mlflow-promote   MISSION=ESA-Mission1 ENV=cloud
 make cloud-deploy
 ```
 
-Architecture decisions: [docs/architecture/phase-10-gcp.md](docs/architecture/phase-10-gcp.md)
+Architecture decisions: [docs/architecture/gcp.md](docs/architecture/gcp.md)
 
 ## Evaluation
 
@@ -278,8 +330,11 @@ anomaly segments, but most predicted segments don't overlap a *labeled* one. On
 more realistic than SMAP/MSL, where Telemanom reports ~0.7 — segment-F0.5 in the
 ~0.2–0.4 range is in-family for this model class, and the low precision is
 consistent with the benchmark's known label sparsity (real-but-unlabeled
-anomalies counted as false positives). The number is reported as-is, not tuned
-upward against the held-out split.
+anomalies counted as false positives). Three channels (41, 43, 45) reach
+segment-F0.5 ≥ 0.7 individually, consistent with Telemanom's reported ceiling on
+denser datasets; the fleet mean of 0.19 reflects label sparsity across the majority
+of channels rather than systematic detection failure. The number is reported as-is,
+not tuned upward against the held-out split.
 
 **Channel accounting.** A single fleet average hides the structure, so a
 diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
@@ -292,23 +347,69 @@ ground truth:
 | no labeled anomalies | 8 | nothing to detect in the dataset — excluded |
 | forecaster blind spot | 1 | forecasts the channel *and its anomalies* accurately, so the error never spikes — a known Telemanom limitation, confirmed with `scripts/inspect_channel.py` |
 
-The live demo serves the 30 validated channels.
+The live demo serves 8 validated subsystem_6 channels.
+
+## Engineering Notes
+
+A few problems from building the platform that were more interesting than the model itself:
+
+**Evidently was too slow for the real-time path.** The batch drift reports use Evidently, but
+on the live SSE stream its `Report` object adds ~58 ms per run — at 100–1000× replay speeds
+that saturated the thread pool and capped throughput. I moved the hot path to a direct scipy
+Wasserstein computation (`W1(ref, cur) / std(ref)`, <1 ms, same statistic) offloaded with
+`asyncio.to_thread`, and kept Evidently for batch reports where the HTML output is the actual
+deliverable — roughly 77× faster per check. *Match the tool to the latency budget; a great
+batch tool can be the wrong choice on the hot path.*
+
+**Scheduling a heterogeneous Ray workload under a fixed memory ceiling.** Channels range from
+~50 MB to ~240 MB compressed, and naïve fan-out OOM-killed the 4 GB Ray workers. I added
+per-channel peak-RSS logging *first*, then: encoded repeated string columns as `pd.Categorical`
+(saved 15–19 GB on large channels), replaced a `[channel_id] * len(df)` list build with
+`Categorical.from_codes` (per-task peak 2.35 GB → 0.5 GB), dropped defensive `df.copy()`s, and
+used Ray `memory=` hints plus `max_calls=1` so the scheduler won't co-schedule two heavy tasks
+and the OS reclaims RSS between them. Small channels then pack 4-per-node while the few large
+ones get a node to themselves. *Measure peak RSS before tuning concurrency, then bin-pack by
+actual footprint.*
+
+**Real-time serving on Cloud Run cold starts.** Loading every champion model at startup with an
+unbounded `asyncio.gather` fanned out hundreds of concurrent MLflow round-trips and OOM-killed
+the 2 GiB instance; eagerly loading every channel's replay series did the same. Serving now
+defers model loading to a background task (so `/health` returns `status="loading"` with
+progress while the app already accepts requests), bounds concurrent loads with a semaphore,
+loads replay data lazily per stream, and caches only the served channels. On the stream itself,
+a single shared queue let one slow channel stall all of them — replaced with per-channel bounded
+queues merged `FIRST_COMPLETED` so backpressure stays isolated. *Scale-to-zero makes startup a
+first-class design problem.*
+
+**Auth tokens expire mid-job.** The Cloud Run-hosted MLflow is private, so Ray training and
+tuning workers authenticate with a GCP ID token — which expires after an hour, right in the
+middle of long training runs (surfacing as 403s). I added a `refresh_mlflow_auth()` called once
+per epoch: a cheap dict lookup when the token has >10 min left, a refetch only near expiry, and
+a no-op against local SQLite. *Any long-running distributed job that outlives a credential needs
+in-flight refresh, not just auth at startup.*
+
+**Keeping MLflow consistent across Ray workers.** Each Ray worker is a fresh process that
+resolved its own default tracking URI, scattering runs into local files instead of the shared
+backend. The fix was to set `MLFLOW_TRACKING_URI` explicitly *and* pre-create the experiment in
+the driver before dispatching any tasks, so workers always attach to one that exists. (Evidently
+also quietly calls `set_tracking_uri()`, so call ordering matters — that lesson is codified in
+the repo's MLflow rules.) *In distributed tracking, never rely on per-worker default
+resolution.*
 
 ## Known Limitations
 
-**Channel toggle restarts replay from row 0.**  
-The SSE endpoint is stateless: each request opens a new replay from the
-beginning. Adding or removing a channel tears down the current stream and
-reopens it with the updated channel list, resetting all charts. This is
-intentional for the demo — it keeps the server simple — but means you cannot
-add a channel mid-session without losing the existing view. A future design
-could key the stream by a replay cursor and support live channel subscription
-changes without restart.
+**Real-time drift panel disabled for short replays.**  
+The rolling drift window requires ~60 ticks per channel before it can fire a
+drift check. At 100× replay speed over a 3,000-row demo window, the window
+never fills and no drift events are emitted. The panel is built and wired
+end-to-end but disabled by default (`DRIFT_DISABLED = true` in
+`frontend/src/App.tsx`); see the What Works Today section for enable
+instructions.
 
-**Replay speed does not persist across channel changes.**  
-The speed selector is wired to the same `useEffect` that controls the stream.
-Changing channels restarts at the currently selected speed, which is the
-expected behaviour.
+**Channel set is fixed at container start.**  
+The serving container loads every channel with a `@champion` model alias at
+startup. Adding a newly trained channel to the live demo requires promoting the
+model and redeploying — there is no hot-reload path.
 
 ---
 
@@ -327,6 +428,16 @@ expected behaviour.
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
 | 11 | Documentation + polish | In Progress |
+
+## Future Work
+
+- **Parallelize the drift sweep.** `drift batch-mission` runs channels serially; the
+  per-channel work has the same shape as the Ray training fan-out and could move to
+  `@ray.remote` (tracked by a TODO in `cli.py`).
+- **Hot-reload newly trained channels.** Add a path to promote a model and make it available
+  in the live demo without a full container redeploy.
+- **Whole-fleet serving.** Extend serving beyond ESA-Mission1 to Missions 2 and 3, exercising
+  the ~100-channel-per-mission capacity path end-to-end.
 
 ## Links
 

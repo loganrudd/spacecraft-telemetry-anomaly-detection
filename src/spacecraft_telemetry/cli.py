@@ -559,11 +559,9 @@ def _ray_session(settings: Settings) -> Any:
     they can find installed packages when launched via `uv run`.
 
     NOTE: The PYTHONPATH injection works correctly for local dev where driver
-    and workers share the same filesystem. On Cloud Run / Dataproc (Phase 10),
-    workers run in the container image, so PYTHONPATH from the driver node is
-    irrelevant. Phase 10 must replace this with runtime_env derived from the
-    container image (e.g. runtime_env={"pip": requirements_path}) or rely on
-    the image having the package pre-installed.
+    and workers share the same filesystem. On GKE/KubeRay (cloud), workers run
+    in the container image, so PYTHONPATH from the driver node is irrelevant —
+    the image has the package pre-installed.
     """
     import os
     import sys
