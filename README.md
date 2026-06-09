@@ -90,7 +90,7 @@ make test
 
 ## Demo Workflow
 
-Full Phase 6 lifecycle (train → baseline score → HPO tune → tuned score → promote):
+Full end-to-end lifecycle (train → baseline score → HPO tune → tuned score → promote):
 
 ```bash
 # 1) Train all discovered channels (logged to MLflow training experiment)
@@ -150,7 +150,7 @@ curl -N "http://127.0.0.1:8000/api/stream/telemetry?speed=200" \
 # 10) Drift stream — per-channel KS drift scores (requires reference profiles built in step 8)
 curl -N 'http://127.0.0.1:8000/api/stream/drift?channels=channel_1'
 
-# 12) Run the React dashboard (second separate terminal)
+# 11) Run the React dashboard (second separate terminal)
 #     Requires: make serve running in another terminal
 #     First time only:
 make frontend-install
@@ -248,7 +248,7 @@ make mlflow-promote   MISSION=ESA-Mission1 ENV=cloud
 make cloud-deploy
 ```
 
-Architecture decisions: [docs/architecture/phase-10-gcp.md](docs/architecture/phase-10-gcp.md)
+Architecture decisions: [docs/architecture/gcp.md](docs/architecture/gcp.md)
 
 ## Evaluation
 
