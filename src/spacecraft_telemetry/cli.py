@@ -1312,8 +1312,11 @@ def _run_drift_batch(
     # auto-detect the local SQLite file and set a conflicting URI.
     configure_mlflow(settings)
 
-    # 1) Build + save reference profile from train split.
-    reference = build_reference_profile(settings, mission, channel)
+    # 1) Build reference from the train split: compares "what the model trained
+    # on" vs "what it sees at inference time".  Using the test split here (the
+    # historical default) compared test-nominal to test-all — same distribution,
+    # so Wasserstein distance was near-zero and drift was never detected.
+    reference = build_reference_profile(settings, mission, channel, split="train")
     ref_path = reference_profile_path(settings, mission, channel)
     save_reference_profile(reference, ref_path)
 
@@ -1370,6 +1373,16 @@ def drift_batch(ctx: click.Context, mission: str, channel: str) -> None:
 @drift_group.command("batch-mission")
 @click.option("--mission", required=True, help="Mission name (e.g. ESA-Mission1).")
 @click.option(
+    "--subsystem",
+    default=None,
+    help="Optional subsystem name to limit sweep (e.g. subsystem_6).",
+)
+@click.option(
+    "--channel",
+    default=None,
+    help="Optional single channel to check (overrides --subsystem).",
+)
+@click.option(
     "--max-channels",
     type=int,
     default=None,
@@ -1379,6 +1392,8 @@ def drift_batch(ctx: click.Context, mission: str, channel: str) -> None:
 def drift_batch_mission(
     ctx: click.Context,
     mission: str,
+    subsystem: str | None,
+    channel: str | None,
     max_channels: int | None,
 ) -> None:
     """Run drift monitoring for all discovered channels in a mission.
@@ -1389,6 +1404,12 @@ def drift_batch_mission(
     Examples:
 
         spacecraft-telemetry drift batch-mission --mission ESA-Mission1
+
+        # Single subsystem
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --subsystem subsystem_6
+
+        # Single channel
+        spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --channel channel_1
 
         # Smoke test: first 3 channels only
         spacecraft-telemetry drift batch-mission --mission ESA-Mission1 --max-channels 3
@@ -1403,6 +1424,10 @@ def drift_batch_mission(
             f"No preprocessed channels found for {mission}. "
             "Run `spacecraft-telemetry preprocess run` first."
         )
+    if channel is not None:
+        channels = [channel]
+    elif subsystem is not None:
+        channels = _filter_channels_by_subsystem(settings, mission, channels, subsystem)
     if max_channels is not None:
         channels = channels[:max_channels]
 

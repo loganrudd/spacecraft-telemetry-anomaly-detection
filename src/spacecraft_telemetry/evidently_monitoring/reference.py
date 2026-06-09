@@ -179,24 +179,32 @@ def build_reference_profile(
     settings: Settings,
     mission: str,
     channel: str,
+    split: str = "test",
 ) -> pd.DataFrame:
     """Build a reference feature DataFrame for the given channel.
 
-    Reads the **test-split nominal rows** (``is_anomaly=False``) for
-    ``(mission, channel)`` from the Hive-partitioned directory layout::
+    Reads **nominal rows** (``is_anomaly=False``) for ``(mission, channel)``
+    from the Hive-partitioned directory layout::
 
-        {processed_data_dir}/{mission}/test/mission_id={M}/channel_id={C}/
+        {processed_data_dir}/{mission}/{split}/mission_id={M}/channel_id={C}/
 
-    Using the test split (rather than the train split) aligns the reference
-    distribution with the serving regime — the API replays test-era data, so
-    real-time drift should compare current data against the *same* era.  Using
-    the train split was comparing two distinct sampling regimes (sparse 2009–2011
-    training vs dense 2011–2013 test), causing false drift alerts on every channel
-    within seconds of the stream opening.
+    Two split choices serve different purposes:
+
+    * ``split="test"`` (default) — for seeding the **live drift panel** via
+      ``seed-reference-profiles``.  Aligns the reference with the serving
+      regime so real-time drift only fires when the stream deviates from the
+      test-era nominal baseline, not simply because train and test are from
+      different time periods.
+
+    * ``split="train"`` — for **batch drift reports** (``drift batch-mission``).
+      Compares the training distribution against the test/deployment distribution
+      and shows whether meaningful temporal drift occurred between model training
+      (2009–2011) and inference time (2011–2013).  Using test vs test for batch
+      reports produces near-zero Wasserstein distances (same distribution → no
+      drift detected), which is uninformative.
 
     Anomalous rows (``is_anomaly=True``) are excluded so the reference represents
-    the *normal operating* distribution.  Drift then fires when the live window
-    starts to resemble an anomaly, rather than constantly.
+    the *normal operating* distribution.
 
     Applies ``compute_feature_dataframe`` and samples down to at most
     ``settings.monitoring.reference_sample_rows`` rows (reproducible via
@@ -206,6 +214,8 @@ def build_reference_profile(
         settings: Runtime settings (paths, window sizes, sample cap).
         mission:  Mission identifier, e.g. ``"ESA-Mission1"``.
         channel:  Channel identifier, e.g. ``"channel_1"``.
+        split:    Which preprocessed split to read from (``"train"`` or
+                  ``"test"``).  See above for guidance on which to use.
 
     Returns:
         DataFrame with columns ``MONITORING_FEATURE_COLS``, at most
@@ -214,7 +224,7 @@ def build_reference_profile(
     Raises:
         FileNotFoundError: If the channel partition directory does not exist.
     """
-    df = _load_channel_series(settings, mission, channel, "test", nominal_only=True)
+    df = _load_channel_series(settings, mission, channel, split, nominal_only=True)
     df = compute_feature_dataframe(df, settings)
     n = settings.monitoring.reference_sample_rows
     if len(df) > n:

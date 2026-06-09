@@ -42,6 +42,66 @@ _token_cache: dict[str, tuple[str, float]] = {}  # uri -> (token, expires_at)
 _token_lock = Lock()
 
 
+def _fetch_id_token(audience: str) -> str | None:
+    """Fetch a GCP ID token for ``audience``, returning None on failure.
+
+    Two code paths, tried in order:
+
+    1. ``google.oauth2.id_token.fetch_id_token`` — works from GCE/GKE via the
+       metadata server, and from local dev when ADC points to a **service
+       account** key (GOOGLE_APPLICATION_CREDENTIALS). Produces a token whose
+       ``aud`` claim equals ``audience``.
+
+    2. ``gcloud auth print-identity-token`` subprocess — fallback for local dev
+       with **user credentials** (``gcloud auth login`` / ``gcloud auth
+       application-default login``). ``fetch_id_token`` raises an exception for
+       user ADC because there is no private key to sign a JWT assertion.
+       ``gcloud`` returns a user OIDC token whose ``aud`` is not the service URL,
+       but Cloud Run accepts it as long as the account holds
+       ``roles/run.invoker`` on the service.
+
+    The gcloud fallback is intentionally skipped on GKE/GCE where path 1 always
+    succeeds — ``gcloud`` may not be installed there, and subprocess overhead
+    would be unnecessary.
+    """
+    # Path 1: google-auth library (service accounts + metadata server).
+    try:
+        import google.auth.transport.requests
+        import google.oauth2.id_token
+
+        req = google.auth.transport.requests.Request()
+        token = cast(str, google.oauth2.id_token.fetch_id_token(req, audience))  # type: ignore[no-untyped-call]
+        return token
+    except Exception as exc1:  # noqa: BLE001
+        exc1_str = str(exc1)  # save before Python clears `exc1` at except-block exit
+        log.debug("mlflow.auth.fetch_id_token_failed", audience=audience, error=exc1_str)
+
+    # Path 2: gcloud subprocess — local dev with user credentials.
+    # gcloud print-identity-token does not support --audiences for user accounts;
+    # the token's aud is the Google accounts endpoint, not the service URL.
+    # Cloud Run still accepts it when the caller has roles/run.invoker.
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["gcloud", "auth", "print-identity-token"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        token = result.stdout.strip()
+        if result.returncode != 0 or not token:
+            raise RuntimeError(result.stderr.strip() or "empty token")
+        return token
+    except Exception as exc2:  # noqa: BLE001
+        log.warning(
+            "mlflow.auth.id_token_failed",
+            audience=audience,
+            error=f"fetch_id_token: {exc1_str}; gcloud fallback: {exc2}",
+        )
+        return None
+
+
 def _install_id_token_auth(tracking_uri: str) -> None:
     """Set MLFLOW_TRACKING_TOKEN to a fresh GCP ID token for *.run.app URIs.
 
@@ -77,24 +137,10 @@ def _install_id_token_auth(tracking_uri: str) -> None:
             # scoped to the bare service URL.
             parsed = urlparse(tracking_uri)
             audience = f"{parsed.scheme}://{parsed.netloc}"
-            try:
-                import google.auth.transport.requests
-                import google.oauth2.id_token
-
-                req = google.auth.transport.requests.Request()
-                token = cast(str, google.oauth2.id_token.fetch_id_token(req, audience))  # type: ignore[no-untyped-call]
-                _token_cache[tracking_uri] = (token, now + 50 * 60)
-            except Exception as exc:  # noqa: BLE001
-                # Was a silent `return`, which hid the real cause of Cloud Run
-                # 403s from Ray pods. Log loudly so the failure is diagnosable;
-                # still return (token stays unset) so local SQLite dev — where
-                # ADC is legitimately absent — does not crash.
-                log.warning(
-                    "mlflow.auth.id_token_failed",
-                    audience=audience,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+            token = _fetch_id_token(audience)
+            if token is None:
                 return
+            _token_cache[tracking_uri] = (token, now + 50 * 60)
 
     os.environ["MLFLOW_TRACKING_TOKEN"] = token
 

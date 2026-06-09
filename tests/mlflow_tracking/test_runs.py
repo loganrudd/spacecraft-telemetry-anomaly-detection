@@ -375,17 +375,39 @@ class TestInstallIdTokenAuth:
 
         fetch_mock.assert_called_once()
 
-    def test_silently_skips_on_import_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_silently_skips_when_both_paths_fail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
         import sys
 
         monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
-        # Simulate google-auth not installed by removing modules from sys.modules.
-        # Python raises ImportError when it finds None in sys.modules for a name.
+        # Block google-auth (path 1) and gcloud subprocess (path 2) so the
+        # function reaches the final warning+return without setting the env var.
         monkeypatch.setitem(sys.modules, "google.auth.transport.requests", None)
+        monkeypatch.setattr(
+            subprocess, "run", MagicMock(side_effect=FileNotFoundError("gcloud not found"))
+        )
 
         _install_id_token_auth("https://mlflow-xxxx-uc.a.run.app")  # must not raise
 
         assert "MLFLOW_TRACKING_TOKEN" not in os.environ
+
+    def test_gcloud_fallback_used_when_google_auth_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        import sys
+        from unittest.mock import MagicMock
+
+        monkeypatch.delenv("MLFLOW_TRACKING_TOKEN", raising=False)
+        monkeypatch.setitem(sys.modules, "google.auth.transport.requests", None)
+        fake_result = MagicMock(returncode=0, stdout="gcloud-fallback-token\n", stderr="")
+        monkeypatch.setattr(subprocess, "run", MagicMock(return_value=fake_result))
+
+        _install_id_token_auth("https://mlflow-xxxx-uc.a.run.app")
+
+        assert os.environ.get("MLFLOW_TRACKING_TOKEN") == "gcloud-fallback-token"
 
 
 class TestKeepMlflowAuthFresh:
