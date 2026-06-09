@@ -1,15 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import ChannelPicker from "../components/ChannelPicker";
+import { formatChannel } from "../utils/formatChannel";
 
 const CHANNELS = ["channel_12", "channel_13", "channel_14"];
 
 describe("ChannelPicker", () => {
   it("renders all channels in the list", () => {
     render(<ChannelPicker allChannels={CHANNELS} selected={[]} onChange={() => {}} />);
-    expect(screen.getByText("channel_12")).toBeInTheDocument();
-    expect(screen.getByText("channel_13")).toBeInTheDocument();
-    expect(screen.getByText("channel_14")).toBeInTheDocument();
+    expect(screen.getByText(formatChannel("channel_12"))).toBeInTheDocument();
+    expect(screen.getByText(formatChannel("channel_13"))).toBeInTheDocument();
+    expect(screen.getByText(formatChannel("channel_14"))).toBeInTheDocument();
   });
 
   it("marks selected channels as active", () => {
@@ -20,7 +21,7 @@ describe("ChannelPicker", () => {
         onChange={() => {}}
       />,
     );
-    const item = screen.getByText("channel_12").closest("li");
+    const item = screen.getByText(formatChannel("channel_12")).closest("li");
     expect(item?.className).toContain("channel-picker__item--active");
   });
 
@@ -29,7 +30,7 @@ describe("ChannelPicker", () => {
     render(
       <ChannelPicker allChannels={CHANNELS} selected={[]} onChange={onChange} />,
     );
-    fireEvent.click(screen.getByText("channel_12"));
+    fireEvent.click(screen.getByText(formatChannel("channel_12")));
     expect(onChange).toHaveBeenCalledWith(["channel_12"]);
   });
 
@@ -42,7 +43,7 @@ describe("ChannelPicker", () => {
         onChange={onChange}
       />,
     );
-    fireEvent.click(screen.getByText("channel_12"));
+    fireEvent.click(screen.getByText(formatChannel("channel_12")));
     expect(onChange).toHaveBeenCalledWith([]);
   });
 
