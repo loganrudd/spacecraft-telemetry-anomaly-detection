@@ -55,7 +55,10 @@ ENV PIP_NO_CACHE_DIR=1 \
 # and importable without the source tree being writable.
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install ".[serving,tracking,gcp,inference]"
+# Cloud Run is CPU-only. Pin the CPU-only torch wheel to avoid pulling ~2 GB
+# of unused CUDA libraries from the default PyPI index.
+RUN pip install ".[serving,tracking,gcp,inference]" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Application config + dashboard bundle.
 COPY configs/ ./configs/
