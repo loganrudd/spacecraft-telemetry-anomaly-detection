@@ -19,7 +19,7 @@ labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#eval
 leakage-free protocol and honest framing).
 
 **Live demo:** https://api-pb5fb25noa-uc.a.run.app  
-*(Cloud Run scales to zero — first load may take ~30s if the instance has been idle.)*
+*(Cloud Run scales to zero — first load may take ~90s if the instance has been idle: image pull + model load fan-out from GCS.)*
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
 
@@ -298,6 +298,21 @@ denser datasets; the fleet mean of 0.19 reflects label sparsity across the major
 of channels rather than systematic detection failure. The number is reported as-is,
 not tuned upward against the held-out split.
 
+**Why Telemanom is the wrong model for this dataset (and that's the point).** The
+ESA-ADB authors benchmarked ~40 algorithms — including both the original Telemanom
+and a `telemanom_esa` variant adapted to ESA's channel scale — and concluded bluntly
+that *"new approaches are necessary to address operators' needs"*: off-the-shelf
+forecasters like Telemanom do not clear the operational bar on this data. The dataset
+is genuinely harder than SMAP/MSL (irregular sampling, label sparsity, multivariate
+cross-channel anomalies that a univariate one-step forecaster cannot see), and the
+strongest result in the benchmark comes from the authors' own **DC-VAE** — a
+multivariate dilated-CNN variational autoencoder, not an LSTM forecaster. Telemanom
+is used here deliberately as a *known, well-understood baseline*: the value
+proposition of this repo is the platform wrapping the model (preprocessing fan-out,
+HPO, registry, drift monitoring, serving), which is model-agnostic. Swapping in a
+stronger detector is future work (see [Future Work](#future-work)), and the
+infrastructure is built so that swap is a model-module change, not a platform rewrite.
+
 **Channel accounting.** A single fleet average hides the structure, so a
 diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
 ground truth:
@@ -389,17 +404,36 @@ model and redeploying — there is no hot-reload path.
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
-| 11 | Documentation + polish | In Progress |
 
 ## Future Work
 
+- **DC-VAE as a second baseline + ensemble.** Implement the
+  [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
+  Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
+  scoring, `T=128` window, no RNNs) as a new detector alongside Telemanom. DC-VAE is
+  multivariate by design — it can take a whole subsystem's channels as input context
+  while thresholding a target subset — so it should catch cross-channel anomalies the
+  univariate Telemanom forecaster structurally cannot, and it is the strongest model
+  in the ESA-ADB benchmark. The model is a drop-in behind the existing model module
+  interface; the platform (preprocessing, registry, drift, serving) is unchanged. Then
+  build an **ensemble** that combines both scorers and test whether Telemanom + DC-VAE
+  together beat DC-VAE alone on the held-out segment-F0.5. (DC-VAE is TensorFlow, so
+  this also exercises a second framework through the same serving path.)
+- **Vertex AI Pipelines for end-to-end orchestration.** Replace the
+  make-target-driven cloud lifecycle (preprocess → train → score → tune → tuned score
+  → promote → deploy) with a single Vertex AI Pipeline DAG — typed, cached, parameterized
+  per mission, with run lineage in one place instead of across separate RayJobs.
+- **Online pruning of dead/blind channels.** Skip training and serving compute on
+  channels that a forecaster cannot help (flatlined sensors, forecaster blind spots),
+  decided online from cheap signals rather than after a full train+score pass — see
+  [docs/architecture/online-pruning-investigation.md](docs/architecture/online-pruning-investigation.md).
+- **Calibrate `feature_drift_threshold` against ESA labeled segments.** The 30%-of-features
+  drift trigger is currently a sensible default, not an empirically tuned one. Calibrate
+  it against the dataset's labeled anomaly segments so drift alerts correlate with real
+  regime changes instead of an arbitrary cutoff.
 - **Parallelize the drift sweep.** `drift batch-mission` runs channels serially; the
   per-channel work has the same shape as the Ray training fan-out and could move to
   `@ray.remote` (tracked by a TODO in `cli.py`).
-- **Hot-reload newly trained channels.** Add a path to promote a model and make it available
-  in the live demo without a full container redeploy.
-- **Whole-fleet serving.** Extend serving beyond ESA-Mission1 to Missions 2 and 3, exercising
-  the ~100-channel-per-mission capacity path end-to-end.
 
 ## Links
 
