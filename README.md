@@ -132,7 +132,7 @@ untouched final 40%.
 | ![MLflow experiments — separate training, scoring, and HPO experiments per mission](docs/assets/mlflow-experiments.png) | ![MLflow model registry with telemanom-* models and @champion aliases](docs/assets/mlflow-registry.png) |
 | **Ray Tune HPO sweep** | **MLflow scoring** |
 | ![Ray Tune sweep over per-subsystem scoring parameters with ASHA early-stopping](docs/assets/ray-tune-sweep.png) | ![Models by pruned-segment-overlap F0.5](docs/assets/mlflow-scoring.png) |
-| **MLflow mointoring** | **Evidently drift report** |
+| **MLflow monitoring** | **Evidently drift report** |
 | ![MLflow monitoring Overview for Ch. 15](docs/assets/mlflow-monitoring.png) | ![Evidently batch data-drift report logged as an MLflow artifact](docs/assets/evidently-drift-report.png) |
 
 
