@@ -1,5 +1,5 @@
 # GKE Autopilot — free-tier credit ($74.40/mo) covers the zonal control plane,
-# so idle cost is ~$0.  Spot GPU worker nodes are only provisioned when a
+# so idle cost is ~$0.  On-demand GPU worker nodes are only provisioned when a
 # RayJob is submitted (scale-to-zero via KubeRay autoscaler).
 
 resource "google_container_cluster" "ray" {

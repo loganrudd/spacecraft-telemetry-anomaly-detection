@@ -17,7 +17,7 @@
 #   large channels (>150MB Parquet, ~3.5GB peak) use num_cpus=4 to monopolize the
 #   node. max_calls=1 on tasks forces process exit so the OS reclaims all RSS
 #   before the next task starts.
-#   Spot workers for ~70% cost savings; max_retries=3 on tasks handles preemption.
+#   On-demand workers; max_retries=3 on tasks handles transient node failures.
 
 apiVersion: ray.io/v1
 kind: RayJob

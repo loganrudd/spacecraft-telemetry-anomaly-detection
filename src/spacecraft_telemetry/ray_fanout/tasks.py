@@ -5,8 +5,8 @@ Wraps model.training.train_channel and model.scoring.score_channel as
 variants live here exclusively so that:
   - The CLI `model train` / `model score` commands keep working without Ray.
   - Phase 8 (FastAPI) can import scoring functions without pulling in Ray.
-  - GPU resource allocation can be chosen at call time (CPU locally, 0.25 GPU
-    on cloud T4s) via the factory pattern.
+  - GPU resource allocation can be chosen at call time (CPU locally, 0.125 GPU
+    on cloud L4s) via the factory pattern.
 
 Usage:
     train_task = make_train_task(num_gpus=settings.ray.num_gpus_per_task)
@@ -51,7 +51,7 @@ def make_train_task(num_gpus: float, max_retries: int = 3) -> Any:
 
     Args:
         num_gpus:    GPU fraction per task. 0.0 = CPU-only (local dev).
-                     0.25 on T4 clouds packs 4 models per physical GPU.
+                     0.125 on L4 clouds packs 8 models per physical GPU.
         max_retries: Number of times Ray retries a failed task before marking
                      it as error. Set from RayConfig.max_retries — critical for
                      preemptible-VM resilience on cloud.

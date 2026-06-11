@@ -108,8 +108,8 @@ out across hundreds of channels; the labels table is shared once via `ray.put`.
 
 **Train.** One small Telemanom LSTM (2-layer, `hidden_dim=80`) per channel, trained only on
 *nominal* data as a one-step-ahead forecaster — it learns each sensor's normal dynamics. Ray
-Core runs one task per channel (`num_cpus=1`, or `0.25` GPU to pack four models on a T4/L4),
-with `max_retries=3` for spot-VM preemption. Each run logs hyperparameters, loss, and the
+Core runs one task per channel (`num_cpus=1`, or `0.125` GPU to pack eight models on an L4),
+with `max_retries=3` for transient node failures. Each run logs hyperparameters, loss, and the
 model to MLflow under `telemanom-{mission}-{channel}`.
 
 **Score.** The forecaster predicts each step; the residual is EWMA-smoothed and compared to a

@@ -18,7 +18,7 @@
 #   Scoring runs predict() (an LSTM forward pass) on the L4, then pure-numpy
 #   anomaly scoring. On CPU the forward pass is ~20 min/channel for large
 #   channels; on the GPU it is far faster. Workers: g2-standard-8 (8 vCPU) + 1× L4
-#   spot. Packing is bounded by GPU MEMORY, not vCPUs: each score task is a
+#   on-demand. Packing is bounded by GPU MEMORY, not vCPUs: each score task is a
 #   separate process holding ~3.6 GiB (CUDA context + batch-2048 activations), so
 #   only ~5 fit on the 22 GiB L4. cloud_score.sh defaults NUM_GPUS=0.2 (5-way);
 #   0.125 (8-way) overcommits (8 × 3.6 ≈ 29 GiB) and OOMs. maxReplicas: 1

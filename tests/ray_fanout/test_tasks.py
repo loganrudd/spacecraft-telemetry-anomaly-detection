@@ -41,7 +41,7 @@ def test_tasks_distinct_for_different_gpu_fractions() -> None:
     from spacecraft_telemetry.ray_fanout.tasks import make_train_task
 
     task_cpu = make_train_task(num_gpus=0.0)
-    task_gpu = make_train_task(num_gpus=0.25)
+    task_gpu = make_train_task(num_gpus=0.125)
     # They should be different objects (different ray remote descriptors).
     assert task_cpu is not task_gpu
 

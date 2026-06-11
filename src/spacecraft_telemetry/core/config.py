@@ -197,7 +197,7 @@ class RayConfig(BaseModel):
     """Ray cluster and task resource configuration."""
 
     num_cpus: int = 2                  # passed to ray.init() — constrains local parallelism
-    num_gpus_per_task: float = 0.0     # 0.0 = CPU-only; 0.25 on T4 packs 4 models per GPU
+    num_gpus_per_task: float = 0.0     # 0.0 = CPU-only; 0.125 on L4 packs 8 models per GPU
     max_retries: int = 3               # @ray.remote max_retries for preemptible-VM resilience
     address: str | None = None         # None = start local cluster; "auto" = attach to existing
 

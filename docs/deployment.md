@@ -114,7 +114,7 @@ make cloud-down
 Each `make cloud-*` target submits a RayJob to GKE and tails logs until completion.
 Wall-clock times for ESA-Mission1 (~62 channels):
 - Preprocessing: ~20 min
-- Training: ~45 min (4× L4 packing, 0.25 GPU/task)
+- Training: ~45 min (8× L4 packing, 0.125 GPU/task)
 - Baseline score: ~10 min
 - Tune: ~30 min (50 trials, 2 concurrent subsystem sweeps)
 - Tuned score: ~10 min
