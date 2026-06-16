@@ -19,7 +19,7 @@ labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#eval
 leakage-free protocol and honest framing).
 
 **Live demo:** https://api-pb5fb25noa-uc.a.run.app  
-*(Cloud Run scales to zero — first load may take ~90s if the instance has been idle: image pull + model load fan-out from GCS.)*
+*(Cloud Run scales to zero — first load may take ~2.5m if the instance has been idle: image pull + model load fan-out from GCS.)*
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
 
