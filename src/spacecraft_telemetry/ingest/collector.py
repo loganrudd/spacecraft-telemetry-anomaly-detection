@@ -145,9 +145,12 @@ class _ISSSubscriptionListener:
         self._buffers = buffers
         self._lock = lock
         self._los_staleness = los_staleness_seconds
-        # Wall-clock time the last TIME_000001 update arrived. LOS is detected
-        # as a gap in arrivals — more robust than trusting the feed's own clock.
-        self._last_time_arrival: datetime | None = None
+        # Wall-clock time of the most recent update on ANY subscribed item.
+        # LOS drops the entire feed; using any-channel arrival is more reliable
+        # than TIME_000001 alone — a 1-hour dry-run showed TIME_000001 can stall
+        # for ~5 min with full signal present while all other channels keep
+        # updating normally.
+        self._last_any_arrival: datetime | None = None
         self._in_los: bool = False
 
     # -- Lightstreamer SubscriptionListener interface -------------------------
@@ -178,27 +181,26 @@ class _ISSSubscriptionListener:
 
         with self._lock:
             self._buffers[channel_id].append(row)
-            self._note_arrival(channel_id, now)
+            self._note_arrival(now)
 
-    def _note_arrival(self, channel_id: str, now: datetime) -> None:
-        """Track TIME_000001 arrivals for LOS recovery. Called under lock."""
-        if channel_id != "TIME_000001":
-            return
+    def _note_arrival(self, now: datetime) -> None:
+        """Record that at least one item updated; clear LOS if active. Called under lock."""
+        self._last_any_arrival = now
 
-        self._last_time_arrival = now
-
-        # A fresh TIME_000001 update means signal is present again.
         if self._in_los:
             self._in_los = False
             log.info("collector.los_recovered", recovered_at=now.isoformat())
 
     def check_staleness(self, now: datetime) -> None:
-        """Check whether TIME_000001 updates have stopped arriving.
+        """Check whether ANY subscribed item has stopped arriving.
 
         Called from the flush thread, not from the Lightstreamer callback.
+        Real LOS silences the entire feed, so using any-channel arrival avoids
+        false positives from individual channel stalls (e.g. TIME_000001 pausing
+        5 min while other channels remain active).
         """
         with self._lock:
-            last = self._last_time_arrival
+            last = self._last_any_arrival
 
         if last is None:
             return

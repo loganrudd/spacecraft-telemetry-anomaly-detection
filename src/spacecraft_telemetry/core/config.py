@@ -459,8 +459,10 @@ class CollectorConfig(BaseModel):
     los_staleness_seconds: float = 60.0
     # Downstream contract values — recorded here so Phase 13 preprocessing
     # and the live pump (Phase 16) can share them without hard-coding.
-    grid_interval_seconds: int = 60
-    window_size: int = 128
+    # 30 s / W=256 confirmed by 1-hour dry-run: all validation channels update
+    # at 1–10 s median cadence, well below the 30 s grid step.
+    grid_interval_seconds: int = 30
+    window_size: int = 256
 
     @field_validator("flush_interval_seconds", "los_staleness_seconds")
     @classmethod

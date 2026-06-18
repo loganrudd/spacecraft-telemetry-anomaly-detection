@@ -132,23 +132,35 @@ def test_on_item_update_missing_timestamp_kept_with_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LOS staleness detection (wall-clock arrival gap on TIME_000001)
+# LOS staleness detection (wall-clock gap on ANY subscribed item)
 # ---------------------------------------------------------------------------
 
 
-def test_los_onset_logged_when_no_time_arrivals() -> None:
+def test_los_onset_when_feed_silent() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=1.0)
-    # Last TIME_000001 arrival was an hour ago (wall clock).
+    # Last update from any channel was an hour ago.
     old_arrival = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
     with listener._lock:
-        listener._last_time_arrival = old_arrival
+        listener._last_any_arrival = old_arrival
 
     now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)  # 1 hour later → stale
     listener.check_staleness(now)
     assert listener._in_los is True
 
 
-def test_los_recovery_on_new_time_arrival() -> None:
+def test_los_recovery_on_any_channel_arrival() -> None:
+    # LOS clears on ANY channel update, not just TIME_000001.
+    listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=1.0)
+    listener._in_los = True
+
+    update = _make_update("S1000003", "21.5")
+    listener.onItemUpdate(update)
+
+    assert listener._in_los is False
+    assert listener._last_any_arrival is not None
+
+
+def test_los_recovery_on_time_channel_too() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=1.0)
     listener._in_los = True
 
@@ -156,23 +168,24 @@ def test_los_recovery_on_new_time_arrival() -> None:
     listener.onItemUpdate(update)
 
     assert listener._in_los is False
-    assert listener._last_time_arrival is not None
 
 
 def test_no_los_when_arrivals_recent() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=60.0)
     recent = datetime.now(UTC) - timedelta(seconds=30)
     with listener._lock:
-        listener._last_time_arrival = recent
+        listener._last_any_arrival = recent
     listener.check_staleness(datetime.now(UTC))
     assert listener._in_los is False
 
 
-def test_non_time_channel_does_not_reset_los_clock() -> None:
-    # Only TIME_000001 arrivals reset the LOS clock; telemetry channels don't.
+def test_any_channel_resets_los_clock() -> None:
+    # Empirically: TIME_000001 stalled 5 min in a dry-run while other channels
+    # kept updating. The LOS clock must advance on any channel.
     listener = _make_listener(["S1000003", "TIME_000001"])
+    assert listener._last_any_arrival is None
     listener.onItemUpdate(_make_update("S1000003", "21.5"))
-    assert listener._last_time_arrival is None
+    assert listener._last_any_arrival is not None
 
 
 # ---------------------------------------------------------------------------
