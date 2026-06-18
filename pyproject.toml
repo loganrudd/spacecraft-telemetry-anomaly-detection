@@ -25,7 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 collect = [
-    "lightstreamer-client-lib>=1.0.0b2",
+    "lightstreamer-client-lib>=2.0",
 ]
 inference = [
     "torch>=2.0",

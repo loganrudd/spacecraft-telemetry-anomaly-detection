@@ -241,22 +241,34 @@ def test_collector_context_item_flushed(tmp_path: Path) -> None:
     assert shards, "No shard written for TIME_000001"
 
 
-def test_collector_run_raises_without_lightstreamer(tmp_path: Path) -> None:
+def test_collector_run_raises_without_lightstreamer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """run() raises RuntimeError when lightstreamer-client-lib is not installed."""
     import sys
+    from importlib.abc import MetaPathFinder
+
+    class _BlockLightstreamer(MetaPathFinder):
+        """Intercepts import machinery to simulate the package being absent."""
+
+        def find_spec(self, fullname: str, path: object, target: object = None) -> None:
+            if "lightstreamer" in fullname:
+                raise ImportError(f"No module named {fullname!r}")
+            return None
+
     config = CollectorConfig(channel_set="validation", raw_ticks_dir=str(tmp_path))
     collector = LightstreamerCollector(config, dest_dir=tmp_path)
 
-    # Temporarily remove the lightstreamer module from sys.modules
-    saved = {k: v for k, v in sys.modules.items() if "lightstreamer" in k}
-    for k in saved:
-        sys.modules[k] = None  # type: ignore[assignment]
+    # Remove cached modules so the lazy import inside run() re-enters find_spec.
+    for key in list(sys.modules.keys()):
+        if "lightstreamer" in key:
+            monkeypatch.delitem(sys.modules, key)
+
+    # Insert before the standard finders so it fires first.
+    blocker = _BlockLightstreamer()
+    sys.meta_path.insert(0, blocker)
     try:
         with pytest.raises(RuntimeError, match="lightstreamer-client-lib"):
             collector.run(seconds=0)
     finally:
-        for k in saved:
-            sys.modules[k] = saved[k]
-        for k in list(sys.modules):
-            if "lightstreamer" in k and sys.modules[k] is None:
-                del sys.modules[k]
+        sys.meta_path.remove(blocker)

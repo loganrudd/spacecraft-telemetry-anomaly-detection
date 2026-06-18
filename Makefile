@@ -32,8 +32,8 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + tracking + ml)
-	$(UV) sync --extra dev --extra tracking --extra ml
+setup:         ## Install all dependency groups (dev + tracking + ml + collect)
+	$(UV) sync --extra dev --extra tracking --extra ml --extra collect
 
 # ---------------------------------------------------------------------------
 # Tests
