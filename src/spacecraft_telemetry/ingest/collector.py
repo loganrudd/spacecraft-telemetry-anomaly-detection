@@ -77,6 +77,42 @@ def parse_timestamp(raw: str) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
+# Client listener — logs every connection state transition
+# ---------------------------------------------------------------------------
+
+class _ISSClientListener:
+    """Lightstreamer ClientListener that logs connection status changes.
+
+    Lightstreamer's connect() is non-blocking; all connection events arrive
+    here on a library thread. Without this listener the collector is silent
+    while connecting/retrying, making it impossible to distinguish "still
+    connecting" from "stuck".
+
+    Status strings emitted by the library:
+        CONNECTING, CONNECTED:WS-STREAMING, CONNECTED:HTTP-STREAMING,
+        STALLED, DISCONNECTED:WILL-RETRY, DISCONNECTED:TRYING-RECOVERY,
+        DISCONNECTED
+    """
+
+    def onStatusChange(self, status: str) -> None:
+        connected = status.startswith("CONNECTED")
+        level = "info" if connected else "warning"
+        getattr(log, level)("collector.connection_status", status=status)
+
+    def onServerError(self, code: int, message: str) -> None:
+        log.error("collector.server_error", code=code, message=message)
+
+    def onPropertyChange(self, prop: str) -> None:
+        pass
+
+    def onListenEnd(self) -> None:
+        pass
+
+    def onListenStart(self) -> None:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Subscription listener
 # ---------------------------------------------------------------------------
 
@@ -257,6 +293,7 @@ class LightstreamerCollector:
             self._config.lightstreamer_url,
             self._config.adapter_set,
         )
+        client.addListener(_ISSClientListener())
 
         sub = Subscription("MERGE", self._items, self._config.fields)
         sub.addListener(self._listener)
