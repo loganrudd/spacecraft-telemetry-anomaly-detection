@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import UTC, datetime
@@ -43,36 +44,47 @@ from spacecraft_telemetry.ingest.iss_channels import subscription_items
 log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Timestamp parsing
+# TLS certificate bundle
 # ---------------------------------------------------------------------------
 
-# ISSLive TimeStamp field format, confirmed empirically (ISO 8601 UTC):
-# "2024-01-15T12:00:00.000Z" — verified during Phase 12 dry-run.
-# The parser falls back to a raw float (Unix epoch in seconds) if the ISO
-# parse fails, which covers edge-cases during feed transitions.
+def ensure_ssl_cert_env() -> None:
+    """Point SSL_CERT_FILE at certifi's bundle if it is not already set.
 
-_ISO_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
-_ISO_FMT_NO_MS = "%Y-%m-%dT%H:%M:%SZ"
-
-
-def parse_timestamp(raw: str) -> datetime | None:
-    """Parse the Lightstreamer TimeStamp field to a UTC datetime.
-
-    Tries ISO 8601 with and without milliseconds, then Unix-epoch float.
-    Returns None when the value is empty or unparseable.
+    uv-managed CPython on macOS does not load the system keychain, so
+    ``ssl.create_default_context()`` (used by the Lightstreamer client's aiohttp
+    transport) fails verification against push.lightstreamer.com and the
+    connection silently retries forever. certifi is always present (httpx,
+    a core dependency, requires it). ``setdefault`` semantics mean an explicit
+    SSL_CERT_FILE — including the Debian system store inside the Docker image —
+    still wins.
     """
-    if not raw:
-        return None
-    for fmt in (_ISO_FMT, _ISO_FMT_NO_MS):
-        try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
-        except ValueError:
-            continue
-    # Last resort: Unix epoch seconds as a float string
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    import certifi
+
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+    log.info("collector.ssl_cert_file_set", path=certifi.where())
+
+
+# ---------------------------------------------------------------------------
+# AOS timestamp parsing
+# ---------------------------------------------------------------------------
+
+# The ISSLive "TimeStamp" field is a decimal AOS (Acquisition of Signal)
+# timestamp, e.g. "4076.449722222222" — NOT an absolute wall-clock time, and
+# its epoch is not publicly documented. We preserve it verbatim as a float
+# (aos_timestamp) for possible later decoding, but anchor the canonical
+# telemetry_timestamp on ingest_time (true UTC receipt) instead — the feed is a
+# near-real-time MERGE push, so receipt time tracks measurement time within
+# seconds, which is more than precise enough for the 60 s resample grid.
+
+
+def parse_aos_timestamp(raw: str) -> float | None:
+    """Parse the raw ISSLive TimeStamp field to a float. None if unparseable."""
     try:
-        return datetime.fromtimestamp(float(raw), tz=UTC)
-    except (ValueError, OSError):
-        log.warning("collector.timestamp_parse_failed", raw=raw)
+        return float(raw)
+    except (ValueError, TypeError):
+        log.warning("collector.aos_timestamp_parse_failed", raw=raw)
         return None
 
 
@@ -133,8 +145,9 @@ class _ISSSubscriptionListener:
         self._buffers = buffers
         self._lock = lock
         self._los_staleness = los_staleness_seconds
-        # Per-channel last telemetry_timestamp for LOS staleness detection.
-        self._last_ts: dict[str, datetime] = {}
+        # Wall-clock time the last TIME_000001 update arrived. LOS is detected
+        # as a gap in arrivals — more robust than trusting the feed's own clock.
+        self._last_time_arrival: datetime | None = None
         self._in_los: bool = False
 
     # -- Lightstreamer SubscriptionListener interface -------------------------
@@ -145,7 +158,7 @@ class _ISSSubscriptionListener:
         raw_value: str | None = update.getValue("Value")
         raw_ts: str | None = update.getValue("TimeStamp")
 
-        if raw_value is None or raw_ts is None:
+        if raw_value is None:
             return
 
         try:
@@ -154,46 +167,38 @@ class _ISSSubscriptionListener:
             log.warning("collector.value_parse_failed", channel_id=channel_id, raw=raw_value)
             return
 
-        telemetry_ts = parse_timestamp(raw_ts)
-        if telemetry_ts is None:
-            return
-
+        # Anchor the canonical timestamp on receipt time (true UTC); preserve
+        # the raw AOS decimal verbatim for possible later decoding.
         now = datetime.now(UTC)
         row = {
-            "telemetry_timestamp": telemetry_ts,
+            "telemetry_timestamp": now,
             "value": value,
-            "ingest_time": now,
+            "aos_timestamp": parse_aos_timestamp(raw_ts) if raw_ts is not None else None,
         }
 
         with self._lock:
             self._buffers[channel_id].append(row)
-            self._update_los(channel_id, telemetry_ts, now)
+            self._note_arrival(channel_id, now)
 
-    def _update_los(
-        self, channel_id: str, telemetry_ts: datetime, now: datetime
-    ) -> None:
-        """Update LOS state based on TIME_000001 staleness. Called under lock."""
+    def _note_arrival(self, channel_id: str, now: datetime) -> None:
+        """Track TIME_000001 arrivals for LOS recovery. Called under lock."""
         if channel_id != "TIME_000001":
             return
 
-        prev = self._last_ts.get("TIME_000001")
-        self._last_ts["TIME_000001"] = telemetry_ts
+        self._last_time_arrival = now
 
-        if prev is None:
-            return
-
-        # A new tick on TIME_000001 means signal is present.
+        # A fresh TIME_000001 update means signal is present again.
         if self._in_los:
             self._in_los = False
-            log.info("collector.los_recovered", telemetry_ts=telemetry_ts.isoformat())
+            log.info("collector.los_recovered", recovered_at=now.isoformat())
 
     def check_staleness(self, now: datetime) -> None:
-        """Check whether TIME_000001 has stopped advancing.
+        """Check whether TIME_000001 updates have stopped arriving.
 
         Called from the flush thread, not from the Lightstreamer callback.
         """
         with self._lock:
-            last = self._last_ts.get("TIME_000001")
+            last = self._last_time_arrival
 
         if last is None:
             return
@@ -201,10 +206,10 @@ class _ISSSubscriptionListener:
         elapsed = (now - last).total_seconds()
         if elapsed > self._los_staleness and not self._in_los:
             self._in_los = True
-            log.info(
+            log.warning(
                 "collector.los_onset",
                 elapsed_seconds=round(elapsed, 1),
-                last_ts=last.isoformat(),
+                last_arrival=last.isoformat(),
             )
 
     # -- No-op stubs so the class satisfies the SubscriptionListener interface
@@ -281,6 +286,11 @@ class LightstreamerCollector:
             seconds: If set, stop after this many seconds (for dry-runs).
                      If ``None``, run until interrupted (SIGTERM or KeyboardInterrupt).
         """
+        # Must run BEFORE importing the Lightstreamer client: its transport
+        # resolves the TLS cert bundle at import time, so a later env change
+        # would be ignored.
+        ensure_ssl_cert_env()
+
         try:
             from lightstreamer.client import LightstreamerClient, Subscription
         except ImportError as exc:

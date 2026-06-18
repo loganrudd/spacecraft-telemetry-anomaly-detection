@@ -36,12 +36,16 @@ log = get_logger(__name__)
 
 RAW_TICK_SCHEMA = pa.schema(
     [
-        # Parsed from the Lightstreamer "TimeStamp" field; UTC microseconds.
+        # Canonical timestamp: UTC wall-clock receipt time. The ISSLive feed is
+        # a near-real-time MERGE push, so receipt time tracks measurement time
+        # within seconds — the right anchor for the 60 s resample grid.
         pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
         # Parsed from the Lightstreamer "Value" field.
         pa.field("value", pa.float32(), nullable=False),
-        # Wall-clock time the tick was received by the collector (diagnostics).
-        pa.field("ingest_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        # Raw ISSLive "TimeStamp" decimal preserved verbatim (AOS timestamp,
+        # epoch undocumented). Nullable: some updates omit it. Kept for possible
+        # later decoding; not used as the grid anchor.
+        pa.field("aos_timestamp", pa.float64(), nullable=True),
     ]
 )
 
@@ -82,9 +86,9 @@ def flush_buffer(
 ) -> UPath | None:
     """Write a list of tick rows to a Parquet shard and return the path.
 
-    Each row must have keys ``telemetry_timestamp``, ``value``, and
-    ``ingest_time`` (all ``datetime`` objects with UTC tzinfo, or
-    ``pyarrow``-compatible equivalents).
+    Each row must have keys ``telemetry_timestamp`` (UTC-aware ``datetime``),
+    ``value`` (float), and ``aos_timestamp`` (float or ``None``), matching
+    ``RAW_TICK_SCHEMA``.
 
     Args:
         rows: List of row dicts. Empty list is a no-op.

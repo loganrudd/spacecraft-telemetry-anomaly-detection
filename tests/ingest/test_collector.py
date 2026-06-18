@@ -15,19 +15,18 @@ from spacecraft_telemetry.core.config import CollectorConfig
 from spacecraft_telemetry.ingest.collector import (
     LightstreamerCollector,
     _ISSSubscriptionListener,
-    parse_timestamp,
+    parse_aos_timestamp,
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TS_STR = "2024-06-01T12:00:00.000Z"
-_TS_DT = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
-_INGEST = datetime(2024, 6, 1, 12, 0, 5, tzinfo=UTC)
+# Real ISSLive TimeStamp format: a decimal AOS value, not a wall-clock time.
+_AOS_STR = "4076.449722222222"
 
 
-def _make_update(item_name: str, value: str, timestamp: str) -> MagicMock:
+def _make_update(item_name: str, value: str, timestamp: str = _AOS_STR) -> MagicMock:
     """Return a mock ItemUpdate with getValue() and getItemName()."""
     update = MagicMock()
     update.getItemName.return_value = item_name
@@ -49,36 +48,24 @@ def _make_listener(
 
 
 # ---------------------------------------------------------------------------
-# parse_timestamp
+# parse_aos_timestamp
 # ---------------------------------------------------------------------------
 
 
-def test_parse_timestamp_iso_with_ms() -> None:
-    ts = parse_timestamp("2024-06-01T12:00:00.500Z")
-    assert ts is not None
-    assert ts.tzinfo is UTC
-    assert ts.year == 2024
+def test_parse_aos_timestamp_decimal() -> None:
+    assert parse_aos_timestamp("4076.449722222222") == pytest.approx(4076.449722222222)
 
 
-def test_parse_timestamp_iso_no_ms() -> None:
-    ts = parse_timestamp("2024-06-01T12:00:00Z")
-    assert ts is not None
-    assert ts.second == 0
+def test_parse_aos_timestamp_integer() -> None:
+    assert parse_aos_timestamp("4076") == pytest.approx(4076.0)
 
 
-def test_parse_timestamp_unix_epoch() -> None:
-    epoch = datetime(1970, 1, 1, 0, 0, 0, tzinfo=UTC)
-    ts = parse_timestamp("0.0")
-    assert ts is not None
-    assert ts == epoch
+def test_parse_aos_timestamp_empty_returns_none() -> None:
+    assert parse_aos_timestamp("") is None
 
 
-def test_parse_timestamp_empty_returns_none() -> None:
-    assert parse_timestamp("") is None
-
-
-def test_parse_timestamp_garbage_returns_none() -> None:
-    assert parse_timestamp("NOT_A_TIMESTAMP") is None
+def test_parse_aos_timestamp_garbage_returns_none() -> None:
+    assert parse_aos_timestamp("NOT_A_NUMBER") is None
 
 
 # ---------------------------------------------------------------------------
@@ -88,18 +75,22 @@ def test_parse_timestamp_garbage_returns_none() -> None:
 
 def test_on_item_update_appends_to_buffer() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"])
-    update = _make_update("S1000003", "21.5", _TS_STR)
+    before = datetime.now(UTC)
+    update = _make_update("S1000003", "21.5")
     listener.onItemUpdate(update)
+    after = datetime.now(UTC)
     assert len(listener._buffers["S1000003"]) == 1
     row = listener._buffers["S1000003"][0]
     assert row["value"] == pytest.approx(21.5)
-    assert row["telemetry_timestamp"] == _TS_DT
+    # telemetry_timestamp is the UTC receipt time, not the feed's AOS value.
+    assert before <= row["telemetry_timestamp"] <= after
+    assert row["aos_timestamp"] == pytest.approx(4076.449722222222)
 
 
 def test_on_item_update_multiple_ticks_accumulate() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"])
     for i in range(5):
-        update = _make_update("S1000003", str(float(i)), _TS_STR)
+        update = _make_update("S1000003", str(float(i)))
         listener.onItemUpdate(update)
     assert len(listener._buffers["S1000003"]) == 5
 
@@ -115,70 +106,73 @@ def test_on_item_update_none_value_skipped() -> None:
 
 def test_on_item_update_bad_value_skipped() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"])
-    update = _make_update("S1000003", "NOT_A_FLOAT", _TS_STR)
+    update = _make_update("S1000003", "NOT_A_FLOAT")
     listener.onItemUpdate(update)
     assert len(listener._buffers["S1000003"]) == 0
 
 
-def test_on_item_update_bad_timestamp_skipped() -> None:
+def test_on_item_update_bad_aos_timestamp_kept_with_none() -> None:
+    # A bad AOS TimeStamp no longer drops the tick — telemetry_timestamp comes
+    # from receipt time, so the row is kept with aos_timestamp=None.
     listener = _make_listener(["S1000003", "TIME_000001"])
     update = _make_update("S1000003", "21.5", "BAD_TS")
     listener.onItemUpdate(update)
-    assert len(listener._buffers["S1000003"]) == 0
+    assert len(listener._buffers["S1000003"]) == 1
+    assert listener._buffers["S1000003"][0]["aos_timestamp"] is None
 
 
-def test_on_item_update_ingest_time_is_set() -> None:
+def test_on_item_update_missing_timestamp_kept_with_none() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"])
-    before = datetime.now(UTC)
-    update = _make_update("S1000003", "1.0", _TS_STR)
+    update = MagicMock()
+    update.getItemName.return_value = "S1000003"
+    update.getValue.side_effect = lambda field: {"Value": "21.5"}.get(field)
     listener.onItemUpdate(update)
-    after = datetime.now(UTC)
-    row = listener._buffers["S1000003"][0]
-    assert before <= row["ingest_time"] <= after
+    assert len(listener._buffers["S1000003"]) == 1
+    assert listener._buffers["S1000003"][0]["aos_timestamp"] is None
 
 
 # ---------------------------------------------------------------------------
-# LOS staleness detection
+# LOS staleness detection (wall-clock arrival gap on TIME_000001)
 # ---------------------------------------------------------------------------
 
 
-def test_los_onset_logged_when_time_stale(caplog: pytest.LogCaptureFixture) -> None:
-    import logging
+def test_los_onset_logged_when_no_time_arrivals() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=1.0)
-    # Seed TIME_000001 with an old timestamp
-    old_ts = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
+    # Last TIME_000001 arrival was an hour ago (wall clock).
+    old_arrival = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
     with listener._lock:
-        listener._last_ts["TIME_000001"] = old_ts
+        listener._last_time_arrival = old_arrival
 
     now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)  # 1 hour later → stale
-    with caplog.at_level(logging.INFO):
-        listener.check_staleness(now)
-
+    listener.check_staleness(now)
     assert listener._in_los is True
 
 
-def test_los_recovery_logged_on_new_time_tick(caplog: pytest.LogCaptureFixture) -> None:
-    import logging
+def test_los_recovery_on_new_time_arrival() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=1.0)
     listener._in_los = True
-    # Seed last_ts so recovery check has something to compare against
-    with listener._lock:
-        listener._last_ts["TIME_000001"] = datetime(2024, 6, 1, 11, 59, 59, tzinfo=UTC)
 
-    with caplog.at_level(logging.INFO):
-        update = _make_update("TIME_000001", "1.0", _TS_STR)
-        listener.onItemUpdate(update)
+    update = _make_update("TIME_000001", "14675219000")
+    listener.onItemUpdate(update)
 
     assert listener._in_los is False
+    assert listener._last_time_arrival is not None
 
 
-def test_no_los_when_time_advances_within_threshold() -> None:
+def test_no_los_when_arrivals_recent() -> None:
     listener = _make_listener(["S1000003", "TIME_000001"], staleness_seconds=60.0)
     recent = datetime.now(UTC) - timedelta(seconds=30)
     with listener._lock:
-        listener._last_ts["TIME_000001"] = recent
+        listener._last_time_arrival = recent
     listener.check_staleness(datetime.now(UTC))
     assert listener._in_los is False
+
+
+def test_non_time_channel_does_not_reset_los_clock() -> None:
+    # Only TIME_000001 arrivals reset the LOS clock; telemetry channels don't.
+    listener = _make_listener(["S1000003", "TIME_000001"])
+    listener.onItemUpdate(_make_update("S1000003", "21.5"))
+    assert listener._last_time_arrival is None
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +191,7 @@ def test_collector_flush_writes_parquet(tmp_path: Path) -> None:
 
     # Feed 3 ticks for S1000003 via the listener
     for i in range(3):
-        ts_str = f"2024-06-01T12:0{i}:00.000Z"
-        update = _make_update("S1000003", str(float(i)), ts_str)
+        update = _make_update("S1000003", str(float(i)), str(4076.0 + i))
         collector._listener.onItemUpdate(update)
 
     collector._flush_all(final=True)
@@ -218,7 +211,7 @@ def test_collector_flush_empties_buffer(tmp_path: Path) -> None:
         flush_interval_seconds=300.0,
     )
     collector = LightstreamerCollector(config, dest_dir=tmp_path)
-    update = _make_update("S1000003", "1.0", _TS_STR)
+    update = _make_update("S1000003", "1.0")
     collector._listener.onItemUpdate(update)
 
     assert len(collector._buffers["S1000003"]) == 1
@@ -233,7 +226,7 @@ def test_collector_context_item_flushed(tmp_path: Path) -> None:
         flush_interval_seconds=300.0,
     )
     collector = LightstreamerCollector(config, dest_dir=tmp_path)
-    update = _make_update("TIME_000001", "1234.5", _TS_STR)
+    update = _make_update("TIME_000001", "1234.5")
     collector._listener.onItemUpdate(update)
     collector._flush_all(final=True)
 

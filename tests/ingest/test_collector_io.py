@@ -15,8 +15,6 @@ from spacecraft_telemetry.ingest.collector_io import (
 )
 
 _TS1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
-_TS2 = datetime(2024, 6, 1, 12, 1, 0, tzinfo=UTC)
-_INGEST = datetime(2024, 6, 1, 12, 0, 5, tzinfo=UTC)
 _CHANNEL = "S1000003"
 
 
@@ -25,7 +23,7 @@ def _make_rows(n: int = 3) -> list[dict]:
         {
             "telemetry_timestamp": datetime(2024, 6, 1, 12, i, 0, tzinfo=UTC),
             "value": float(i),
-            "ingest_time": _INGEST,
+            "aos_timestamp": 4076.0 + i,
         }
         for i in range(n)
     ]
@@ -101,13 +99,14 @@ def test_flush_column_values(tmp_path: Path) -> None:
         {
             "telemetry_timestamp": _TS1,
             "value": 42.0,
-            "ingest_time": _INGEST,
+            "aos_timestamp": 4076.5,
         }
     ]
     path = flush_buffer(rows, tmp_path, _CHANNEL, bucket_ts=_TS1)
     assert path is not None
     table = pq.read_table(str(path))
     assert table["value"][0].as_py() == pytest.approx(42.0, abs=1e-3)
+    assert table["aos_timestamp"][0].as_py() == pytest.approx(4076.5)
 
 
 def test_flush_timestamps_are_utc(tmp_path: Path) -> None:
@@ -147,9 +146,23 @@ def test_flush_context_item(tmp_path: Path) -> None:
         {
             "telemetry_timestamp": _TS1,
             "value": 1234.5,
-            "ingest_time": _INGEST,
+            "aos_timestamp": 4076.5,
         }
     ]
     path = flush_buffer(rows, tmp_path, "TIME_000001", bucket_ts=_TS1)
     assert path is not None
     assert "channel_id=TIME_000001" in str(path)
+
+
+def test_flush_aos_timestamp_nullable(tmp_path: Path) -> None:
+    rows = [
+        {
+            "telemetry_timestamp": _TS1,
+            "value": 1.0,
+            "aos_timestamp": None,
+        }
+    ]
+    path = flush_buffer(rows, tmp_path, _CHANNEL, bucket_ts=_TS1)
+    assert path is not None
+    table = pq.read_table(str(path), partitioning=None)
+    assert table["aos_timestamp"][0].as_py() is None
