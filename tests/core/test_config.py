@@ -61,7 +61,8 @@ class TestDataConfig:
         assert cfg.zenodo_record_id == "12528696"
         assert cfg.sample_fraction == 0.01
         assert cfg.sample_channels == 5
-        assert len(cfg.missions) == 3
+        assert "ESA-Mission1" in cfg.missions
+        assert "ISS" in cfg.missions
 
     def test_fraction_zero_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="sample_fraction"):
