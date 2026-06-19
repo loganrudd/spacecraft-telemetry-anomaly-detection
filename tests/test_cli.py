@@ -983,8 +983,10 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("spacecraft_telemetry.cli.MlflowClient") as mock_discovery_client_cls,
-            patch("spacecraft_telemetry.mlflow_tracking.registry.MlflowClient") as mock_registry_client_cls,
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
         ):
             mock_discovery_client = MagicMock()
             mock_registry_client = MagicMock()
@@ -1022,7 +1024,7 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("spacecraft_telemetry.cli.MlflowClient") as mock_client_cls,
+            patch("mlflow.tracking.client.MlflowClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
