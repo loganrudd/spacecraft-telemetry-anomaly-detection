@@ -57,16 +57,16 @@ resource "google_compute_instance" "collector" {
   tags = ["iss-collector"]
 
   labels = {
-    owner      = "spacecraft-telemetry"
-    component  = "iss-collector"
-    phase      = "12"
+    owner     = "spacecraft-telemetry"
+    component = "iss-collector"
+    phase     = "12"
   }
 
   # Container-Optimized OS — ships with Docker, handles auto-updates.
   boot_disk {
     initialize_params {
       image = "cos-cloud/cos-stable"
-      size  = 20  # GB — holds the image layers and log buffers; data goes to GCS
+      size  = 20 # GB — holds the image layers and log buffers; data goes to GCS
       type  = "pd-standard"
     }
   }
@@ -86,7 +86,7 @@ resource "google_compute_instance" "collector" {
 
   scheduling {
     # Non-preemptible: a mid-run eviction breaks the collection window.
-    preemptible        = false
+    preemptible         = false
     on_host_maintenance = "MIGRATE"
     automatic_restart   = true
   }
@@ -99,8 +99,12 @@ resource "google_compute_instance" "collector" {
       #!/bin/bash
       set -euo pipefail
 
-      # Authenticate Docker with Artifact Registry.
-      gcloud auth configure-docker ${var.region}-docker.pkg.dev --quiet
+      # Authenticate Docker with Artifact Registry. Container-Optimized OS does
+      # NOT ship gcloud, so we use docker-credential-gcr (preinstalled on COS),
+      # which vends tokens from the attached service account via the metadata
+      # server. gcloud here would fail with "command not found" and, under
+      # `set -euo pipefail`, abort the script before docker pull.
+      docker-credential-gcr configure-docker --registries=${var.region}-docker.pkg.dev
 
       # Stop any existing container from a previous startup.
       docker stop collector 2>/dev/null || true
