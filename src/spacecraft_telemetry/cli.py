@@ -1555,12 +1555,6 @@ main.add_command(api_group, name="api")
 
 @main.command()
 @click.option(
-    "--mission",
-    default="ISS",
-    show_default=True,
-    help="Mission name (currently only ISS is supported).",
-)
-@click.option(
     "--channel-set",
     type=click.Choice(["validation", "all"]),
     default=None,
@@ -1581,7 +1575,6 @@ main.add_command(api_group, name="api")
 @click.pass_context
 def collect(
     ctx: click.Context,
-    mission: str,
     channel_set: str | None,
     duration: float | None,
 ) -> None:
@@ -1602,8 +1595,6 @@ def collect(
         # Production run on all 26 channels
         spacecraft-telemetry collect --channel-set all
     """
-    from pathlib import Path
-
     from spacecraft_telemetry.ingest.collector import LightstreamerCollector
 
     settings = ctx.obj["settings"]
@@ -1611,17 +1602,12 @@ def collect(
 
     cfg = settings.collect
     if channel_set is not None:
-        from spacecraft_telemetry.core.config import CollectorConfig
+        cfg = cfg.model_copy(update={"channel_set": channel_set})
 
-        cfg = CollectorConfig.model_validate(
-            {**cfg.model_dump(), "channel_set": channel_set}
-        )
-
-    dest_dir = Path(str(cfg.raw_ticks_dir))
+    dest_dir = cfg.raw_ticks_dir
 
     log.info(
         "collect.starting",
-        mission=mission,
         channel_set=cfg.channel_set,
         dest_dir=str(dest_dir),
         duration=duration,

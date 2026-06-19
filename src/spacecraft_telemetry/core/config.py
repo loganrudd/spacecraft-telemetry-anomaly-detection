@@ -454,13 +454,13 @@ class CollectorConfig(BaseModel):
     # Flush in-memory buffer to Parquet every N seconds. Bounds crash-loss
     # to this window; smaller values mean more files but safer durability.
     flush_interval_seconds: float = 300.0
-    # If the Lightstreamer TimeStamp for any item does not advance within this
-    # window, log a structured los_onset event (LOS detection, operational only).
+    # If no item update arrives on ANY subscribed channel within this window,
+    # log a structured los_onset event (LOS detection, operational only).
     los_staleness_seconds: float = 60.0
     # Downstream contract values — recorded here so Phase 13 preprocessing
     # and the live pump (Phase 16) can share them without hard-coding.
     # 30 s / W=256 confirmed by 1-hour dry-run: all validation channels update
-    # at 1–10 s median cadence, well below the 30 s grid step.
+    # at 1-10 s median cadence, well below the 30 s grid step.
     grid_interval_seconds: int = 30
     window_size: int = 256
 

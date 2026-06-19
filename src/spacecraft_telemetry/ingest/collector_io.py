@@ -1,12 +1,12 @@
 """Raw-tick Parquet I/O for the ISS Live collector.
 
 Writes in-memory tick buffers to Hive-partitioned Parquet shards:
-    {raw_ticks_dir}/ISS/ticks/channel_id={PUI}/{YYYYMMDDTHHMM}.parquet
+    {raw_ticks_dir}/ISS/ticks/channel_id={PUI}/{YYYYMMDDTHHMMSS}.parquet
 
 The schema is uniform across both telemetry channels and context items
 (TIME_000001, USLAB000086) so all items flow through the same flush path.
 
-Phase 13 reads these shards to resample to the 60 s grid and run the
+Phase 13 reads these shards to resample to the 30 s grid and run the
 standard preprocessing pipeline. This module has no dependency on that
 pipeline — it is purely append-only I/O.
 
@@ -38,7 +38,7 @@ RAW_TICK_SCHEMA = pa.schema(
     [
         # Canonical timestamp: UTC wall-clock receipt time. The ISSLive feed is
         # a near-real-time MERGE push, so receipt time tracks measurement time
-        # within seconds — the right anchor for the 60 s resample grid.
+        # within seconds — the right anchor for the 30 s resample grid.
         pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
         # Parsed from the Lightstreamer "Value" field.
         pa.field("value", pa.float32(), nullable=False),

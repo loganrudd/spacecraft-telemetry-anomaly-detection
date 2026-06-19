@@ -39,4 +39,4 @@ COPY configs/ ./configs/
 ENV SPACECRAFT_ENV=cloud \
     SPACECRAFT_LOGGING__FORMAT=json
 
-CMD ["spacecraft-telemetry", "collect", "--mission", "ISS"]
+CMD ["spacecraft-telemetry", "collect"]

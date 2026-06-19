@@ -9,10 +9,10 @@ perspective — Lightstreamer callbacks arrive on a library thread and append
 to per-channel buffers protected by a threading.Lock; the flush thread drains
 those buffers on a timer.
 
-Loss-of-Signal (LOS) is detected operationally by watching TIME_000001 for
-TimeStamp non-advance. On LOS onset/recovery a structured log event is emitted;
-the ``is_los`` flag is derived downstream in Phase 13 from the TIME_000001
-archive and gap analysis.
+Loss-of-Signal (LOS) is detected operationally by watching for wall-clock
+silence across ALL subscribed items — real LOS silences the entire feed.
+On LOS onset/recovery a structured log event is emitted; the ``is_los`` flag
+is derived downstream in Phase 13 from the raw-tick archive and gap analysis.
 
 Eclipse flatlines on power channels are nominal — the collector writes all
 ticks unconditionally and lets Phase 13 / HPO handle the threshold calibration.
@@ -76,15 +76,17 @@ def ensure_ssl_cert_env() -> None:
 # (aos_timestamp) for possible later decoding, but anchor the canonical
 # telemetry_timestamp on ingest_time (true UTC receipt) instead — the feed is a
 # near-real-time MERGE push, so receipt time tracks measurement time within
-# seconds, which is more than precise enough for the 60 s resample grid.
+# seconds, which is more than precise enough for the 30 s resample grid.
 
 
 def parse_aos_timestamp(raw: str) -> float | None:
     """Parse the raw ISSLive TimeStamp field to a float. None if unparseable."""
+    if not raw or not raw.strip():
+        return None
     try:
         return float(raw)
     except (ValueError, TypeError):
-        log.warning("collector.aos_timestamp_parse_failed", raw=raw)
+        log.debug("collector.aos_timestamp_parse_failed", raw=raw)
         return None
 
 
