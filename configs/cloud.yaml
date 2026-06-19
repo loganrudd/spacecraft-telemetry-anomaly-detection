@@ -92,7 +92,7 @@ collect:
   channel_set: "all"
   # raw_ticks_dir overridden by SPACECRAFT_COLLECT__RAW_TICKS_DIR=gs://{project}-raw-data in deployment
   raw_ticks_dir: "data/raw"
-  flush_interval_seconds: 300.0
+  flush_interval_seconds: 3600.0
   los_staleness_seconds: 60.0
   grid_interval_seconds: 30
   window_size: 256

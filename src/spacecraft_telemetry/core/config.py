@@ -451,9 +451,11 @@ class CollectorConfig(BaseModel):
     channel_set: Literal["validation", "all"] = "validation"
     # Root directory for raw tick shards (local path or gs:// URI).
     raw_ticks_dir: str = "data/raw"
-    # Flush in-memory buffer to Parquet every N seconds. Bounds crash-loss
-    # to this window; smaller values mean more files but safer durability.
-    flush_interval_seconds: float = 300.0
+    # Flush in-memory buffer to Parquet every N seconds. Hourly shards give
+    # ~1,800 rows/file at 2 s cadence — far healthier for Phase 13 reads than
+    # the ~150 rows/file produced by 300 s. Re-buffer-on-error (Step 2) makes
+    # longer intervals safe: transient GCS failures no longer cause data loss.
+    flush_interval_seconds: float = 3600.0
     # If no item update arrives on ANY subscribed channel within this window,
     # log a structured los_onset event (LOS detection, operational only).
     los_staleness_seconds: float = 60.0

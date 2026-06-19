@@ -359,9 +359,23 @@ class LightstreamerCollector:
     # -- Internal flush loop --------------------------------------------------
 
     def _flush_loop(self, seconds: float | None) -> None:
-        """Timer-based flush loop. Blocks until stop_event or timeout."""
+        """Timer-based flush loop. Blocks until stop_event or timeout.
+
+        LOS staleness is checked on its own shorter cadence in a daemon thread
+        (see ``_staleness_loop``), decoupled from the flush interval so that
+        ``check_staleness`` fires within ~los_staleness_seconds even when
+        ``flush_interval_seconds`` is long (e.g. hourly).
+        """
         deadline = time.monotonic() + seconds if seconds is not None else None
         interval = self._config.flush_interval_seconds
+
+        staleness_thread = threading.Thread(
+            target=self._staleness_loop,
+            args=(deadline,),
+            daemon=True,
+            name="collector-staleness",
+        )
+        staleness_thread.start()
 
         while not self._stop_event.is_set():
             now_mono = time.monotonic()
@@ -372,6 +386,16 @@ class LightstreamerCollector:
             self._stop_event.wait(timeout=sleep_time)
 
             self._flush_all(final=False)
+
+        staleness_thread.join(timeout=2.0)
+
+    def _staleness_loop(self, deadline: float | None) -> None:
+        """Check LOS staleness on a short cadence independent of flush interval."""
+        cadence = min(self._config.los_staleness_seconds, 60.0)
+        while not self._stop_event.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            self._stop_event.wait(timeout=cadence)
             self._listener.check_staleness(datetime.now(UTC))
 
     def _flush_all(self, *, final: bool) -> None:
