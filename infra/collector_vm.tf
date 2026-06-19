@@ -23,15 +23,27 @@ locals {
   collector_image = "${var.region}-docker.pkg.dev/${var.project_id}/spacecraft-telemetry/collector:latest"
 }
 
-# Service account — minimal permissions: write to raw-data bucket only.
+# Service account — minimal permissions: read+write objects on raw-data bucket.
 resource "google_service_account" "collector" {
   account_id   = "sa-collector"
   display_name = "spacecraft-telemetry ISS Collector (GCE)"
 }
 
+# Create new shard objects. Shard filenames are second-unique, so the collector
+# never overwrites — create is all the *write* path needs (no delete grant).
 resource "google_storage_bucket_iam_member" "collector_raw_writer" {
   bucket = google_storage_bucket.raw_data.name
   role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.collector.email}"
+}
+
+# gcsfs (under pyarrow's flush) does a list/stat on the target path before
+# writing a shard. Without storage.objects.list every flush 403s with
+# "does not have storage.objects.list access" and the buffer backs up to the
+# overflow cap. objectViewer grants list+get only — still no delete.
+resource "google_storage_bucket_iam_member" "collector_raw_viewer" {
+  bucket = google_storage_bucket.raw_data.name
+  role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.collector.email}"
 }
 
@@ -132,6 +144,7 @@ resource "google_compute_instance" "collector" {
     google_project_service.apis,
     google_service_account.collector,
     google_storage_bucket_iam_member.collector_raw_writer,
+    google_storage_bucket_iam_member.collector_raw_viewer,
     google_project_iam_member.collector_ar_reader,
     google_project_iam_member.collector_log_writer,
   ]
