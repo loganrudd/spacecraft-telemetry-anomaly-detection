@@ -35,9 +35,10 @@ def _make_rows(n: int = 3) -> list[dict]:
 
 
 def test_shard_path_structure(tmp_path: Path) -> None:
-    bucket = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
+    bucket = datetime(2024, 6, 1, 12, 5, 3, tzinfo=UTC)
     p = shard_path(tmp_path, _CHANNEL, bucket)
     assert f"ISS/ticks/channel_id={_CHANNEL}/" in str(p)
+    assert "20240601T120503" in str(p)
     assert str(p).endswith(".parquet")
 
 
@@ -50,10 +51,12 @@ def test_shard_path_preserves_gcs_uri() -> None:
     )
 
 
-def test_shard_path_minute_granularity(tmp_path: Path) -> None:
+def test_shard_path_second_granularity(tmp_path: Path) -> None:
+    # Second-level filename prevents a shutdown-flush from truncating a
+    # same-minute periodic flush (open("wb") overwrites).
     b1 = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
-    b2 = datetime(2024, 6, 1, 12, 5, 59, tzinfo=UTC)
-    assert shard_path(tmp_path, _CHANNEL, b1) == shard_path(tmp_path, _CHANNEL, b2)
+    b2 = datetime(2024, 6, 1, 12, 5, 1, tzinfo=UTC)
+    assert shard_path(tmp_path, _CHANNEL, b1) != shard_path(tmp_path, _CHANNEL, b2)
 
 
 def test_shard_path_different_hours_differ(tmp_path: Path) -> None:

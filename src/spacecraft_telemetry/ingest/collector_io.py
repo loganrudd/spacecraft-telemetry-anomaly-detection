@@ -66,9 +66,9 @@ def shard_path(dest_dir: Path | UPath | str, channel_id: str, bucket_ts: datetim
             granularity is used for the filename).
 
     Returns:
-        UPath: ``{dest_dir}/ISS/ticks/channel_id={channel_id}/{YYYYMMDDTHHMM}.parquet``
+        UPath: ``{dest_dir}/ISS/ticks/channel_id={channel_id}/{YYYYMMDDTHHMMSS}.parquet``
     """
-    stamp = bucket_ts.strftime("%Y%m%dT%H%M")
+    stamp = bucket_ts.strftime("%Y%m%dT%H%M%S")
     return (
         UPath(str(dest_dir))
         / _MISSION
