@@ -72,7 +72,7 @@ def _fetch_id_token(audience: str) -> str | None:
         req = google.auth.transport.requests.Request()
         token = cast(str, google.oauth2.id_token.fetch_id_token(req, audience))  # type: ignore[no-untyped-call]
         return token
-    except Exception as exc1:  # noqa: BLE001
+    except Exception as exc1:
         exc1_str = str(exc1)  # save before Python clears `exc1` at except-block exit
         log.debug("mlflow.auth.fetch_id_token_failed", audience=audience, error=exc1_str)
 
@@ -93,7 +93,7 @@ def _fetch_id_token(audience: str) -> str | None:
         if result.returncode != 0 or not token:
             raise RuntimeError(result.stderr.strip() or "empty token")
         return token
-    except Exception as exc2:  # noqa: BLE001
+    except Exception as exc2:
         log.warning(
             "mlflow.auth.id_token_failed",
             audience=audience,
@@ -137,9 +137,10 @@ def _install_id_token_auth(tracking_uri: str) -> None:
             # scoped to the bare service URL.
             parsed = urlparse(tracking_uri)
             audience = f"{parsed.scheme}://{parsed.netloc}"
-            token = _fetch_id_token(audience)
-            if token is None:
+            fetched = _fetch_id_token(audience)
+            if fetched is None:
                 return
+            token = fetched
             _token_cache[tracking_uri] = (token, now + 50 * 60)
 
     os.environ["MLFLOW_TRACKING_TOKEN"] = token
@@ -284,7 +285,7 @@ def open_run(
     def _set_experiment() -> None:
         try:
             mlflow.set_experiment(experiment)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _exc.append(exc)
 
     t = Thread(target=_set_experiment, daemon=True)
@@ -292,7 +293,11 @@ def open_run(
     t.join(timeout=30)
 
     if t.is_alive():
-        log.warning("mlflow.run.start_failed", experiment=experiment, error="set_experiment timeout after 30s")
+        log.warning(
+            "mlflow.run.start_failed",
+            experiment=experiment,
+            error="set_experiment timeout after 30s",
+        )
         yield None
         return
     if _exc:
@@ -303,7 +308,7 @@ def open_run(
     _run: Any = None
     try:
         _run = mlflow.start_run(run_name=run_name, tags=tags, nested=nested)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("mlflow.run.start_failed", experiment=experiment, error=str(exc))
 
     try:
@@ -435,7 +440,7 @@ def log_input_dataset(
             DataFrame — which would be 0 here since we deliberately never load the
             rows. Overriding profile lets us report the true (footer-derived) row
             count plus the start/end timestamps of the slice. num_elements is
-            dropped: it is just num_rows × num_columns and adds no lineage signal.
+            dropped: it is just num_rows x num_columns and adds no lineage signal.
             """
 
             @property
@@ -449,7 +454,7 @@ def log_input_dataset(
             digest=_digest,
         )
         mlflow.log_input(dataset, context=context)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning(
             "mlflow.dataset.log_failed", name=name, context=context, error=str(exc)
         )
@@ -487,7 +492,11 @@ def _parquet_stats(
         num_rows = 0
         ts_min: Any = None
         ts_max: Any = None
-        ts_idx = schema.names.index("telemetry_timestamp") if "telemetry_timestamp" in schema.names else None
+        ts_idx = (
+            schema.names.index("telemetry_timestamp")
+            if "telemetry_timestamp" in schema.names
+            else None
+        )
 
         for f in files:
             with f.open("rb") as fh:
@@ -507,5 +516,5 @@ def _parquet_stats(
         start_date = ts_min.isoformat() if ts_min is not None else None
         end_date = ts_max.isoformat() if ts_max is not None else None
         return schema, num_rows, start_date, end_date
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None, 0, None, None

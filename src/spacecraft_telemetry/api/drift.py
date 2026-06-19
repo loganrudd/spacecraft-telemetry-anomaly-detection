@@ -4,7 +4,7 @@
 for a single channel and periodically computes Wasserstein drift scores against a
 reference profile loaded at startup.
 
-Evidently is NOT used on the hot serving path — only scipy is. At 100-1000× replay
+Evidently is NOT used on the hot serving path — only scipy is. At 100-1000x replay
 speeds, the ~58ms Evidently Report overhead per run would saturate the thread pool
 and cap effective replay speed. Direct scipy gives the same statistic in <1ms.
 Evidently is retained for batch reports (evidently_monitoring/reports.py) where

@@ -10,7 +10,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from spacecraft_telemetry.core.config import DriftConfig, MonitoringConfig, PreprocessingConfig, Settings
+from spacecraft_telemetry.core.config import (
+    DriftConfig,
+    MonitoringConfig,
+    PreprocessingConfig,
+    Settings,
+)
 from spacecraft_telemetry.evidently_monitoring.reference import (
     MONITORING_FEATURE_COLS,
     build_reference_profile,

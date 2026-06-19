@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import mlflow
 from mlflow.pytorch import log_model as log_pytorch_model
 from mlflow.tracking.client import MlflowClient
 

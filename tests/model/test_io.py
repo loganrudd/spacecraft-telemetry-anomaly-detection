@@ -24,10 +24,10 @@ torch = pytest.importorskip("torch")
 import mlflow  # noqa: E402
 
 from spacecraft_telemetry.model.io import (  # noqa: E402
+    ModelNotFoundError,
     ScoringParams,
     bytes_to_errors,
     download_artifact_bytes,
-    ModelNotFoundError,
     errors_to_bytes,
     find_latest_run_for_channel,
     load_model_for_scoring,

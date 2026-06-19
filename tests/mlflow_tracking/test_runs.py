@@ -172,7 +172,7 @@ class TestParquetStats:
 
     def test_returns_zero_for_directory_with_no_parquet(self, tmp_path: Path) -> None:
         (tmp_path / "readme.txt").write_text("hello")
-        schema, num_rows, start, end = _parquet_stats(str(tmp_path))
+        schema, num_rows, _start, _end = _parquet_stats(str(tmp_path))
         assert schema is None
         assert num_rows == 0
 
@@ -203,7 +203,6 @@ class TestParquetStats:
 
     def test_extracts_timestamp_date_range(self, tmp_path: Path) -> None:
         import pandas as pd
-        import pyarrow.parquet as pq
 
         ts = pd.date_range("2014-01-01", periods=100, freq="s", tz="UTC")
         df = pd.DataFrame({"telemetry_timestamp": ts, "value_normalized": range(100)})
@@ -293,10 +292,9 @@ class TestLogInputDataset:
         """Profile shows actual row count (not 0) when a Parquet file is present."""
         import json
 
+        import pandas as pd
         import pyarrow as pa
         import pyarrow.parquet as pq
-
-        import pandas as pd
 
         ts = pd.date_range("2014-01-01", periods=50, freq="s", tz="UTC")
         table = pa.table({

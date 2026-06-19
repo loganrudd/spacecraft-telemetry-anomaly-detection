@@ -79,7 +79,7 @@ def test_wasserstein_used_at_prod_asymmetric_shape(capsys) -> None:
     unique = set(names.values())
 
     with capsys.disabled():
-        print(f"\n--- Production asymmetric shape (ref=5000, cur=256) ---")
+        print("\n--- Production asymmetric shape (ref=5000, cur=256) ---")
         print(f"  Unique tests used: {unique}")
 
     assert unique == {_WASSERSTEIN_DISPLAY_NAME}

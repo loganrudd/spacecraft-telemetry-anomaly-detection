@@ -380,5 +380,9 @@ def test_reset_produces_identical_output_to_fresh_engine() -> None:
         e_dirty = dirty.step(v, ts + i * dt, False)
         e_fresh = fresh.step(v, ts + i * dt, False)
         assert e_dirty.prediction == e_fresh.prediction, f"prediction mismatch at tick {i}"
-        assert e_dirty.smoothed_error == e_fresh.smoothed_error, f"smoothed_error mismatch at tick {i}"
-        assert e_dirty.is_anomaly_predicted == e_fresh.is_anomaly_predicted, f"flag mismatch at tick {i}"
+        assert e_dirty.smoothed_error == e_fresh.smoothed_error, (
+            f"smoothed_error mismatch at tick {i}"
+        )
+        assert e_dirty.is_anomaly_predicted == e_fresh.is_anomaly_predicted, (
+            f"flag mismatch at tick {i}"
+        )

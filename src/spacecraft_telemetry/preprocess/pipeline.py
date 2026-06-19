@@ -205,6 +205,8 @@ def run_preprocessing(
     # gs:// URI to gs:/ and break the bucket parse.
     from spacecraft_telemetry.preprocess.profiler import (
         filter_channels as _filter_channels,
+    )
+    from spacecraft_telemetry.preprocess.profiler import (
         suitability_manifest_path as _manifest_path,
     )
 
@@ -348,7 +350,7 @@ def _run_parallel(
     # scheduled alongside them. max_calls=1 on the decorator ensures the worker
     # process exits after each task, returning all RSS to the OS before the next
     # task starts (Python's allocator does not release memory to the OS on del).
-    # Small channels (~950MB peak) pack 4 per node (4×950MB=3.8GB + 0.3GB Ray
+    # Small channels (~950MB peak) pack 4 per node (4x950MB=3.8GB + 0.3GB Ray
     # daemons = 4.1GB, well within the 5.7GB kill threshold on 6Gi workers).
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB

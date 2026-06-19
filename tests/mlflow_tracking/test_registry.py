@@ -55,8 +55,10 @@ class TestRegisterPytorchModel:
         source_run_model_name = "channel_1"
         fake_run_id = "abc123"
 
-        with patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model") as mock_log, \
-             patch(_REGISTRY_CLIENT) as mock_client_cls:
+        with (
+            patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model") as mock_log,
+            patch(_REGISTRY_CLIENT) as mock_client_cls,
+        ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [MagicMock()]
