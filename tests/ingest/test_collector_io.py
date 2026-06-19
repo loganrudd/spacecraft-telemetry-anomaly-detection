@@ -10,6 +10,7 @@ import pytest
 
 from spacecraft_telemetry.ingest.collector_io import (
     RAW_TICK_SCHEMA,
+    _is_local_path,
     flush_buffer,
     shard_path,
 )
@@ -70,6 +71,21 @@ def test_shard_path_different_channels_differ(tmp_path: Path) -> None:
     p1 = shard_path(tmp_path, "S1000003", bucket)
     p2 = shard_path(tmp_path, "P1000003", bucket)
     assert p1 != p2
+
+
+# ---------------------------------------------------------------------------
+# _is_local_path — guards the mkdir branch (gs:// must not mkdir → buckets.create)
+# ---------------------------------------------------------------------------
+
+
+def test_is_local_path_true_for_local(tmp_path: Path) -> None:
+    assert _is_local_path(shard_path(tmp_path, _CHANNEL, _TS1)) is True
+
+
+def test_is_local_path_false_for_gcs() -> None:
+    # gs:// paths must skip mkdir — gcsfs maps it to storage.buckets.create,
+    # which 403s for a write-scoped SA and is wrong (bucket already exists).
+    assert _is_local_path(shard_path("gs://my-bucket/raw", _CHANNEL, _TS1)) is False
 
 
 # ---------------------------------------------------------------------------

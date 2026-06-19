@@ -55,6 +55,22 @@ RAW_TICK_SCHEMA = pa.schema(
 
 _MISSION = "ISS"
 
+# Protocols whose paths are backed by a real local filesystem and therefore need
+# parent directories created before a write. Object stores (gs://, s3://, ...)
+# have no directories — writing the key creates the implied prefix.
+_LOCAL_PROTOCOLS = frozenset({"", "file", "local"})
+
+
+def _is_local_path(path: UPath) -> bool:
+    """True when ``path`` is on a local filesystem (needs explicit mkdir).
+
+    Object-store paths (``gs://``, ``s3://``) must NOT be mkdir'd: gcsfs maps
+    ``mkdir`` on the top-level component to ``storage.buckets.create``, which a
+    write-scoped collector SA neither has nor should have. The bucket already
+    exists and writing the object key creates the prefix implicitly.
+    """
+    return path.protocol in _LOCAL_PROTOCOLS
+
 
 def shard_path(dest_dir: Path | UPath | str, channel_id: str, bucket_ts: datetime) -> UPath:
     """Return the UPath for a shard file.
@@ -108,8 +124,11 @@ def flush_buffer(
 
     table = pa.Table.from_pylist(rows, schema=RAW_TICK_SCHEMA)
 
-    parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True)
+    # Only create parents on local filesystems. On GCS this would 403 (gcsfs
+    # maps it to storage.buckets.create); the object write below creates the
+    # prefix on its own.
+    if _is_local_path(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
 
     with path.open("wb") as fh:
         pq.write_table(table, fh)
