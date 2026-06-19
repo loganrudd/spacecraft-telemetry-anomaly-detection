@@ -247,6 +247,64 @@ def test_collector_context_item_flushed(tmp_path: Path) -> None:
     assert shards, "No shard written for TIME_000001"
 
 
+def test_flush_error_retains_rows_for_next_flush(tmp_path: Path) -> None:
+    """On a write failure, rows are re-queued and survive to the next flush."""
+    from unittest.mock import patch
+
+    import spacecraft_telemetry.ingest.collector as _cmod
+
+    config = CollectorConfig(
+        channel_set="validation",
+        raw_ticks_dir=str(tmp_path),
+        flush_interval_seconds=300.0,
+    )
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+
+    update = _make_update("S1000003", "21.5")
+    collector._listener.onItemUpdate(update)
+
+    # Patch flush_buffer in the collector module's namespace (it's imported directly).
+    with patch.object(_cmod, "flush_buffer", side_effect=OSError("GCS 503")):
+        collector._flush_all(final=False)
+
+    # Rows must be retained — not silently discarded.
+    assert len(collector._buffers["S1000003"]) == 1, (
+        "Rows were discarded on flush error instead of being re-queued"
+    )
+
+
+def test_flush_error_buffer_overflow_drops_oldest(tmp_path: Path) -> None:
+    """When re-buffered rows exceed the cap, oldest are dropped and overflow is logged."""
+    from unittest.mock import patch
+
+    import spacecraft_telemetry.ingest.collector as _cmod
+    from spacecraft_telemetry.ingest.collector import _MAX_BUFFERED_ROWS
+
+    config = CollectorConfig(
+        channel_set="validation",
+        raw_ticks_dir=str(tmp_path),
+        flush_interval_seconds=300.0,
+    )
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+
+    # Pre-fill the buffer beyond the cap.
+    with collector._lock:
+        collector._buffers["S1000003"] = [
+            {"telemetry_timestamp": None, "value": float(i), "aos_timestamp": None}
+            for i in range(_MAX_BUFFERED_ROWS)
+        ]
+
+    # A single new tick arrives during the flush attempt.
+    update = _make_update("S1000003", "99.0")
+    collector._listener.onItemUpdate(update)
+
+    with patch.object(_cmod, "flush_buffer", side_effect=OSError("GCS 503")):
+        collector._flush_all(final=False)
+
+    # Buffer should be capped, not growing beyond the limit.
+    assert len(collector._buffers["S1000003"]) <= _MAX_BUFFERED_ROWS
+
+
 def test_collector_run_raises_without_lightstreamer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

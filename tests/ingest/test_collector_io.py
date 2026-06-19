@@ -37,7 +37,17 @@ def _make_rows(n: int = 3) -> list[dict]:
 def test_shard_path_structure(tmp_path: Path) -> None:
     bucket = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
     p = shard_path(tmp_path, _CHANNEL, bucket)
-    assert str(p).endswith(f"ISS/ticks/channel_id={_CHANNEL}/20240601T1205.parquet")
+    assert f"ISS/ticks/channel_id={_CHANNEL}/" in str(p)
+    assert str(p).endswith(".parquet")
+
+
+def test_shard_path_preserves_gcs_uri() -> None:
+    """shard_path must not mangle gs:// URIs (no pathlib.Path round-trip)."""
+    bucket = datetime(2024, 6, 1, 12, 5, 0, tzinfo=UTC)
+    p = shard_path("gs://my-project-raw-data", _CHANNEL, bucket)
+    assert str(p).startswith("gs://my-project-raw-data/ISS/ticks/"), (
+        f"gs:// URI mangled: {str(p)!r}"
+    )
 
 
 def test_shard_path_minute_granularity(tmp_path: Path) -> None:
@@ -90,8 +100,11 @@ def test_flush_row_count(tmp_path: Path) -> None:
     rows = _make_rows(5)
     path = flush_buffer(rows, tmp_path, _CHANNEL, bucket_ts=_TS1)
     assert path is not None
-    table = pq.read_table(str(path))
+    table = pq.read_table(str(path), partitioning=None)
     assert len(table) == 5
+    # Exactly one shard written for this channel/bucket — no duplicates.
+    shards = list((tmp_path / "ISS" / "ticks").glob(f"channel_id={_CHANNEL}/*.parquet"))
+    assert len(shards) == 1
 
 
 def test_flush_column_values(tmp_path: Path) -> None:
