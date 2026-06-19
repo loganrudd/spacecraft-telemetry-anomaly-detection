@@ -99,6 +99,13 @@ resource "google_compute_instance" "collector" {
       #!/bin/bash
       set -euo pipefail
 
+      # COS mounts / read-only, so the default $HOME (/root) is not writable and
+      # docker-credential-gcr can't create /root/.docker. Point HOME at a
+      # writable path; both the credential helper (writes $HOME/.docker/config.json)
+      # and the docker CLI (reads it) then agree. /var is writable on COS.
+      export HOME=/var/lib/collector
+      mkdir -p "$HOME"
+
       # Authenticate Docker with Artifact Registry. Container-Optimized OS does
       # NOT ship gcloud, so we use docker-credential-gcr (preinstalled on COS),
       # which vends tokens from the attached service account via the metadata
@@ -126,5 +133,6 @@ resource "google_compute_instance" "collector" {
     google_service_account.collector,
     google_storage_bucket_iam_member.collector_raw_writer,
     google_project_iam_member.collector_ar_reader,
+    google_project_iam_member.collector_log_writer,
   ]
 }
