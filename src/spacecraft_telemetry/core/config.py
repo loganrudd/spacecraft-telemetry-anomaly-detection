@@ -30,7 +30,7 @@ class DataConfig(BaseModel):
     raw_data_dir: str = "data/raw"
     sample_data_dir: str = "data/sample"
     zenodo_record_id: str = "12528696"
-    missions: list[str] = ["ESA-Mission1", "ESA-Mission2", "ESA-Mission3"]
+    missions: list[str] = ["ESA-Mission1", "ESA-Mission2", "ESA-Mission3", "ISS"]
     sample_fraction: float = 0.01  # fraction of rows to keep in local dev sample
     sample_channels: int = 5  # channels per mission in local dev sample
 
@@ -441,6 +441,46 @@ class ApiConfig(BaseModel):
         return v
 
 
+class CollectorConfig(BaseModel):
+    """ISS Live telemetry collector configuration (Phase 12)."""
+
+    lightstreamer_url: str = "https://push.lightstreamer.com"
+    adapter_set: str = "ISSLIVE"
+    fields: list[str] = ["Value", "TimeStamp"]
+    # "validation" → 6-channel Phase 12 set; "all" → all 26 PUIs.
+    channel_set: Literal["validation", "all"] = "validation"
+    # Root directory for raw tick shards (local path or gs:// URI).
+    raw_ticks_dir: str = "data/raw"
+    # Flush in-memory buffer to Parquet every N seconds. Hourly shards give
+    # ~1,800 rows/file at 2 s cadence — far healthier for Phase 13 reads than
+    # the ~150 rows/file produced by 300 s. Re-buffer-on-error (Step 2) makes
+    # longer intervals safe: transient GCS failures no longer cause data loss.
+    flush_interval_seconds: float = 3600.0
+    # If no item update arrives on ANY subscribed channel within this window,
+    # log a structured los_onset event (LOS detection, operational only).
+    los_staleness_seconds: float = 60.0
+    # Downstream contract values — recorded here so Phase 13 preprocessing
+    # and the live pump (Phase 16) can share them without hard-coding.
+    # 30 s / W=256 confirmed by 1-hour dry-run: all validation channels update
+    # at 1-10 s median cadence, well below the 30 s grid step.
+    grid_interval_seconds: int = 30
+    window_size: int = 256
+
+    @field_validator("flush_interval_seconds", "los_staleness_seconds")
+    @classmethod
+    def positive_float(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("grid_interval_seconds", "window_size")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -484,6 +524,7 @@ class Settings(BaseSettings):
     monitoring: MonitoringConfig = MonitoringConfig()
     drift: DriftConfig = DriftConfig()
     api: ApiConfig = ApiConfig()
+    collect: CollectorConfig = CollectorConfig()
 
     @classmethod
     def settings_customise_sources(

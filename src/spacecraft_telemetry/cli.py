@@ -1104,7 +1104,10 @@ def mlflow_group() -> None:
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest version. Ignored with --channels/--channels-from.",
+    help=(
+        "Model version number. Defaults to latest version. "
+        "Ignored with --channels/--channels-from."
+    ),
 )
 @click.pass_context
 def mlflow_promote(
@@ -1138,8 +1141,6 @@ def mlflow_promote(
         spacecraft-telemetry --env cloud mlflow promote \\
             --mission ESA-Mission2 --subsystem subsystem_1
     """
-    import mlflow
-
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 
@@ -1173,11 +1174,17 @@ def mlflow_promote(
 
     if channel_list is not None:
         if mission is None:
-            raise click.ClickException("--mission is required when using --channels or --channels-from.")
+            raise click.ClickException(
+                "--mission is required when using --channels or --channels-from."
+            )
         if name is not None:
-            raise click.ClickException("--name is mutually exclusive with --channels/--channels-from.")
+            raise click.ClickException(
+                "--name is mutually exclusive with --channels/--channels-from."
+            )
         if subsystem is not None:
-            channel_list = _filter_channels_by_subsystem(settings, mission, channel_list, subsystem)
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
 
         ok, failed = 0, []
         for channel in channel_list:
@@ -1539,3 +1546,72 @@ def api_serve(
 
 
 main.add_command(api_group, name="api")
+
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option(
+    "--channel-set",
+    type=click.Choice(["validation", "all"]),
+    default=None,
+    help=(
+        "Channel set to subscribe: 'validation' (6 channels) or 'all' (26 channels). "
+        "Defaults to the value from config (collect.channel_set)."
+    ),
+)
+@click.option(
+    "--duration",
+    type=float,
+    default=None,
+    help=(
+        "Run for this many seconds then exit (for dry-runs). "
+        "Omit to run until interrupted."
+    ),
+)
+@click.pass_context
+def collect(
+    ctx: click.Context,
+    channel_set: str | None,
+    duration: float | None,
+) -> None:
+    """Collect ISS Live telemetry from the Lightstreamer feed.
+
+    Subscribes to ISSLive PUIs and context items, buffers ticks in memory,
+    and flushes raw Parquet shards to collect.raw_ticks_dir every
+    collect.flush_interval_seconds seconds.
+
+    Runs indefinitely until Ctrl-C or SIGTERM. Use --duration for a bounded
+    dry-run.
+
+    Examples:
+
+        # 1-hour dry-run on the 6-channel validation set
+        spacecraft-telemetry collect --duration 3600
+
+        # Production run on all 26 channels
+        spacecraft-telemetry collect --channel-set all
+    """
+    from spacecraft_telemetry.ingest.collector import LightstreamerCollector
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    cfg = settings.collect
+    if channel_set is not None:
+        cfg = cfg.model_copy(update={"channel_set": channel_set})
+
+    dest_dir = cfg.raw_ticks_dir
+
+    log.info(
+        "collect.starting",
+        channel_set=cfg.channel_set,
+        dest_dir=str(dest_dir),
+        duration=duration,
+    )
+
+    collector = LightstreamerCollector(cfg, dest_dir=dest_dir)
+    collector.run(seconds=duration)

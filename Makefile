@@ -9,7 +9,7 @@ UV := uv
 RUN := $(UV) run
 
 .PHONY: help setup test test-all lint format typecheck \
-        download-sample explore \
+        download-sample explore collect \
         profile preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
@@ -32,8 +32,8 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + tracking + ml)
-	$(UV) sync --extra dev --extra tracking --extra ml
+setup:         ## Install all dependency groups (dev + tracking + ml + collect)
+	$(UV) sync --extra dev --extra tracking --extra ml --extra collect
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -73,6 +73,19 @@ download-sample: ## Download ESA dataset sample from Zenodo (MISSION=…, SUBSYS
 explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 	$(RUN) spacecraft-telemetry explore \
 		--mission $(MISSION)
+
+# ---------------------------------------------------------------------------
+# ISS Live collector (Phase 12)
+# ---------------------------------------------------------------------------
+# SSL_CERT_FILE points uv's Python at certifi so the Lightstreamer TLS
+# handshake to push.lightstreamer.com succeeds. The collector also sets this
+# defensively in-code, so a bare `spacecraft-telemetry collect` works too.
+
+collect:       ## Collect ISS Live telemetry (CHANNEL_SET=validation|all, DURATION=secs)
+	SSL_CERT_FILE=$(SSL_CERT_FILE) \
+	$(RUN) spacecraft-telemetry collect \
+		$(if $(CHANNEL_SET),--channel-set $(CHANNEL_SET),) \
+		$(if $(DURATION),--duration $(DURATION),)
 
 # ---------------------------------------------------------------------------
 # Preprocessing (Phase 10.5 — pandas + Ray)

@@ -228,6 +228,106 @@ gcloud run jobs execute mlflow-db-upgrade \
   --region $REGION --project $PROJECT_ID --wait
 ```
 
+## ISS Collector (Phase 12)
+
+The ISS Live telemetry collector runs as a long-lived Docker container on an always-on,
+non-preemptible `e2-small` GCE VM. It must be running for ~9–10 days before Phase 13
+(preprocessing + training) can start.
+
+### Build and push the collector image
+
+CI builds and pushes `collector:latest` automatically when collector-related
+files change on `main` (`.github/workflows/build-collector-image.yml`). You can
+also trigger a manual build via `workflow_dispatch` before launching the VM.
+
+To build locally (e.g. for a quick test before merging), use `--platform
+linux/amd64` — the e2-small COS VM is amd64; an M1 build without this flag
+produces arm64 and crashes with "exec format error".
+
+```bash
+export PROJECT_ID=your-project-id
+export REGION=us-central1
+
+docker build --platform linux/amd64 \
+  -f deploy/collector/Dockerfile \
+  -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest .
+
+docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest
+```
+
+**VM rollout is intentionally manual.** Restarting the VM mid-collection would
+punch a gap in the 9–10 day data window. After merging changes that affect the
+collector, wait for the CI build to finish, then restart the VM:
+```bash
+gcloud compute instances reset iss-collector \
+  --zone=${REGION}-a --project=${PROJECT_ID}
+```
+The startup-script pulls `:latest` and relaunches the container automatically.
+
+### Deploy the VM
+
+```bash
+# Provision the service account, IAM bindings, and GCE instance.
+# Run terraform apply in the infra/ directory (or target just the collector resources):
+terraform -chdir=infra apply \
+  -target=google_service_account.collector \
+  -target=google_storage_bucket_iam_member.collector_raw_writer \
+  -target=google_project_iam_member.collector_ar_reader \
+  -target=google_project_iam_member.collector_log_writer \
+  -target=google_compute_instance.collector \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+```
+
+The VM startup script automatically pulls and runs the collector container.
+
+### Verify collection is running
+
+```bash
+# SSH into the VM (may take 60s for startup-script to complete):
+gcloud compute ssh iss-collector --zone=${REGION}-a --project=${PROJECT_ID}
+
+# Inside the VM — check container logs:
+sudo docker logs collector -f
+# You should see: "collector.starting" and then "collector.subscribed" events.
+# Every 5 minutes: "collector_io.flushed" for each active channel.
+
+# Verify data is landing in GCS:
+gsutil ls gs://${PROJECT_ID}-raw-data/ISS/ticks/
+```
+
+### 1-hour local dry-run (before deploying)
+
+Validate the feed format and per-channel cadence locally before committing the VM:
+
+```bash
+spacecraft-telemetry collect --duration 3600
+# After 1 hour:
+python - <<'EOF'
+import pyarrow.parquet as pq, glob
+for p in glob.glob("data/raw/ISS/ticks/channel_id=S1000003/*.parquet"):
+    t = pq.read_table(p, partitioning=None)
+    print(f"{p}: {len(t)} rows, {t.schema}")
+EOF
+```
+
+Check the per-channel median tick interval in the logs. If most channels update faster
+than ~30 s, update `grid_interval_seconds: 30` and `window_size: 256` in
+`configs/local.yaml` and `configs/cloud.yaml` before starting Phase 13.
+
+### Teardown
+
+```bash
+terraform -chdir=infra destroy \
+  -target=google_compute_instance.collector \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+# The raw-data bucket and its contents are preserved — raw ticks are not auto-deleted.
+```
+
+**Cost:** e2-small ~$12/mo → ≈$4–5 for the 10-day collection window. Under the $50 alert
+threshold. Stop the VM once Phase 13 preprocessing is complete.
+
 ## Cost Guardrails
 
 **Budget alerts** are configured in Terraform at $50, $100, and $150. Alerts email

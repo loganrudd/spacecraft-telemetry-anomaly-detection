@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+collect = [
+    "lightstreamer-client-lib>=2.0",
+]
 inference = [
     "torch>=2.0",
 ]
@@ -84,5 +87,5 @@ plugins = ["pydantic.mypy"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pandas.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*"]
+module = ["pyarrow.*", "pandas.*", "mlflow.*", "evidently.*", "ray.*", "gcsfs.*", "fsspec.*", "upath.*", "lightstreamer.*"]
 ignore_missing_imports = true

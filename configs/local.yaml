@@ -8,6 +8,7 @@ data:
     - ESA-Mission1
     - ESA-Mission2
     - ESA-Mission3
+    - ISS
   sample_fraction: 1.0
   sample_channels: 100 # Missions 1, 2, and 3 have 76, 100, and 48 channels total respectively
 
@@ -83,6 +84,16 @@ drift:
   feature_drift_threshold: 0.10
   drift_alert_threshold: 0.30
   reference_profiles_dir: monitoring/reference_profiles
+
+collect:
+  lightstreamer_url: "https://push.lightstreamer.com"
+  adapter_set: "ISSLIVE"
+  channel_set: "validation"
+  raw_ticks_dir: "data/raw"
+  flush_interval_seconds: 3600.0
+  los_staleness_seconds: 60.0
+  grid_interval_seconds: 30
+  window_size: 256
 
 api:
   host: "127.0.0.1"

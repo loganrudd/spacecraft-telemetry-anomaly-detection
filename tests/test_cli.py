@@ -1148,3 +1148,91 @@ class TestDriftCommands:
             )
 
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+
+
+class TestCollectCommand:
+    def test_help_shows_options(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["collect", "--help"])
+        assert result.exit_code == 0
+        assert "--channel-set" in result.output
+        assert "--duration" in result.output
+        # --mission was removed (ISSLive is a single-mission feed)
+        assert "--mission" not in result.output
+
+    def test_collect_calls_collector_run(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_collector = MagicMock()
+        with patch(
+            "spacecraft_telemetry.ingest.collector.LightstreamerCollector",
+            return_value=mock_collector,
+        ):
+            result = runner.invoke(main, ["--env=local", "collect", "--duration=0"])
+
+        assert result.exit_code == 0, result.output
+        mock_collector.run.assert_called_once_with(seconds=0.0)
+
+    def test_channel_set_override_reaches_config(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--channel-set all propagates into the CollectorConfig passed to the ctor."""
+        import spacecraft_telemetry.ingest.collector as _mod
+
+        captured_configs: list[object] = []
+        orig_init = _mod.LightstreamerCollector.__init__
+
+        def _capture_init(self: object, config: object, dest_dir: object) -> None:
+            captured_configs.append(config)
+            orig_init(self, config, dest_dir)  # type: ignore[arg-type]
+
+        mock_run = MagicMock()
+        with (
+            patch.object(_mod.LightstreamerCollector, "__init__", _capture_init),
+            patch.object(_mod.LightstreamerCollector, "run", mock_run),
+        ):
+            result = runner.invoke(
+                main, ["--env=local", "collect", "--channel-set=all", "--duration=0"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured_configs, "LightstreamerCollector was not constructed"
+        assert captured_configs[0].channel_set == "all"  # type: ignore[union-attr]
+
+    def test_dest_dir_preserves_gcs_uri(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dest_dir passed to LightstreamerCollector must not mangle gs:// URIs.
+
+        pathlib.Path('gs://bucket/x') collapses the double-slash, causing UPath
+        to raise ValueError on the first flush. The CLI must pass the raw string.
+        """
+        monkeypatch.setenv(
+            "SPACECRAFT_COLLECT__RAW_TICKS_DIR", "gs://my-project-raw-data"
+        )
+
+        import spacecraft_telemetry.ingest.collector as _mod
+
+        captured_dest: list[str] = []
+        orig_init = _mod.LightstreamerCollector.__init__
+
+        def _capture_init(self: object, config: object, dest_dir: object) -> None:
+            captured_dest.append(str(dest_dir))
+            orig_init(self, config, dest_dir)  # type: ignore[arg-type]
+
+        mock_run = MagicMock()
+        with (
+            patch.object(_mod.LightstreamerCollector, "__init__", _capture_init),
+            patch.object(_mod.LightstreamerCollector, "run", mock_run),
+        ):
+            result = runner.invoke(main, ["--env=local", "collect", "--duration=0"])
+
+        assert result.exit_code == 0, result.output
+        assert captured_dest, "LightstreamerCollector was not constructed"
+        assert captured_dest[0].startswith("gs://"), (
+            f"gs:// URI mangled: {captured_dest[0]!r}"
+        )
