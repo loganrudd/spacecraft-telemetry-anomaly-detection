@@ -1,0 +1,77 @@
+name: Build collector image
+
+# Builds and pushes the ISS Live collector image when collector-related files
+# change on main, or on demand via workflow_dispatch (e.g. before VM launch).
+#
+# NO deploy step — the collector runs on an always-on GCE VM that pulls :latest
+# only at boot. Restarting the VM mid-collection would punch a gap in the 9-10
+# day data window, so rollout is intentionally manual (see docs/deployment.md).
+#
+# Path scope is narrow: only rebuild when something baked INTO the collector
+# image changes. src/spacecraft_telemetry/api/**, ray_fanout/**, model/** are
+# excluded — an API-only commit yields a functionally identical collector image.
+#
+# The image is built for linux/amd64 (the COS VM's architecture). Building
+# locally on M1 without --platform produces linux/arm64, which crashes on the
+# e2-small with "exec format error".
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/collector/Dockerfile"
+      - "src/spacecraft_telemetry/ingest/**"
+      - "src/spacecraft_telemetry/core/**"
+      - "src/spacecraft_telemetry/cli.py"
+      - "configs/**"
+      - "pyproject.toml"
+      - ".github/workflows/build-collector-image.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra image tag to apply (e.g. a release name). Leave blank for sha + latest only."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGION: us-central1
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+
+jobs:
+  build-collector:
+    name: Build and push collector image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push collector image
+        run: |
+          AR_REPO="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/spacecraft-telemetry"
+          IMAGE="${AR_REPO}/collector:${{ github.sha }}"
+          docker build \
+            --platform linux/amd64 \
+            -f deploy/collector/Dockerfile \
+            -t "${IMAGE}" \
+            -t "${AR_REPO}/collector:latest" \
+            .
+          docker push "${IMAGE}"
+          docker push "${AR_REPO}/collector:latest"
+          if [ -n "${{ inputs.tag }}" ]; then
+            docker tag "${IMAGE}" "${AR_REPO}/collector:${{ inputs.tag }}"
+            docker push "${AR_REPO}/collector:${{ inputs.tag }}"
+          fi
+          echo "Pushed: ${IMAGE}"

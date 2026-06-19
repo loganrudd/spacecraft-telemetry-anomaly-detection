@@ -236,15 +236,33 @@ non-preemptible `e2-small` GCE VM. It must be running for ~9–10 days before Ph
 
 ### Build and push the collector image
 
+CI builds and pushes `collector:latest` automatically when collector-related
+files change on `main` (`.github/workflows/build-collector-image.yml`). You can
+also trigger a manual build via `workflow_dispatch` before launching the VM.
+
+To build locally (e.g. for a quick test before merging), use `--platform
+linux/amd64` — the e2-small COS VM is amd64; an M1 build without this flag
+produces arm64 and crashes with "exec format error".
+
 ```bash
 export PROJECT_ID=your-project-id
 export REGION=us-central1
 
-docker build -f deploy/collector/Dockerfile \
+docker build --platform linux/amd64 \
+  -f deploy/collector/Dockerfile \
   -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest .
 
 docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest
 ```
+
+**VM rollout is intentionally manual.** Restarting the VM mid-collection would
+punch a gap in the 9–10 day data window. After merging changes that affect the
+collector, wait for the CI build to finish, then restart the VM:
+```bash
+gcloud compute instances reset iss-collector \
+  --zone=${REGION}-a --project=${PROJECT_ID}
+```
+The startup-script pulls `:latest` and relaunches the container automatically.
 
 ### Deploy the VM
 
