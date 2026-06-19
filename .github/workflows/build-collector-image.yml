@@ -19,6 +19,7 @@ on:
   push:
     branches:
       - main
+      - iss_ext
     paths:
       - "deploy/collector/Dockerfile"
       - "src/spacecraft_telemetry/ingest/**"
