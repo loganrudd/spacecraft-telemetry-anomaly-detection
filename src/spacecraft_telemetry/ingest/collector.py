@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import signal
 import threading
 import time
 from datetime import UTC, datetime
@@ -253,12 +254,26 @@ class _ISSSubscriptionListener:
 # Main collector
 # ---------------------------------------------------------------------------
 
+
+# Maximum rows retained per channel when GCS is unavailable. At ~2 s median
+# cadence and 28 channels this caps memory at roughly 6 hours of ticks per
+# channel (< 50 MB total) before we start dropping-oldest and logging an
+# overflow warning. Prevents OOM on the 2 GB e2-small during a prolonged
+# GCS outage.
+_MAX_BUFFERED_ROWS = 10_800  # ~6 h at 2 s cadence
+
+
 class LightstreamerCollector:
     """Long-running ISS Live telemetry collector.
 
     Opens one Lightstreamer MERGE session, subscribes to all items from
     ``subscription_items(config.channel_set)``, and flushes per-channel buffers
     to Parquet shards every ``config.flush_interval_seconds`` seconds.
+
+    On a transient flush error the tick rows are re-queued at the front of the
+    channel buffer (write-first / clear-on-success) so no data is silently
+    dropped. The buffer is capped at ``_MAX_BUFFERED_ROWS`` per channel to bound
+    memory during prolonged GCS outages.
 
     Args:
         config: ``CollectorConfig`` (from ``Settings.collect``).
@@ -303,6 +318,12 @@ class LightstreamerCollector:
                 "Install it with: pip install lightstreamer-client-lib"
             ) from exc
 
+        # SIGTERM (docker stop / VM shutdown) must trigger graceful shutdown so
+        # the finally-block final-flush runs. signal.signal only works on the
+        # main thread, which is where the CLI invokes run().
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, lambda _sig, _frame: self.stop())
+
         client = LightstreamerClient(
             self._config.lightstreamer_url,
             self._config.adapter_set,
@@ -328,6 +349,7 @@ class LightstreamerCollector:
         except KeyboardInterrupt:
             pass
         finally:
+            signal.signal(signal.SIGTERM, original_sigterm)
             log.info("collector.stopping")
             client.unsubscribe(sub)
             client.disconnect()
@@ -353,7 +375,13 @@ class LightstreamerCollector:
             self._listener.check_staleness(datetime.now(UTC))
 
     def _flush_all(self, *, final: bool) -> None:
-        """Drain all non-empty buffers to Parquet shards."""
+        """Drain all non-empty buffers to Parquet shards.
+
+        On write failure, rows are re-queued at the front of the channel buffer
+        (write-first / clear-on-success). The buffer is capped at
+        ``_MAX_BUFFERED_ROWS`` per channel to prevent OOM during prolonged
+        GCS outages.
+        """
         now = datetime.now(UTC)
         for channel_id in self._items:
             with self._lock:
@@ -368,6 +396,18 @@ class LightstreamerCollector:
                 log.exception(
                     "collector.flush_error", channel_id=channel_id, rows=len(rows)
                 )
+                # Re-queue: prepend the failed rows so the next flush retries.
+                with self._lock:
+                    merged = rows + self._buffers[channel_id]
+                    if len(merged) > _MAX_BUFFERED_ROWS:
+                        dropped = len(merged) - _MAX_BUFFERED_ROWS
+                        merged = merged[-_MAX_BUFFERED_ROWS:]
+                        log.warning(
+                            "collector.buffer_overflow",
+                            channel_id=channel_id,
+                            dropped_rows=dropped,
+                        )
+                    self._buffers[channel_id] = merged
 
         if final:
             log.info("collector.final_flush_done")
