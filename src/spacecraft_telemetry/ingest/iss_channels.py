@@ -24,21 +24,22 @@ class ChannelMeta(NamedTuple):
 
 
 # ---------------------------------------------------------------------------
-# Telemetry channels (26 PUIs, 4 subsystems)
+# Telemetry channels (18 PUIs, 4 subsystems)
 # ---------------------------------------------------------------------------
 # Subsystem names match the existing HPO grouping convention.
 # SARJ angles and battery SOC are intentionally excluded (see iss.md).
+#
+# Narrowed from the original 26 to 18 after a 22h (~14-orbit) dynamic-range
+# analysis of the live feed (2026-06-20, scripts/analyze_iss_channels.py).
+# Dropped: SA current channels (dead — never publish live), TRRJ positions and
+# CMG wheel speeds (flat — no orbital structure). See iss.md "Removed channels".
 
 ISS_CHANNELS: dict[str, ChannelMeta] = {
-    # -- power: PV voltage + current (orbital charge/discharge cycle) ----------
+    # -- power: PV voltage (orbital charge/discharge cycle) --------------------
     "P4000001": ChannelMeta("Solar Array 2A Voltage", "V", "power"),
-    "P4000002": ChannelMeta("Solar Array 2A Current", "A", "power"),
     "S4000001": ChannelMeta("Solar Array 1A Voltage", "V", "power"),
-    "S4000002": ChannelMeta("Solar Array 1A Current", "A", "power"),
     "P6000001": ChannelMeta("Solar Array 4B Voltage", "V", "power"),
-    "P6000002": ChannelMeta("Solar Array 4B Current", "A", "power"),
     "S6000001": ChannelMeta("Solar Array 3B Voltage", "V", "power"),
-    "S6000002": ChannelMeta("Solar Array 3B Current", "A", "power"),
     # -- solar_array: Beta Gimbal Assembly pointing angles (smooth ramps) ------
     "P4000007": ChannelMeta("BGA 2A Position", "°", "solar_array"),
     "P4000008": ChannelMeta("BGA 4A Position", "°", "solar_array"),
@@ -48,18 +49,14 @@ ISS_CHANNELS: dict[str, ChannelMeta] = {
     "S4000008": ChannelMeta("BGA 3A Position", "°", "solar_array"),
     "S6000007": ChannelMeta("BGA 3B Position", "°", "solar_array"),
     "S6000008": ChannelMeta("BGA 1B Position", "°", "solar_array"),
-    # -- thermal: Coolant loop temps + Thermal Radiator Rotary Joint positions -
+    # -- thermal: Coolant loop out temps --------------------------------------
     "S1000003": ChannelMeta("Loop A (Stbd) PM Out Temp", "°C", "thermal"),
     "P1000003": ChannelMeta("Loop B (Port) PM Out Temp", "°C", "thermal"),
-    "S0000001": ChannelMeta("Stbd TRRJ Position", "°", "thermal"),
-    "S0000002": ChannelMeta("Port TRRJ Position", "°", "thermal"),
-    # -- attitude: Station orientation + CMG wheel speeds ---------------------
+    # -- attitude: Station orientation (LVLH quaternion state-vector) ----------
     "USLAB000018": ChannelMeta("LVLH Quaternion 0", "—", "attitude"),
     "USLAB000019": ChannelMeta("LVLH Quaternion 1", "—", "attitude"),
     "USLAB000020": ChannelMeta("LVLH Quaternion 2", "—", "attitude"),
     "USLAB000021": ChannelMeta("LVLH Quaternion 3", "—", "attitude"),
-    "Z1000009": ChannelMeta("CMG 1 Wheel Speed", "rpm", "attitude"),
-    "Z1000010": ChannelMeta("CMG 2 Wheel Speed", "rpm", "attitude"),
 }
 
 # ---------------------------------------------------------------------------

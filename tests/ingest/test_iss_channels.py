@@ -12,7 +12,7 @@ from spacecraft_telemetry.ingest.iss_channels import (
 )
 
 _EXPECTED_SUBSYSTEMS = {"power", "solar_array", "thermal", "attitude"}
-_EXPECTED_COUNT = 26
+_EXPECTED_COUNT = 18
 
 
 def test_channel_count() -> None:
@@ -114,7 +114,7 @@ def test_channel_meta_is_namedtuple() -> None:
 def test_subsystem_counts() -> None:
     from collections import Counter
     counts = Counter(m.subsystem for m in ISS_CHANNELS.values())
-    assert counts["power"] == 8
+    assert counts["power"] == 4         # 4 voltages (currents dropped — dead)
     assert counts["solar_array"] == 8
-    assert counts["thermal"] == 4
-    assert counts["attitude"] == 6
+    assert counts["thermal"] == 2       # 2 coolant temps (TRRJ dropped — flat)
+    assert counts["attitude"] == 4      # 4 quaternions (CMG dropped — flat)
