@@ -6,6 +6,12 @@ Hive-partitioned layout:
 
 This layout is consumed by model/dataset.py, ray_fanout/runner.py, and
 evidently_monitoring/reference.py — none of those files change.
+
+ISS functions
+-------------
+read_iss_ticks      — concatenate hourly tick shards for one channel
+discover_iss_channels — list telemetry PUIs available in the raw-tick archive
+read_all_iss_ticks_for_los — load timestamps from all channels for LOS detection
 """
 
 from __future__ import annotations
@@ -152,3 +158,129 @@ def write_series(df: pd.DataFrame, output_path: UPath) -> None:
         channel_id=channel_id,
         rows=len(out_df),
     )
+
+
+# ---------------------------------------------------------------------------
+# ISS raw-tick read functions
+# ---------------------------------------------------------------------------
+
+
+def read_iss_ticks(
+    raw_ticks_dir: str | UPath,
+    channel_id: str,
+) -> pd.DataFrame:
+    """Read all hourly tick shards for one ISS channel and return a single DataFrame.
+
+    The Phase 12 collector writes shards to:
+        {raw_ticks_dir}/ISS/ticks/channel_id={channel_id}/{YYYYMMDDTHHMMSS}.parquet
+
+    Shard filenames are lexicographically ordered by timestamp so glob + sort
+    gives chronological order without parsing the filename.
+
+    Args:
+        raw_ticks_dir: Root directory for raw tick data (local path or gs:// URI).
+        channel_id:    ISS PUI (e.g. "S1000003", "USLAB000018").
+
+    Returns:
+        DataFrame matching RAW_TICK_SCHEMA columns:
+            telemetry_timestamp  datetime64[us, UTC]
+            value                float32
+            aos_timestamp        float64 (nullable)
+        Rows are sorted by telemetry_timestamp.
+
+    Raises:
+        FileNotFoundError: If the channel directory does not exist or contains
+                           no Parquet shards.
+    """
+    ticks_dir = to_upath(raw_ticks_dir) / "ISS" / "ticks" / f"channel_id={channel_id}"
+    if not ticks_dir.exists():
+        raise FileNotFoundError(f"ISS tick directory not found: {ticks_dir}")
+
+    shards = sorted(ticks_dir.glob("*.parquet"))
+    if not shards:
+        raise FileNotFoundError(f"No Parquet shards in {ticks_dir}")
+
+    # partitioning=None prevents PyArrow 18+ from injecting a channel_id column
+    # from the Hive directory name, which would create a duplicate column conflict.
+    tables = [pq.read_table(str(s), partitioning=None) for s in shards]
+    df = pa.concat_tables(tables).to_pandas()
+    df = df.sort_values("telemetry_timestamp").reset_index(drop=True)
+
+    log.info(
+        "read_iss_ticks",
+        channel_id=channel_id,
+        n_shards=len(shards),
+        rows=len(df),
+    )
+    return df
+
+
+def discover_iss_channels(
+    raw_ticks_dir: str | UPath,
+    exclude: list[str] | None = None,
+) -> list[str]:
+    """List ISS telemetry channel IDs available in the raw-tick archive.
+
+    Globs for ``channel_id=*`` directories under
+    ``{raw_ticks_dir}/ISS/ticks/`` and extracts the PUI from each directory
+    name.  Context items (TIME_000001, USLAB000086) are excluded by default
+    because they are not telemetry channels and must not be preprocessed.
+
+    Args:
+        raw_ticks_dir: Root directory for raw tick data.
+        exclude:       Channel IDs to exclude.  Defaults to CONTEXT_ITEMS
+                       from ``ingest.iss_channels``.
+
+    Returns:
+        Sorted list of channel IDs (PUIs).
+    """
+    from spacecraft_telemetry.ingest.iss_channels import CONTEXT_ITEMS
+
+    if exclude is None:
+        exclude = CONTEXT_ITEMS
+
+    ticks_root = to_upath(raw_ticks_dir) / "ISS" / "ticks"
+    channel_dirs = sorted(ticks_root.glob("channel_id=*"))
+    channels = [d.name.removeprefix("channel_id=") for d in channel_dirs]
+    channels = [c for c in channels if c not in exclude]
+
+    log.info("discover_iss_channels", n_found=len(channels), excluded=exclude)
+    return channels
+
+
+def read_all_iss_ticks_for_los(
+    raw_ticks_dir: str | UPath,
+    channel_ids: list[str],
+) -> pd.DataFrame:
+    """Load tick timestamps from all channels for cross-channel LOS detection.
+
+    Reads only the ``telemetry_timestamp`` and ``channel_id`` columns from
+    each channel's shards — ``value`` and ``aos_timestamp`` are dropped
+    immediately to minimise memory overhead.  The result is the minimal
+    DataFrame required by ``compute_los_mask``.
+
+    Args:
+        raw_ticks_dir: Root directory for raw tick data.
+        channel_ids:   Telemetry channel IDs to include (no context items).
+
+    Returns:
+        DataFrame with columns [telemetry_timestamp (UTC), channel_id (str)].
+    """
+    frames: list[pd.DataFrame] = []
+    for ch in channel_ids:
+        ticks = read_iss_ticks(raw_ticks_dir, ch)
+        # Keep only the two columns needed for LOS detection.
+        mini = ticks[["telemetry_timestamp"]].copy()
+        mini["channel_id"] = ch
+        frames.append(mini)
+
+    if not frames:
+        return pd.DataFrame(columns=["telemetry_timestamp", "channel_id"])
+
+    result = pd.concat(frames, ignore_index=True)
+    log.info(
+        "read_all_iss_ticks_for_los",
+        n_channels=len(channel_ids),
+        total_rows=len(result),
+    )
+    return result
