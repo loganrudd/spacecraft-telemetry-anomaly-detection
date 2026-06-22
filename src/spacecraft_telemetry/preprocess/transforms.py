@@ -319,7 +319,9 @@ def compute_los_mask(
     freq = f"{grid_interval_seconds}s"
 
     grid_start = ts.min().floor(freq)
-    grid_end = ts.max().ceil(freq)
+    # floor(max_ts) gives the start of the last bucket that actually contains data.
+    # ceil would add an empty terminal bucket that is always marked as LOS.
+    grid_end = ts.max().floor(freq)
     grid_index = pd.date_range(start=grid_start, end=grid_end, freq=freq, tz="UTC")
 
     # Floor each tick timestamp to its bucket.
@@ -374,8 +376,14 @@ def augment_with_los(
     df = resampled_df.copy()
     los_df = los_mask.rename("is_los").reset_index()
     los_df.columns = pd.Index(["telemetry_timestamp", "is_los"])
+    # Cast to match resampled_df dtype to avoid merge failures when the mask
+    # index has ns precision (pd.DatetimeIndex default) and the resampled
+    # DataFrame has us precision (from resample_to_grid).
+    los_df["telemetry_timestamp"] = los_df["telemetry_timestamp"].astype(
+        df["telemetry_timestamp"].dtype
+    )
     df = df.merge(los_df, on="telemetry_timestamp", how="left")
-    df["is_los"] = df["is_los"].fillna(False).astype(bool)
+    df["is_los"] = df["is_los"].where(df["is_los"].notna(), other=False).astype(bool)
 
     log.info(
         "augment_with_los",
