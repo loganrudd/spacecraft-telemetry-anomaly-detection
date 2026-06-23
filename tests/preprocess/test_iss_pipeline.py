@@ -399,13 +399,8 @@ class TestRunIssPreprocessingParallel:
     """
 
     def test_parallel_matches_sequential(
-        self, settings_iss: Settings, raw_root: Path
+        self, settings_iss: Settings, raw_root: Path, ray_local: None
     ) -> None:
-        import ray
-
-        if not ray.is_initialized():
-            ray.init(num_cpus=2, ignore_reinit_error=True)
-
         seq_summary = run_iss_preprocessing(settings_iss, parallel=False)
 
         # parallel run needs a fresh output dir to avoid collision.
