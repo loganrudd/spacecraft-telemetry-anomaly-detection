@@ -64,3 +64,32 @@ SERIES_SCHEMA_COLS = [
     "segment_id",
     "is_anomaly",
 ]
+
+# ---------------------------------------------------------------------------
+# ISS per-timestep series — same layout as SERIES_FILE_SCHEMA plus is_los.
+# ---------------------------------------------------------------------------
+# is_los is written for ISS only and consumed by the Phase 17 live pump to
+# trigger replay fallback on Loss-of-Signal. ESA downstream readers project
+# specific columns (telemetry_timestamp, value_normalized, segment_id,
+# is_anomaly) and silently ignore the extra column.
+
+ISS_SERIES_FILE_SCHEMA = pa.schema(
+    [
+        pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("value_normalized", pa.float32(), nullable=False),
+        pa.field("segment_id", pa.int32(), nullable=False),
+        pa.field("is_anomaly", pa.bool_(), nullable=False),
+        pa.field("is_los", pa.bool_(), nullable=False),
+    ]
+)
+
+# Full column list for the in-memory ISS series DataFrame (before writing).
+ISS_SERIES_SCHEMA_COLS = [
+    "telemetry_timestamp",
+    "value_normalized",
+    "channel_id",
+    "mission_id",
+    "segment_id",
+    "is_anomaly",
+    "is_los",
+]

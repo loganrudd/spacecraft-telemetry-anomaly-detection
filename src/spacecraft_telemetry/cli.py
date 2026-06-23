@@ -336,7 +336,15 @@ def preprocess_run(
     )
 
     parallel = not no_parallel
-    if parallel:
+    if mission == "ISS":
+        from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing
+
+        if parallel:
+            with _ray_session(settings):
+                summary = run_iss_preprocessing(settings, channels=channels, parallel=True)
+        else:
+            summary = run_iss_preprocessing(settings, channels=channels, parallel=False)
+    elif parallel:
         with _ray_session(settings):
             summary = run_preprocessing(
                 settings, mission, channels=channels, parallel=True
