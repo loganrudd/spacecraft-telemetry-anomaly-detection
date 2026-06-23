@@ -150,6 +150,15 @@ class TestComputeLosMask:
         assert mask.dtype == bool
         assert not mask.any()
 
+    def test_last_bucket_not_los_when_covered(self) -> None:
+        # Regression for the ceil→floor fix: using ceil(max_ts) would create a
+        # spurious empty terminal bucket that is always marked LOS.  floor(max_ts)
+        # gives the start of the last bucket that actually contains data, so no
+        # empty terminal bucket is created.
+        all_ticks = _make_all_ticks_df(["S1000003"], n_per_channel=60, interval_s=2.0)
+        mask = compute_los_mask(all_ticks, grid_interval_seconds=30)
+        assert not mask.iloc[-1], "Last bucket must not be LOS when it contains ticks"
+
     def test_silent_bucket_marked_los(self) -> None:
         # Build ticks with a 91s gap so the middle 30s bucket has no ticks.
         base = pd.Timestamp("2026-06-01T00:00:00Z")
@@ -168,6 +177,7 @@ class TestComputeLosMask:
     def test_smear_expands_one_bucket_each_side(self) -> None:
         # Single completely silent 30s bucket in the middle of coverage.
         # After smear: the silent bucket + its two neighbours should all be True.
+        # Grid: [0s, 30s, 60s, 90s] with only the 30s bucket empty.
         base = pd.Timestamp("2026-06-01T00:00:00Z")
         # Ticks only before 30s and after 61s (the 30-60s bucket is empty).
         before = [base + pd.Timedelta(seconds=i * 2) for i in range(10)]  # 0-18s
@@ -179,8 +189,19 @@ class TestComputeLosMask:
             }
         )
         mask = compute_los_mask(df, grid_interval_seconds=30)
-        # The silent bucket at 30s and its neighbours (0s and 60s) should all be True.
-        assert mask.sum() >= 3
+        # Bucket 0s: neighbour of silent 30s bucket → True (smear left)
+        # Bucket 30s: silent → True (raw LOS)
+        # Bucket 60s: neighbour of silent 30s bucket → True (smear right)
+        # Bucket 90s: has ticks, not adjacent to LOS → False
+        t0 = base
+        t30 = base + pd.Timedelta(seconds=30)
+        t60 = base + pd.Timedelta(seconds=60)
+        t90 = base + pd.Timedelta(seconds=90)
+        assert mask[t0], "0s bucket must be True (smear left of silent 30s)"
+        assert mask[t30], "30s bucket must be True (silent — raw LOS)"
+        assert mask[t60], "60s bucket must be True (smear right of silent 30s)"
+        if t90 in mask.index:
+            assert not mask[t90], "90s bucket must be False (covered, not adjacent)"
 
     def test_returns_bool_series(self) -> None:
         all_ticks = _make_all_ticks_df(["S1000003"], n_per_channel=30)

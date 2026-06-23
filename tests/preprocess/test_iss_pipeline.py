@@ -208,6 +208,40 @@ class TestRunIssPreprocessingE2E:
         assert "is_los" in df.columns
         assert df["is_los"].dtype == bool
 
+    def test_is_los_true_over_gap_false_elsewhere(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        # The simultaneous 91s gap → some rows should be is_los==True (over the
+        # LOS window + smear) and the majority should be False.
+        run_iss_preprocessing(settings_iss, parallel=False)
+        out_dir = Path(settings_iss.preprocess.processed_data_dir)
+        train = _read_part(out_dir, "train", "S1000003")
+        test = _read_part(out_dir, "test", "S1000003")
+        df = pd.concat([train, test], ignore_index=True)
+        assert df["is_los"].any(), "Expected some is_los==True rows over the gap"
+        assert not df["is_los"].all(), "Expected some is_los==False rows outside the gap"
+
+    def test_segment_boundary_at_first_los_row(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        # The first is_los==True row must be in a different segment than the
+        # row immediately before it, confirming the LOS bump (not detect_gaps)
+        # created the boundary.
+        run_iss_preprocessing(settings_iss, parallel=False)
+        out_dir = Path(settings_iss.preprocess.processed_data_dir)
+        train = _read_part(out_dir, "train", "S1000003")
+        test = _read_part(out_dir, "test", "S1000003")
+        df = pd.concat([train, test], ignore_index=True).sort_values("telemetry_timestamp")
+        los_rows = df[df["is_los"]]
+        if los_rows.empty:
+            return  # vacuously satisfied if no LOS
+        first_los_pos = df.index.get_loc(los_rows.index[0])
+        if first_los_pos == 0:
+            return  # no preceding row to compare
+        pre_seg = df.iloc[first_los_pos - 1]["segment_id"]
+        los_seg = df.iloc[first_los_pos]["segment_id"]
+        assert los_seg != pre_seg, "segment_id must change at the first is_los==True row"
+
     def test_is_anomaly_all_false(
         self, settings_iss: Settings, raw_root: Path
     ) -> None:
@@ -349,3 +383,52 @@ class TestRunIssPreprocessingE2E:
         )
         with pytest.raises(FileNotFoundError):
             run_iss_preprocessing(s, parallel=False)
+
+
+# ---------------------------------------------------------------------------
+# Slow tests (parallel Ray path) — excluded from default CI run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestRunIssPreprocessingParallel:
+    """Verifies the parallel Ray path produces the same output as sequential.
+
+    Covers _run_iss_parallel, ray.put(los_mask), and settings absolutization.
+    Run explicitly: pytest tests/preprocess/test_iss_pipeline.py -m slow
+    """
+
+    def test_parallel_matches_sequential(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        import ray
+
+        if not ray.is_initialized():
+            ray.init(num_cpus=2, ignore_reinit_error=True)
+
+        seq_summary = run_iss_preprocessing(settings_iss, parallel=False)
+
+        # parallel run needs a fresh output dir to avoid collision.
+        from pathlib import Path as _Path
+
+        par_out = _Path(settings_iss.preprocess.processed_data_dir).parent / "processed_par"
+        par_out.mkdir()
+        par_settings = settings_iss.model_copy(
+            update={
+                "preprocess": settings_iss.preprocess.model_copy(
+                    update={"processed_data_dir": str(par_out)}
+                )
+            }
+        )
+        par_summary = run_iss_preprocessing(par_settings, parallel=True)
+
+        assert seq_summary["channels_processed"] == par_summary["channels_processed"]
+        assert seq_summary["train_rows"] == par_summary["train_rows"]
+        assert seq_summary["test_rows"] == par_summary["test_rows"]
+
+        # Output files must exist for each channel in both runs.
+        seq_dir = _Path(settings_iss.preprocess.processed_data_dir)
+        for ch in ["S1000003", "P4000001", "USLAB000018"]:
+            for split in ["train", "test"]:
+                assert len(_find_parts(seq_dir, split, ch)) == 1
+                assert len(_find_parts(par_out, split, ch)) == 1

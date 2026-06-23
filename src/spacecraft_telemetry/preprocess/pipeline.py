@@ -676,6 +676,8 @@ def _run_iss_parallel(
     abs_train_out = str(absolutize_if_local(train_out))
     abs_test_out = str(absolutize_if_local(test_out))
 
+    # ISS channels are uniformly small (30s-grid, ~14k rows/channel) so the
+    # ESA large-channel num_cpus=4 packing logic is intentionally omitted here.
     futures = [
         _preprocess_iss_channel_remote.remote(
             settings_ref, channel, abs_train_out, abs_test_out, los_mask_ref
