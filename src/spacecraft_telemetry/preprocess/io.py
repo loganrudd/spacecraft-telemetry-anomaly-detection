@@ -242,7 +242,7 @@ def discover_iss_channels(
     Returns:
         Sorted list of channel IDs (PUIs).
     """
-    from spacecraft_telemetry.ingest.iss_channels import CONTEXT_ITEMS
+    from spacecraft_telemetry.ingest.iss_channels import CONTEXT_ITEMS, ISS_CHANNELS
 
     if exclude is None:
         exclude = CONTEXT_ITEMS
@@ -250,7 +250,9 @@ def discover_iss_channels(
     ticks_root = to_upath(raw_ticks_dir) / "ISS" / "ticks"
     channel_dirs = sorted(ticks_root.glob("channel_id=*"))
     channels = [d.name.removeprefix("channel_id=") for d in channel_dirs]
-    channels = [c for c in channels if c not in exclude]
+    # Intersect with the curated channel map so stale/dead PUIs left in old
+    # archives are never preprocessed (mirrors the collector's subscription_items).
+    channels = [c for c in channels if c not in exclude and c in ISS_CHANNELS]
 
     log.info("discover_iss_channels", n_found=len(channels), excluded=exclude)
     return channels

@@ -160,6 +160,15 @@ class TestDiscoverIssChannels:
         channels = discover_iss_channels(tmp_path)
         assert channels == []
 
+    def test_non_curated_dir_excluded(self, tmp_path: Path) -> None:
+        # P4000099 is not in ISS_CHANNELS; it should be silently dropped even
+        # if a directory for it exists in the archive (stale/dead PUI).
+        for ch in ["S1000003", "P4000099"]:
+            _write_channel_dir(tmp_path, ch, n_shards=1)
+        channels = discover_iss_channels(tmp_path)
+        assert "P4000099" not in channels
+        assert "S1000003" in channels
+
 
 # ---------------------------------------------------------------------------
 # TestReadAllIssTicksForLos
