@@ -117,23 +117,31 @@ def read_labels(path: UPath) -> pd.DataFrame:
     return df[["anomaly_id", "channel_id", "start_time", "end_time"]]
 
 
-def write_series(df: pd.DataFrame, output_path: UPath) -> None:
+def write_series(
+    df: pd.DataFrame,
+    output_path: UPath,
+    *,
+    schema: pa.Schema = SERIES_FILE_SCHEMA,
+) -> None:
     """Write per-timestep series data to a Hive partition directory.
 
     Each call writes exactly one channel's data. The partition path is derived
     from the mission_id and channel_id values already present in the DataFrame:
         {output_path}/mission_id={M}/channel_id={C}/part.parquet
 
-    The output file contains only the four non-partition columns defined in
-    SERIES_FILE_SCHEMA (telemetry_timestamp, value_normalized, segment_id,
-    is_anomaly). Partition column values are encoded in the directory names,
-    not stored in the file — matching the convention used by PyArrow's
-    read_table and the downstream model/dataset.py reader.
+    The output file contains only the non-partition columns defined in
+    ``schema`` (default: SERIES_FILE_SCHEMA — 4 columns for ESA; pass
+    ISS_SERIES_FILE_SCHEMA for the 5-column ISS output that adds is_los).
+    Partition column values are encoded in the directory names, not stored in
+    the file — matching the convention used by PyArrow's read_table and the
+    downstream model/dataset.py reader.
 
     Args:
-        df:          DataFrame with all SERIES_SCHEMA_COLS present.
+        df:          DataFrame with all schema column names present.
         output_path: Root output directory for this split
                      (e.g. data/processed/ESA-Mission1/train/).
+        schema:      PyArrow schema for the output file.  Columns are selected
+                     from ``df`` using ``schema.names``.
     """
     mission_id = str(df["mission_id"].iloc[0])
     channel_id = str(df["channel_id"].iloc[0])
@@ -143,12 +151,12 @@ def write_series(df: pd.DataFrame, output_path: UPath) -> None:
         partition_dir.mkdir(parents=True, exist_ok=True)
 
     out_df = (
-        df[["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"]]
+        df[schema.names]
         .sort_values("telemetry_timestamp")
         .reset_index(drop=True)
     )
 
-    table = pa.Table.from_pandas(out_df, schema=SERIES_FILE_SCHEMA, preserve_index=False)
+    table = pa.Table.from_pandas(out_df, schema=schema, preserve_index=False)
     pq.write_table(table, str(partition_dir / "part.parquet"))
 
     log.info(

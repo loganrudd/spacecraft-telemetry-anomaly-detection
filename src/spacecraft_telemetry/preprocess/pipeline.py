@@ -408,46 +408,6 @@ def _run_parallel(
 # ---------------------------------------------------------------------------
 
 
-def write_iss_series(df: pd.DataFrame, output_path: UPath) -> None:
-    """Write ISS per-timestep series data to a Hive partition directory.
-
-    Identical to write_series() but uses ISS_SERIES_FILE_SCHEMA (5-column:
-    adds is_los) instead of SERIES_FILE_SCHEMA (4-column).  The partition
-    layout is the same:
-        {output_path}/mission_id=ISS/channel_id={C}/part.parquet
-
-    Downstream ESA readers use column projection and silently ignore is_los.
-    """
-    mission_id = str(df["mission_id"].iloc[0])
-    channel_id = str(df["channel_id"].iloc[0])
-
-    partition_dir = (
-        to_upath(output_path) / f"mission_id={mission_id}" / f"channel_id={channel_id}"
-    )
-    if not str(partition_dir).startswith("gs://"):
-        partition_dir.mkdir(parents=True, exist_ok=True)
-
-    out_df = (
-        df[["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly", "is_los"]]
-        .sort_values("telemetry_timestamp")
-        .reset_index(drop=True)
-    )
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    table = pa.Table.from_pandas(out_df, schema=ISS_SERIES_FILE_SCHEMA, preserve_index=False)
-    pq.write_table(table, str(partition_dir / "part.parquet"))
-
-    log.info(
-        "write_iss_series",
-        output_path=str(output_path),
-        mission_id=mission_id,
-        channel_id=channel_id,
-        rows=len(out_df),
-    )
-
-
 def _preprocess_iss_channel(
     settings: Settings,
     channel: str,
@@ -460,7 +420,7 @@ def _preprocess_iss_channel(
     Per-channel steps:
         read_iss_ticks → resample_to_grid → augment_with_los →
         handle_nulls → detect_gaps → normalize → label_timesteps (all-False) →
-        temporal_train_test_split → write_iss_series
+        temporal_train_test_split → write_series(schema=ISS_SERIES_FILE_SCHEMA)
 
     Returns a result dict for the caller to accumulate into the pipeline summary.
     """
@@ -515,9 +475,9 @@ def _preprocess_iss_channel(
     train_count = len(train_series)
     test_count = len(test_series)
 
-    write_iss_series(train_series, train_out)
+    write_series(train_series, train_out, schema=ISS_SERIES_FILE_SCHEMA)
     del train_series
-    write_iss_series(test_series, test_out)
+    write_series(test_series, test_out, schema=ISS_SERIES_FILE_SCHEMA)
 
     return {
         "channel_id": channel,
