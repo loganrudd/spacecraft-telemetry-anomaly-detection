@@ -230,6 +230,36 @@ class TestRunIssPreprocessingE2E:
         df = pd.concat([train, test], ignore_index=True)
         assert df["segment_id"].max() >= 1, "Expected at least 2 segments after LOS"
 
+    def test_segment_id_increments_at_los_onset_and_recovery(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        # XOR semantics: segment_id must change at both the first is_los==True row
+        # (onset) and the first row after recovery (is_los==False after True).
+        # This verifies the bump is not onset-only, which would leave LOS rows in
+        # the same segment as the post-recovery nominal rows.
+        run_iss_preprocessing(settings_iss, parallel=False)
+        out_dir = Path(settings_iss.preprocess.processed_data_dir)
+        train = _read_part(out_dir, "train", "S1000003")
+        test = _read_part(out_dir, "test", "S1000003")
+        df = pd.concat([train, test], ignore_index=True).sort_values("telemetry_timestamp")
+
+        # Locate the LOS region and check segments on each side.
+        los_rows = df[df["is_los"]]
+        if los_rows.empty:
+            return  # no LOS in output → test is vacuously satisfied
+        first_los_idx = los_rows.index[0]
+        last_los_idx = los_rows.index[-1]
+        pre_los_seg = (
+            df.loc[:first_los_idx - 1, "segment_id"].iloc[-1] if first_los_idx > 0 else None
+        )
+        los_seg = df.loc[first_los_idx, "segment_id"]
+        post_los_rows = df.loc[last_los_idx + 1:]
+        if pre_los_seg is not None:
+            assert los_seg != pre_los_seg, "segment_id must change at LOS onset"
+        if not post_los_rows.empty:
+            post_los_seg = post_los_rows["segment_id"].iloc[0]
+            assert post_los_seg != los_seg, "segment_id must change at LOS recovery"
+
     def test_context_items_not_in_output(
         self, settings_iss: Settings, raw_root: Path
     ) -> None:

@@ -445,8 +445,11 @@ def _preprocess_iss_channel(
     # LOS transitions must create new segments so the LSTM never creates windows
     # that span a LOS boundary.  detect_gaps doesn't fire on the regular 30s grid
     # (ffill fills the gap in ticks), so we bump segment_id explicitly here.
+    # XOR isolates each LOS run into its own segment: segment_id increments at
+    # both the onset (False→True) and the recovery (True→False), so no window
+    # straddles either boundary.
     if "is_los" in gapped.columns:
-        los_transition = gapped["is_los"] & ~gapped["is_los"].shift(1, fill_value=False)
+        los_transition = gapped["is_los"] != gapped["is_los"].shift(1, fill_value=False)
         gapped["segment_id"] = (
             gapped["segment_id"] + los_transition.cumsum().astype("int32")
         )
