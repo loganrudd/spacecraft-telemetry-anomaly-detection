@@ -119,6 +119,11 @@ class TestReadIssTicks:
         df = read_iss_ticks(tmp_path, "S1000003")
         assert "channel_id" not in df.columns
 
+    def test_columns_projection(self, tmp_path: Path) -> None:
+        _write_channel_dir(tmp_path, "S1000003", n_shards=1)
+        df = read_iss_ticks(tmp_path, "S1000003", columns=["telemetry_timestamp"])
+        assert list(df.columns) == ["telemetry_timestamp"]
+
 
 # ---------------------------------------------------------------------------
 # TestDiscoverIssChannels

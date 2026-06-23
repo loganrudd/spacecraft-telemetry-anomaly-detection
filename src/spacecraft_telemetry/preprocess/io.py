@@ -176,6 +176,7 @@ def write_series(
 def read_iss_ticks(
     raw_ticks_dir: str | UPath,
     channel_id: str,
+    columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """Read all hourly tick shards for one ISS channel and return a single DataFrame.
 
@@ -188,9 +189,12 @@ def read_iss_ticks(
     Args:
         raw_ticks_dir: Root directory for raw tick data (local path or gs:// URI).
         channel_id:    ISS PUI (e.g. "S1000003", "USLAB000018").
+        columns:       Column subset to read (passed to pq.read_table).  None
+                       reads all columns.  Pass ["telemetry_timestamp"] in the
+                       LOS pre-pass to skip deserialising value/aos_timestamp.
 
     Returns:
-        DataFrame matching RAW_TICK_SCHEMA columns:
+        DataFrame with the requested columns (default: all RAW_TICK_SCHEMA cols):
             telemetry_timestamp  datetime64[us, UTC]
             value                float32
             aos_timestamp        float64 (nullable)
@@ -210,7 +214,7 @@ def read_iss_ticks(
 
     # partitioning=None prevents PyArrow 18+ from injecting a channel_id column
     # from the Hive directory name, which would create a duplicate column conflict.
-    tables = [pq.read_table(str(s), partitioning=None) for s in shards]
+    tables = [pq.read_table(str(s), columns=columns, partitioning=None) for s in shards]
     df = pa.concat_tables(tables).to_pandas()
     df = df.sort_values("telemetry_timestamp").reset_index(drop=True)
 
@@ -264,10 +268,10 @@ def read_all_iss_ticks_for_los(
 ) -> pd.DataFrame:
     """Load tick timestamps from all channels for cross-channel LOS detection.
 
-    Reads only the ``telemetry_timestamp`` and ``channel_id`` columns from
-    each channel's shards — ``value`` and ``aos_timestamp`` are dropped
-    immediately to minimise memory overhead.  The result is the minimal
-    DataFrame required by ``compute_los_mask``.
+    Reads only ``telemetry_timestamp`` from each channel's shards via PyArrow
+    column projection — ``value`` and ``aos_timestamp`` are never deserialised,
+    halving I/O compared to a full read.  The result is the minimal DataFrame
+    required by ``compute_los_mask``.
 
     Args:
         raw_ticks_dir: Root directory for raw tick data.
@@ -279,12 +283,11 @@ def read_all_iss_ticks_for_los(
     frames: list[pd.DataFrame] = []
     for ch in channel_ids:
         try:
-            ticks = read_iss_ticks(raw_ticks_dir, ch)
+            ticks = read_iss_ticks(raw_ticks_dir, ch, columns=["telemetry_timestamp"])
         except FileNotFoundError:
             log.warning("read_all_iss_ticks_for_los.channel_missing", channel_id=ch)
             continue
-        # Keep only the two columns needed for LOS detection.
-        mini = ticks[["telemetry_timestamp"]].copy()
+        mini = ticks.copy()
         mini["channel_id"] = ch
         frames.append(mini)
 
