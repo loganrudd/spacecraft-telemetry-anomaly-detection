@@ -278,13 +278,22 @@ def read_all_iss_ticks_for_los(
     """
     frames: list[pd.DataFrame] = []
     for ch in channel_ids:
-        ticks = read_iss_ticks(raw_ticks_dir, ch)
+        try:
+            ticks = read_iss_ticks(raw_ticks_dir, ch)
+        except FileNotFoundError:
+            log.warning("read_all_iss_ticks_for_los.channel_missing", channel_id=ch)
+            continue
         # Keep only the two columns needed for LOS detection.
         mini = ticks[["telemetry_timestamp"]].copy()
         mini["channel_id"] = ch
         frames.append(mini)
 
     if not frames:
+        if channel_ids:
+            raise FileNotFoundError(
+                f"No tick shards found for any of the {len(channel_ids)} requested channels "
+                f"under {raw_ticks_dir}/ISS/ticks/"
+            )
         return pd.DataFrame(columns=["telemetry_timestamp", "channel_id"])
 
     result = pd.concat(frames, ignore_index=True)

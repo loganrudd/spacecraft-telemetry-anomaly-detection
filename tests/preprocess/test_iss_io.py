@@ -199,3 +199,22 @@ class TestReadAllIssTicksForLos:
         df = read_all_iss_ticks_for_los(tmp_path, ["S1000003"])
         assert "value" not in df.columns
         assert "aos_timestamp" not in df.columns
+
+    def test_missing_channel_skipped_with_warning(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # One channel present, one missing → missing is skipped; result has the
+        # present channel's rows only.  structlog emits to stdout so we check
+        # capsys rather than caplog.
+        _write_channel_dir(tmp_path, "S1000003", n_shards=1)
+        df = read_all_iss_ticks_for_los(tmp_path, ["S1000003", "MISSING_PUI"])
+        assert len(df) == 10
+        assert set(df["channel_id"].unique()) == {"S1000003"}
+        out = capsys.readouterr().out
+        assert "MISSING_PUI" in out
+
+    def test_all_channels_missing_raises(self, tmp_path: Path) -> None:
+        # All channels missing → FileNotFoundError (not a silent empty return).
+        (tmp_path / "ISS" / "ticks").mkdir(parents=True, exist_ok=True)
+        with pytest.raises(FileNotFoundError):
+            read_all_iss_ticks_for_los(tmp_path, ["MISSING_A", "MISSING_B"])
