@@ -328,6 +328,36 @@ terraform -chdir=infra destroy \
 **Cost:** e2-small ~$12/mo → ≈$4–5 for the 10-day collection window. Under the $50 alert
 threshold. Stop the VM once Phase 13 preprocessing is complete.
 
+## ISS Preprocessing (Phase 13)
+
+After ~9–10 days of collection, run the ISS preprocessing pipeline on the banked ticks:
+
+```bash
+export PROJECT_ID=spacecraft-telemetry-ads
+export REGION=us-central1
+
+make cloud-up
+
+# Preprocess all 18 ISS channels (reads gs://{project}-raw-data/ISS/ticks/)
+make cloud-preprocess MISSION=ISS
+
+make cloud-down
+```
+
+`SPACECRAFT_COLLECT__RAW_TICKS_DIR` is wired in `deploy/ray/cluster_preprocess.yaml` (same
+manifest used for ESA — the env var is ignored by the ESA path).  Output lands in
+`gs://{project}-processed-data/ISS/{train,test}/…/part.parquet` alongside
+`normalization_params.json`.
+
+Wall-clock: ~10 min (18 channels, each a 30 s-grid ~14k-row Parquet).
+
+Verify the output before starting Phase 14 training:
+```bash
+gsutil ls "gs://${PROJECT_ID}-processed-data/ISS/train/mission_id=ISS/"
+gsutil cat "gs://${PROJECT_ID}-processed-data/ISS/normalization_params.json" \
+  | python3 -m json.tool | head -20
+```
+
 ## Cost Guardrails
 
 **Budget alerts** are configured in Terraform at $50, $100, and $150. Alerts email
