@@ -288,6 +288,9 @@ def inject_faults(
             actual_duration = end - start
             if actual_duration < 1:
                 continue
+            # linspace(0, shift, 1) == [0.0]: zero offset applied with mask=True → poisoned label.
+            if fault_type == "drift" and actual_duration < 2:
+                continue
 
             # Flatline guard: skip if pre-window variance is already near zero
             if fault_type == "flatline":

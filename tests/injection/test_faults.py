@@ -115,6 +115,14 @@ class TestInjectDrift:
         _, mask = inject_drift(v, start=20, duration=1, total_shift_sigma=1.0)
         assert mask.sum() == 1
 
+    def test_clipped_drift_duration_two_hold_at_shift(self) -> None:
+        """actual_duration=2: ramp=[0.0], hold=[shift] → out[start+1] ≈ shift."""
+        v = np.zeros(50, dtype=np.float32)
+        out, mask = inject_drift(v, start=10, duration=2, total_shift_sigma=1.5)
+        assert mask[10:12].all()
+        assert mask.sum() == 2
+        assert abs(float(out[11]) - 1.5) < 1e-4, "hold should be at total_shift_sigma"
+
 
 # ---------------------------------------------------------------------------
 # inject_flatline
@@ -268,6 +276,16 @@ class TestInjectFaults:
         # flatlines should be skipped because pre-window variance is ~0
         assert all(r["type"] != "flatline" for r in records), (
             "flatline should be skipped on already-flat series"
+        )
+
+    def test_fault_region_actually_changed(self) -> None:
+        v = _nominal(1000)
+        v_orig = v.copy()
+        seg, los = _single_segment(1000)
+        out, mask, _ = inject_faults(v, seg, los, self._rng(), 6, self._default_profile())
+        assert mask.any(), "at least one fault must be placed"
+        assert not np.array_equal(out[mask], v_orig[mask]), (
+            "fault region must differ from original signal"
         )
 
     def test_empty_series_returns_unchanged(self) -> None:
