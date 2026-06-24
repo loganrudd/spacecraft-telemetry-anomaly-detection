@@ -1,6 +1,6 @@
 """ISS Live channel registry.
 
-Encodes the locked 26-PUI channel map from .claude/rules/iss.md.
+Encodes the locked 18-PUI channel map from .claude/rules/iss.md.
 Subsystem names (power, solar_array, thermal, attitude) are the same strings
 used by the HPO grouping logic so they flow through to Ray Tune unchanged.
 
@@ -96,7 +96,7 @@ def subscription_items(channel_set: Literal["validation", "all"]) -> list[str]:
 
     Args:
         channel_set: ``"validation"`` for the 6-channel Phase 12 validation
-            set; ``"all"`` for all 26 telemetry channels.
+            set; ``"all"`` for all 18 telemetry channels.
 
     Returns:
         Sorted list of item names (telemetry + context).

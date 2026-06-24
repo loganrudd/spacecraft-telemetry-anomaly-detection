@@ -15,20 +15,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.ingest.collector_io import RAW_TICK_SCHEMA
 from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing
 from spacecraft_telemetry.preprocess.schemas import ISS_SERIES_FILE_SCHEMA
-
-# ---------------------------------------------------------------------------
-# Schema shared with collector_io
-# ---------------------------------------------------------------------------
-
-RAW_TICK_SCHEMA = pa.schema(
-    [
-        pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("value", pa.float32(), nullable=False),
-        pa.field("aos_timestamp", pa.float64(), nullable=True),
-    ]
-)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -198,6 +187,30 @@ class TestRunIssPreprocessingE2E:
         assert channels_txt.exists()
         lines = [ln for ln in channels_txt.read_text().splitlines() if ln]
         assert set(lines) == {"S1000003", "P4000001", "USLAB000018"}
+
+    def test_channel_subsystems_json_written(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        run_iss_preprocessing(settings_iss, parallel=False)
+        subsystems_path = (
+            Path(settings_iss.preprocess.processed_data_dir)
+            / "ISS"
+            / "metadata"
+            / "channel_subsystems.json"
+        )
+        assert subsystems_path.exists()
+        subsystems = json.loads(subsystems_path.read_text())
+        assert subsystems == {
+            "S1000003": "thermal",
+            "P4000001": "power",
+            "USLAB000018": "attitude",
+        }
+        channels_txt = (
+            Path(settings_iss.preprocess.processed_data_dir) / "ISS" / "channels.txt"
+        )
+        assert set(subsystems.keys()) == {
+            ln for ln in channels_txt.read_text().splitlines() if ln
+        }
 
     def test_output_has_is_los_column(
         self, settings_iss: Settings, raw_root: Path

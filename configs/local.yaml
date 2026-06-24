@@ -93,7 +93,6 @@ collect:
   flush_interval_seconds: 3600.0
   los_staleness_seconds: 60.0
   grid_interval_seconds: 30
-  window_size: 256
 
 api:
   host: "127.0.0.1"
