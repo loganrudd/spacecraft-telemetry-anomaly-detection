@@ -260,6 +260,34 @@ class TestInjectFaults:
             assert "magnitude_sigma" in rec
             assert "signal_class" in rec
 
+    def test_flatline_magnitude_sigma_is_none(self) -> None:
+        n = 1000
+        v = _nominal(n)
+        seg, los = _single_segment(n)
+        flatline_profile = ChannelProfile(
+            fault_type_weights={"spike": 0.0, "drift": 0.0, "flatline": 1.0},
+            magnitude_sigma_range=[0.5, 1.5],
+            flatline_duration_range=[5, 30],
+        )
+        _, _, records = inject_faults(v, seg, los, self._rng(), 4, flatline_profile)
+        for rec in records:
+            assert rec["magnitude_sigma"] is None, (
+                "flatline records must have magnitude_sigma=None"
+            )
+
+    def test_spike_drift_magnitude_sigma_is_float(self) -> None:
+        n = 1000
+        v = _nominal(n)
+        seg, los = _single_segment(n)
+        spike_drift_profile = ChannelProfile(
+            fault_type_weights={"spike": 0.5, "drift": 0.5, "flatline": 0.0},
+        )
+        _, _, records = inject_faults(v, seg, los, self._rng(), 6, spike_drift_profile)
+        for rec in records:
+            assert isinstance(rec["magnitude_sigma"], float), (
+                f"spike/drift magnitude_sigma must be float, got {type(rec['magnitude_sigma'])}"
+            )
+
     def test_flatline_guard_skips_flat_region(self) -> None:
         # Flat series — flatline injection should be skipped (all-flat guard)
         n = 1000

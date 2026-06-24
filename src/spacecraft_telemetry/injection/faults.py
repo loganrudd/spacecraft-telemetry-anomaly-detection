@@ -248,17 +248,23 @@ def inject_faults(
     n_hpo_faults = max(1, round(faults_per_channel * hpo_fraction))
     n_held_faults = max(1, faults_per_channel - n_hpo_faults)
 
-    def _sample_fault_params(fault_type: str) -> tuple[int, float]:
-        """Return (duration, magnitude_sigma) for a fault type."""
-        mag_low, mag_high = profile.magnitude_sigma_range
-        magnitude = float(rng.uniform(mag_low, mag_high))
+    def _sample_fault_params(fault_type: str) -> tuple[int, float | None]:
+        """Return (duration, magnitude_sigma) for a fault type.
 
+        Flatline does not use a magnitude; returns None to avoid a meaningless draw
+        that would also shift the RNG stream for subsequent spike/drift placements.
+        """
         if fault_type == "spike":
             lo, hi = profile.spike_duration_range
+            mag_low, mag_high = profile.magnitude_sigma_range
+            magnitude: float | None = float(rng.uniform(mag_low, mag_high))
         elif fault_type == "drift":
             lo, hi = profile.drift_duration_range
+            mag_low, mag_high = profile.magnitude_sigma_range
+            magnitude = float(rng.uniform(mag_low, mag_high))
         else:
             lo, hi = profile.flatline_duration_range
+            magnitude = None
 
         duration = int(rng.integers(lo, max(lo + 1, hi + 1)))
         return duration, magnitude
@@ -302,8 +308,10 @@ def inject_faults(
             # splice only the fault region back into out so previously-injected
             # faults outside [start:end] are not overwritten.
             if fault_type == "spike":
+                assert magnitude is not None  # spike always draws a magnitude
                 full_out, _ = inject_spike(out, start, magnitude, actual_duration)
             elif fault_type == "drift":
+                assert magnitude is not None  # drift always draws a magnitude
                 full_out, _ = inject_drift(out, start, actual_duration, magnitude)
             else:
                 full_out, _ = inject_flatline(out, start, actual_duration)
