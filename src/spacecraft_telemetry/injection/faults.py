@@ -153,7 +153,7 @@ class ChannelProfile:
     fault_type_weights: dict[str, float] = field(
         default_factory=lambda: {"drift": 0.45, "flatline": 0.45, "spike": 0.10}
     )
-    magnitude_sigma_range: list[float] = field(default_factory=lambda: [0.4, 2.0])
+    magnitude_sigma_range: list[float] = field(default_factory=lambda: [0.4, 1.5])
     spike_duration_range: list[int] = field(default_factory=lambda: [1, 5])
     drift_duration_range: list[int] = field(default_factory=lambda: [30, 300])
     flatline_duration_range: list[int] = field(default_factory=lambda: [30, 300])
@@ -166,7 +166,7 @@ class ChannelProfile:
                 "fault_type_weights",
                 {"drift": 0.45, "flatline": 0.45, "spike": 0.10},
             ),
-            magnitude_sigma_range=d.get("magnitude_sigma_range", [0.4, 2.0]),
+            magnitude_sigma_range=d.get("magnitude_sigma_range", [0.4, 1.5]),
             spike_duration_range=d.get("spike_duration_range", [1, 5]),
             drift_duration_range=d.get("drift_duration_range", [30, 300]),
             flatline_duration_range=d.get("flatline_duration_range", [30, 300]),

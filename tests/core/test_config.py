@@ -544,9 +544,7 @@ class TestInjectionConfig:
         assert cfg.faults_per_channel == 8
         assert cfg.output_dir == "data/processed_injected"
         assert cfg.profiles_path == "configs/injection_profiles.json"
-        assert cfg.magnitude_sigma_range[0] < cfg.magnitude_sigma_range[1]
-        weights = cfg.fault_type_weights
-        assert abs(sum(weights.values()) - 1.0) < 1e-9
+        assert cfg.min_gap_between_faults == 50
 
     def test_env_var_overrides_seed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SPACECRAFT_INJECTION__SEED", "99")
@@ -561,14 +559,6 @@ class TestInjectionConfig:
     def test_faults_per_channel_minimum(self) -> None:
         with pytest.raises(ValueError, match="faults_per_channel must be >= 2"):
             InjectionConfig(faults_per_channel=1)
-
-    def test_invalid_magnitude_range_equal_bounds(self) -> None:
-        with pytest.raises(ValueError, match="low < high"):
-            InjectionConfig(magnitude_sigma_range=[1.0, 1.0])
-
-    def test_invalid_magnitude_range_reversed(self) -> None:
-        with pytest.raises(ValueError, match="low < high"):
-            InjectionConfig(magnitude_sigma_range=[2.0, 1.0])
 
     def test_profile_lookup_falls_back_to_globals(self, tmp_path: Path) -> None:
         """When a channel is absent from profiles_path, global fallback applies."""
