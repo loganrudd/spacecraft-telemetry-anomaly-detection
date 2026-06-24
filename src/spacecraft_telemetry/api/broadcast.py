@@ -212,8 +212,8 @@ class EventBroadcaster:
 
         Fault math (all in z-score space — streaming analog of injection/faults.py;
         per-tick state replaces array ops, so shapes differ slightly):
-          spike:    sign chosen so the offset moves away from nominal (value >= 0 → +,
-                    value < 0 → −), matching the faults.py sign heuristic for z-score data.
+          spike:    sign chosen so the offset moves away from nominal (value >= 0 -> +,
+                    value < 0 -> -), matching the faults.py sign heuristic for z-score data.
           drift:    linear ramp 0 → magnitude_sigma over the first half of total_ticks,
                     then holds at magnitude_sigma for the remainder (matches faults.py ramp+hold).
           flatline: hold the value captured on the first call per channel.
@@ -230,10 +230,9 @@ class EventBroadcaster:
 
         if inj.fault_type == "drift":
             ramp_len = max(1, inj.total_ticks // 2)
-            if inj.elapsed < ramp_len:
-                progress = inj.elapsed / max(1, ramp_len - 1)
-            else:
-                progress = 1.0
+            progress = (
+                inj.elapsed / max(1, ramp_len - 1) if inj.elapsed < ramp_len else 1.0
+            )
             return value + inj.magnitude_sigma * progress, True
 
         # flatline: anchor to each channel's first-seen value independently

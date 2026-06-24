@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime
 from types import MappingProxyType
 
 import numpy as np
@@ -313,7 +313,7 @@ async def test_run_shared_loop_injection_wiring() -> None:
     )
 
     task = asyncio.create_task(run_shared_loop(state))
-    # 10 ticks × 0.005 s = 50 ms; wait 300 ms for comfortable margin
+    # 10 ticks * 0.005 s = 50 ms; wait 300 ms for comfortable margin
     await asyncio.sleep(0.3)
     task.cancel()
     with suppress(asyncio.CancelledError):
