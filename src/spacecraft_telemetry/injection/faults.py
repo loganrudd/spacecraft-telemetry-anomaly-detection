@@ -145,6 +145,15 @@ def inject_flatline(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+_VALID_FAULT_TYPES: frozenset[str] = frozenset({"spike", "drift", "flatline"})
+_RANGE_KEYS = (
+    "magnitude_sigma_range",
+    "spike_duration_range",
+    "drift_duration_range",
+    "flatline_duration_range",
+)
+
+
 @dataclass
 class ChannelProfile:
     """Per-channel injection profile (from configs/injection_profiles.json)."""
@@ -160,6 +169,27 @@ class ChannelProfile:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ChannelProfile:
+        """Build a ChannelProfile from a dict, validating keys and ranges.
+
+        Raises ValueError on unknown fault_type_weights keys, all-zero weights,
+        or any *_range where lo >= hi.
+        """
+        if "fault_type_weights" in d:
+            unknown = set(d["fault_type_weights"]) - _VALID_FAULT_TYPES
+            if unknown:
+                raise ValueError(
+                    f"Unknown fault_type_weights keys: {sorted(unknown)!r}. "
+                    f"Valid keys: {sorted(_VALID_FAULT_TYPES)!r}"
+                )
+            if all(v <= 0 for v in d["fault_type_weights"].values()):
+                raise ValueError("All fault_type_weights are <= 0; at least one must be positive")
+
+        for key in _RANGE_KEYS:
+            if key in d:
+                lo, hi = d[key]
+                if lo >= hi:
+                    raise ValueError(f"{key} must have lo < hi, got [{lo}, {hi}]")
+
         return cls(
             signal_class=d.get("signal_class", "slow_lownoise"),
             fault_type_weights=d.get(

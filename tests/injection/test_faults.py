@@ -31,6 +31,52 @@ def _single_segment(n: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
+# ChannelProfile.from_dict validation
+# ---------------------------------------------------------------------------
+
+class TestChannelProfileValidation:
+    def test_empty_dict_uses_defaults(self) -> None:
+        profile = ChannelProfile.from_dict({})
+        assert profile.signal_class == "slow_lownoise"
+        assert profile.magnitude_sigma_range == [0.4, 1.5]
+
+    def test_valid_dict_round_trips(self) -> None:
+        d = {
+            "signal_class": "smooth_ramp",
+            "fault_type_weights": {"spike": 0.3, "drift": 0.4, "flatline": 0.3},
+            "magnitude_sigma_range": [0.5, 2.0],
+            "spike_duration_range": [2, 10],
+            "drift_duration_range": [20, 200],
+            "flatline_duration_range": [20, 200],
+        }
+        profile = ChannelProfile.from_dict(d)
+        assert profile.signal_class == "smooth_ramp"
+        assert profile.fault_type_weights == {"spike": 0.3, "drift": 0.4, "flatline": 0.3}
+
+    def test_unknown_fault_type_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown fault_type_weights keys"):
+            ChannelProfile.from_dict({"fault_type_weights": {"spike": 1.0, "explode": 0.5}})
+
+    def test_all_zero_weights_raises(self) -> None:
+        with pytest.raises(ValueError, match="All fault_type_weights are <= 0"):
+            ChannelProfile.from_dict(
+                {"fault_type_weights": {"spike": 0.0, "drift": 0.0, "flatline": 0.0}}
+            )
+
+    def test_reversed_magnitude_range_raises(self) -> None:
+        with pytest.raises(ValueError, match="magnitude_sigma_range"):
+            ChannelProfile.from_dict({"magnitude_sigma_range": [2.0, 0.5]})
+
+    def test_equal_magnitude_range_raises(self) -> None:
+        with pytest.raises(ValueError, match="magnitude_sigma_range"):
+            ChannelProfile.from_dict({"magnitude_sigma_range": [1.0, 1.0]})
+
+    def test_reversed_spike_duration_raises(self) -> None:
+        with pytest.raises(ValueError, match="spike_duration_range"):
+            ChannelProfile.from_dict({"spike_duration_range": [10, 2]})
+
+
+# ---------------------------------------------------------------------------
 # inject_spike
 # ---------------------------------------------------------------------------
 
