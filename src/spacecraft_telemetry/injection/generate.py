@@ -187,11 +187,11 @@ def generate_injected_dataset(
             anomaly_timesteps=anomaly_count,
         )
 
-    # Write injection manifest
+    # Write injection manifest — to_upath so gs:// output_dir works on Cloud Run.
+    # _load_profiles intentionally stays as local Path (profiles are committed config).
     manifest_path = to_upath(inj.output_dir) / mission / "injection_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(str(manifest_path), "w") as f:
-        json.dump(manifest, f, indent=2)
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     log.info("manifest_written", path=str(manifest_path), n_channels=len(manifest))
 
     # Copy subsystem metadata so downstream ray score / ray tune can group by subsystem
