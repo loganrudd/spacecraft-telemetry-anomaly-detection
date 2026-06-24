@@ -1,0 +1,434 @@
+{
+  "P4000001": {
+    "signal_class": "periodic_flatlines",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.72,
+      "drift": 0.28
+    },
+    "magnitude_sigma_range": [
+      0.6,
+      1.21
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      2000
+    ],
+    "flatline_duration_range": [
+      20,
+      2000
+    ]
+  },
+  "S4000001": {
+    "signal_class": "periodic_flatlines",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.72,
+      "drift": 0.28
+    },
+    "magnitude_sigma_range": [
+      0.6,
+      1.21
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      2000
+    ],
+    "flatline_duration_range": [
+      20,
+      2000
+    ]
+  },
+  "P6000001": {
+    "signal_class": "periodic_flatlines",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.72,
+      "drift": 0.28
+    },
+    "magnitude_sigma_range": [
+      0.6,
+      1.21
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      2000
+    ],
+    "flatline_duration_range": [
+      20,
+      2000
+    ]
+  },
+  "S6000001": {
+    "signal_class": "periodic_flatlines",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.72,
+      "drift": 0.28
+    },
+    "magnitude_sigma_range": [
+      0.6,
+      1.21
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      2000
+    ],
+    "flatline_duration_range": [
+      20,
+      2000
+    ]
+  },
+  "P4000007": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "P4000008": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "P6000007": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "P6000008": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "S4000007": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "S4000008": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "S6000007": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "S6000008": {
+    "signal_class": "smooth_ramp",
+    "fault_type_weights": {
+      "spike": 0.03,
+      "flatline": 0.71,
+      "drift": 0.26
+    },
+    "magnitude_sigma_range": [
+      0.44,
+      0.94
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      659
+    ],
+    "flatline_duration_range": [
+      20,
+      659
+    ]
+  },
+  "S1000003": {
+    "signal_class": "slow_lownoise",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.71,
+      "drift": 0.29
+    },
+    "magnitude_sigma_range": [
+      0.48,
+      0.98
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      1275
+    ],
+    "flatline_duration_range": [
+      20,
+      1275
+    ]
+  },
+  "P1000003": {
+    "signal_class": "slow_lownoise",
+    "fault_type_weights": {
+      "spike": 0.0,
+      "flatline": 0.71,
+      "drift": 0.29
+    },
+    "magnitude_sigma_range": [
+      0.48,
+      0.98
+    ],
+    "spike_duration_range": [
+      1,
+      20
+    ],
+    "drift_duration_range": [
+      20,
+      1275
+    ],
+    "flatline_duration_range": [
+      20,
+      1275
+    ]
+  },
+  "USLAB000018": {
+    "signal_class": "bounded_oscillatory",
+    "fault_type_weights": {
+      "drift": 0.4,
+      "flatline": 0.3,
+      "spike": 0.3
+    },
+    "magnitude_sigma_range": [
+      0.3,
+      1.5
+    ],
+    "spike_duration_range": [
+      1,
+      6
+    ],
+    "drift_duration_range": [
+      15,
+      300
+    ],
+    "flatline_duration_range": [
+      15,
+      200
+    ]
+  },
+  "USLAB000019": {
+    "signal_class": "bounded_oscillatory",
+    "fault_type_weights": {
+      "drift": 0.4,
+      "flatline": 0.3,
+      "spike": 0.3
+    },
+    "magnitude_sigma_range": [
+      0.3,
+      1.5
+    ],
+    "spike_duration_range": [
+      1,
+      6
+    ],
+    "drift_duration_range": [
+      15,
+      300
+    ],
+    "flatline_duration_range": [
+      15,
+      200
+    ]
+  },
+  "USLAB000020": {
+    "signal_class": "bounded_oscillatory",
+    "fault_type_weights": {
+      "drift": 0.4,
+      "flatline": 0.3,
+      "spike": 0.3
+    },
+    "magnitude_sigma_range": [
+      0.3,
+      1.5
+    ],
+    "spike_duration_range": [
+      1,
+      6
+    ],
+    "drift_duration_range": [
+      15,
+      300
+    ],
+    "flatline_duration_range": [
+      15,
+      200
+    ]
+  },
+  "USLAB000021": {
+    "signal_class": "bounded_oscillatory",
+    "fault_type_weights": {
+      "drift": 0.4,
+      "flatline": 0.3,
+      "spike": 0.3
+    },
+    "magnitude_sigma_range": [
+      0.3,
+      1.5
+    ],
+    "spike_duration_range": [
+      1,
+      6
+    ],
+    "drift_duration_range": [
+      15,
+      300
+    ],
+    "flatline_duration_range": [
+      15,
+      200
+    ]
+  }
+}
