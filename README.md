@@ -62,6 +62,11 @@ leakage-free protocol and honest framing).
     (`make seed-reference-profiles`), and run a longer replay. The panel also auto-hides at
     runtime when no reference profiles are available.
 - Fast test, lint, and typecheck workflows
+- **ISS Live telemetry (Phase 14):** preprocessing + training on NASA ISSLive data
+  - Collector banks raw ticks to GCS; `preprocess run --mission ISS` resamples to 30 s grid
+  - `ray train --mission ISS` trains one `telemanom-ISS-{channel}` LSTM per channel
+  - Channels subsystem-tagged (`power`, `solar_array`, `thermal`, `attitude`) for Phase 15 HPO
+  - Model window `W=250` (global default); same serving path as ESA
 
 
 ## Architecture Overview
@@ -344,6 +349,28 @@ Expected key artifacts:
 - `models/ESA-Mission1/tuned_configs.json` — per-subsystem scoring params + HPO lineage
 - `mlflow.db` — local SQLite MLflow tracking store (experiments, runs, registered models)
 
+### ISS Live Training
+
+ISS is a second mission alongside ESA — the same training stack, mission-parameterized.
+Real `W=250` training requires ~1 week of banked GCS data (collector started Phase 12).
+Local dev uses synthetic data from the test suite; the commands below work on real collected data:
+
+```bash
+# Preprocess banked ISS ticks to partitioned Parquet (30 s grid, 18 channels):
+make preprocess MISSION=ISS
+
+# Train one telemanom-ISS-{channel} LSTM per channel:
+make ray-train MISSION=ISS
+
+# Cloud preprocess + train (once a week of ticks is banked to GCS):
+make cloud-preprocess MISSION=ISS
+make cloud-train      MISSION=ISS
+```
+
+Models register as `telemanom-ISS-{channel}` with subsystem tags (`thermal`, `power`,
+`solar_array`, `attitude`). Phase 15 HPO uses those tags to group channels for tuning.
+Real anomaly labels don't exist for ISS — evaluation uses fault injection (Phase 15).
+
 
 ## Deployment
 
@@ -413,6 +440,13 @@ model and redeploying — there is no hot-reload path.
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
+| 12 | ISS Live ingestion + collector | Complete |
+| 13 | ISS preprocessing (30 s grid, LOS detection) | Complete |
+| 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
+| 15 | Anomaly injection + injection-driven HPO | Planned |
+| 16 | Multi-mission serving (replay) | Planned |
+| 17 | Live telemetry pump | Planned |
+| 18 | ISS deployment + docs polish | Planned |
 
 
 ## Future Work
