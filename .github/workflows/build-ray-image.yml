@@ -1,13 +1,21 @@
 name: Build Ray image
 
 # Builds and pushes the Ray image when Ray-fanout related files
-# change on main, or on demand via workflow_dispatch (e.g. before make cloud-train).
+# change on main or iss_ext, or on demand via workflow_dispatch (e.g. before
+# make cloud-train).
 #
+# iss_ext is included so the ISS extension can rebuild the image (which now
+# carries run_iss_preprocessing + the ISS CLI dispatch) before merge to main.
+# The WIF binding for refs/heads/iss_ext is provisioned in infra/github_oidc.tf
+# (deployer_wif_iss_ext), matching build-collector-image.yml. Both branches push
+# ray:latest; main is frozen during the extension, so the clobber risk is nil
+# until iss_ext merges back (Phase 18), after which main resumes ownership.
 
 on:
   push:
     branches:
       - main
+      - iss_ext
     # Only rebuild when something baked INTO the image AND used by Ray
     # changes. The deploy/ray/cluster_*.yaml manifests are applied at runtime by
     # cloud_*.sh (envsubst | kubectl apply), not copied into the image, so they
