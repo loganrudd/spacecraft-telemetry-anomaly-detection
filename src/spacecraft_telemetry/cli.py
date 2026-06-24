@@ -1569,7 +1569,7 @@ main.add_command(api_group, name="api")
     type=click.Choice(["validation", "all"]),
     default=None,
     help=(
-        "Channel set to subscribe: 'validation' (6 channels) or 'all' (26 channels). "
+        "Channel set to subscribe: 'validation' (6 channels) or 'all' (18 channels). "
         "Defaults to the value from config (collect.channel_set)."
     ),
 )
@@ -1602,7 +1602,7 @@ def collect(
         # 1-hour dry-run on the 6-channel validation set
         spacecraft-telemetry collect --duration 3600
 
-        # Production run on all 26 channels
+        # Production run on all 18 channels
         spacecraft-telemetry collect --channel-set all
     """
     from spacecraft_telemetry.ingest.collector import LightstreamerCollector
