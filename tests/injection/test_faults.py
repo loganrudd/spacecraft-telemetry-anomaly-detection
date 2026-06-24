@@ -370,3 +370,19 @@ class TestInjectFaults:
         assert len(out) == 0
         assert len(mask) == 0
         assert records == []
+
+    def test_shorter_than_window_size_returns_empty(self) -> None:
+        """n < window_size: no valid candidate positions → empty results, no error.
+
+        This is the real-world case that fires on the 24-row local sample data.
+        """
+        window_size = 250
+        n = 24  # typical local dev sample
+        v = _nominal(n)
+        seg, los = _single_segment(n)
+        out, mask, records = inject_faults(
+            v, seg, los, self._rng(), 4, self._default_profile(), window_size=window_size
+        )
+        assert out.shape == v.shape, "output array must preserve shape"
+        assert not mask.any(), "no faults can be placed when n < window_size"
+        assert records == [], "no fault records when n < window_size"

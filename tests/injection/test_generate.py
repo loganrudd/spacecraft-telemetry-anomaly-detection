@@ -203,16 +203,19 @@ class TestGenerateInjectedDataset:
         generate_injected_dataset(settings_a, MISSION, ["S1000003"])
         generate_injected_dataset(settings_b, MISSION, ["S1000003"])
 
-        def _load_anomaly(base: Path) -> pd.Series[bool]:
+        def _load(base: Path) -> pd.DataFrame:
             path = (
                 base / MISSION / "test"
                 / f"mission_id={MISSION}" / "channel_id=S1000003" / "part.parquet"
             )
-            return pd.read_parquet(str(path))["is_anomaly"]
+            return pd.read_parquet(str(path))[["is_anomaly", "value_normalized"]]
 
-        a = _load_anomaly(injected_a)
-        b = _load_anomaly(injected_b)
-        pd.testing.assert_series_equal(a, b, check_names=False)
+        a = _load(injected_a)
+        b = _load(injected_b)
+        pd.testing.assert_series_equal(a["is_anomaly"], b["is_anomaly"], check_names=False)
+        pd.testing.assert_series_equal(
+            a["value_normalized"], b["value_normalized"], check_names=False
+        )
 
     def test_metadata_copied_when_present(self, tmp_path: Path) -> None:
         processed = tmp_path / "processed"
