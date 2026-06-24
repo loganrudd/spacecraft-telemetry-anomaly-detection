@@ -256,12 +256,16 @@ def inject_faults(
     if len(candidates) == 0:
         return values.copy(), np.zeros(n, dtype=bool), []
 
-    # Build segment lookup: start → exclusive_end for each contiguous segment
+    # Build segment lookup in one O(N) pass using run boundaries (np.diff trick).
+    # Segments are contiguous blocks (monotonically assigned by detect_gaps),
+    # so a single scan suffices — no per-segment boolean mask needed.
     seg_extents: dict[int, tuple[int, int]] = {}
-    for seg_id in np.unique(segment_ids):
-        mask = segment_ids == seg_id
-        idx = np.flatnonzero(mask)
-        seg_extents[int(seg_id)] = (int(idx[0]), int(idx[-1]) + 1)
+    if n > 0:
+        boundaries = np.flatnonzero(np.diff(segment_ids) != 0) + 1
+        starts = np.r_[0, boundaries]
+        ends = np.r_[boundaries, n]
+        for s, e in zip(starts.tolist(), ends.tolist(), strict=True):
+            seg_extents[int(segment_ids[s])] = (s, e)
 
     # Fault type sampling
     types = list(profile.fault_type_weights.keys())
