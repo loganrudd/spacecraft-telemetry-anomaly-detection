@@ -47,18 +47,11 @@ from upath import UPath
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# ISS channel → subsystem, from iss.md (domain knowledge, not computed)
-_ISS_SUBSYSTEM: dict[str, str] = {
-    "P4000001": "power", "S4000001": "power",
-    "P6000001": "power", "S6000001": "power",
-    "P4000007": "solar_array", "P4000008": "solar_array",
-    "P6000007": "solar_array", "P6000008": "solar_array",
-    "S4000007": "solar_array", "S4000008": "solar_array",
-    "S6000007": "solar_array", "S6000008": "solar_array",
-    "S1000003": "thermal", "P1000003": "thermal",
-    "USLAB000018": "attitude", "USLAB000019": "attitude",
-    "USLAB000020": "attitude", "USLAB000021": "attitude",
-}
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS  # noqa: E402
+
+# ISS channel → subsystem derived from the canonical ISS_CHANNELS registry.
+_ISS_SUBSYSTEM: dict[str, str] = {pui: meta.subsystem for pui, meta in ISS_CHANNELS.items()}
 
 # ISS subsystem → signal class (from .claude/rules/iss.md domain knowledge)
 _ISS_CLASS: dict[str, str] = {
