@@ -14,5 +14,12 @@ from spacecraft_telemetry.injection.faults import (
     inject_flatline,
     inject_spike,
 )
+from spacecraft_telemetry.injection.generate import generate_injected_dataset
 
-__all__ = ["inject_drift", "inject_faults", "inject_flatline", "inject_spike"]
+__all__ = [
+    "generate_injected_dataset",
+    "inject_drift",
+    "inject_faults",
+    "inject_flatline",
+    "inject_spike",
+]
