@@ -262,9 +262,15 @@ def preprocess() -> None:
     help="Optional subsystem name to preprocess only those channels (e.g. subsystem_6).",
 )
 @click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated list of channels to preprocess (e.g. S1000003,P1000003). "
+    "Overrides --subsystem; --channel overrides this.",
+)
+@click.option(
     "--channel",
     default=None,
-    help="Optional single channel to preprocess (overrides --subsystem).",
+    help="Optional single channel to preprocess (overrides --channels and --subsystem).",
 )
 @click.option(
     "--no-parallel",
@@ -278,6 +284,7 @@ def preprocess_run(
     mission: str,
     train_fraction: float | None,
     subsystem: str | None,
+    channels: str | None,
     channel: str | None,
     no_parallel: bool,
 ) -> None:
@@ -294,6 +301,10 @@ def preprocess_run(
 
         # Only preprocess channels belonging to subsystem_6
         spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
+
+        # Preprocess a specific set of channels (ISS 6-channel validation set)
+        spacecraft-telemetry preprocess run --mission ISS \
+            --channels S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
         # Only preprocess a single channel, no Ray
         spacecraft-telemetry preprocess run --mission ESA-Mission1 \
@@ -315,15 +326,17 @@ def preprocess_run(
             update={"preprocess": settings.preprocess.model_copy(update=overrides)}
         )
 
-    # Resolve channel filter: explicit channel > subsystem > all.
-    channels: list[str] | None = None
+    # Resolve channel filter: --channel > --channels > --subsystem > all.
+    channel_list: list[str] | None = None
     if channel is not None:
-        channels = [channel]
+        channel_list = [channel]
+    elif channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif subsystem is not None:
         data_dir = Path(str(settings.data.sample_data_dir))
         channel_dir = data_dir / mission / "channels"
         all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
-        channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+        channel_list = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
 
     log.info(
         "preprocess.run.start",
@@ -331,7 +344,7 @@ def preprocess_run(
         train_fraction=settings.preprocess.train_fraction,
         channel=channel,
         subsystem=subsystem,
-        channels=channels,
+        channels=channel_list,
         parallel=not no_parallel,
     )
 
@@ -341,17 +354,17 @@ def preprocess_run(
 
         if parallel:
             with _ray_session(settings):
-                summary = run_iss_preprocessing(settings, channels=channels, parallel=True)
+                summary = run_iss_preprocessing(settings, channels=channel_list, parallel=True)
         else:
-            summary = run_iss_preprocessing(settings, channels=channels, parallel=False)
+            summary = run_iss_preprocessing(settings, channels=channel_list, parallel=False)
     elif parallel:
         with _ray_session(settings):
             summary = run_preprocessing(
-                settings, mission, channels=channels, parallel=True
+                settings, mission, channels=channel_list, parallel=True
             )
     else:
         summary = run_preprocessing(
-            settings, mission, channels=channels, parallel=False
+            settings, mission, channels=channel_list, parallel=False
         )
 
     click.echo(f"Mission           : {mission}")

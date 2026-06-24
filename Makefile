@@ -2,6 +2,7 @@
 SHELL         := bash
 MISSION          ?= ESA-Mission1
 CHANNEL          ?=
+CHANNELS         ?=
 SUBSYSTEM        ?=
 PORT             ?= 8000
 REPLAY_DATA_DIR  ?=
@@ -96,10 +97,11 @@ collect:       ## Collect ISS Live telemetry (CHANNEL_SET=validation|all, DURATI
 profile:          ## Profile raw channel suitability, write channel_suitability.json (MISSION=…)
 	$(RUN) spacecraft-telemetry preprocess profile --mission $(MISSION)
 
-preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
+preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…, CHANNELS=ch1,ch2,…)
 	$(RUN) spacecraft-telemetry preprocess run \
 		--mission $(MISSION) \
 		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
+		$(if $(CHANNELS),--channels $(CHANNELS),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 # ---------------------------------------------------------------------------
@@ -369,9 +371,11 @@ cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQ
 # MLFLOW_URL is fetched live so the Makefile works without storing it.
 _mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
 
-cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
-	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) \
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2,…])
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_preprocess.sh
+	# ISS 6-channel validation set:
+	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
 cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
