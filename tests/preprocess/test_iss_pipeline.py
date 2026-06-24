@@ -199,6 +199,24 @@ class TestRunIssPreprocessingE2E:
         lines = [ln for ln in channels_txt.read_text().splitlines() if ln]
         assert set(lines) == {"S1000003", "P4000001", "USLAB000018"}
 
+    def test_channel_subsystems_json_written(
+        self, settings_iss: Settings, raw_root: Path
+    ) -> None:
+        run_iss_preprocessing(settings_iss, parallel=False)
+        subsystems_path = (
+            Path(settings_iss.preprocess.processed_data_dir)
+            / "ISS"
+            / "metadata"
+            / "channel_subsystems.json"
+        )
+        assert subsystems_path.exists()
+        subsystems = json.loads(subsystems_path.read_text())
+        assert subsystems == {
+            "S1000003": "thermal",
+            "P4000001": "power",
+            "USLAB000018": "attitude",
+        }
+
     def test_output_has_is_los_column(
         self, settings_iss: Settings, raw_root: Path
     ) -> None:
