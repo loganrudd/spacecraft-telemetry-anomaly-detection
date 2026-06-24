@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -56,6 +58,17 @@ def _write_series_split(
         schema=_SERIES_FILE_SCHEMA,
     )
     pq.write_table(table, partition_dir / "part.parquet")
+
+
+@pytest.fixture()
+def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
+    """Per-test isolated SQLite MLflow store."""
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    mlflow.set_tracking_uri(uri)
+    yield uri
+    if mlflow.active_run() is not None:
+        mlflow.end_run()
+    mlflow.set_tracking_uri("")
 
 
 @pytest.fixture(scope="session")

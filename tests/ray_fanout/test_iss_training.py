@@ -7,10 +7,8 @@ needs a handful of resampled buckets.
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from pathlib import Path
 
-import mlflow
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,6 +17,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from spacecraft_telemetry.core.config import Settings, load_settings  # noqa: E402
+from spacecraft_telemetry.ingest.collector_io import RAW_TICK_SCHEMA  # noqa: E402
 from spacecraft_telemetry.model.training import TrainingResult, train_channel  # noqa: E402
 from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing  # noqa: E402
 
@@ -28,14 +27,6 @@ from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing  # no
 
 _ISS_CHANNEL = "S1000003"
 _ISS_MISSION = "ISS"
-
-_RAW_TICK_SCHEMA = pa.schema(
-    [
-        pa.field("telemetry_timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("value", pa.float32(), nullable=False),
-        pa.field("aos_timestamp", pa.float64(), nullable=True),
-    ]
-)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +46,7 @@ def _write_iss_ticks(raw_root: Path, channel_id: str, n: int = 600) -> None:
     ]
     dest = raw_root / "ISS" / "ticks" / f"channel_id={channel_id}"
     dest.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(rows, schema=_RAW_TICK_SCHEMA)
+    table = pa.Table.from_pylist(rows, schema=RAW_TICK_SCHEMA)
     pq.write_table(table, dest / "20260601T000000.parquet")
 
 
@@ -90,16 +81,6 @@ def _iss_settings(tmp_path: Path, mlflow_tracking_uri: str) -> Settings:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def mlflow_uri(tmp_path: Path) -> Generator[str, None, None]:
-    uri = f"sqlite:///{tmp_path}/mlflow.db"
-    mlflow.set_tracking_uri(uri)
-    yield uri
-    if mlflow.active_run() is not None:
-        mlflow.end_run()
-    mlflow.set_tracking_uri("")
 
 
 @pytest.fixture()
