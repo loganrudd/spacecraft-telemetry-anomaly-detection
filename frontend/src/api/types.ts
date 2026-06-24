@@ -11,6 +11,12 @@ export type TelemetryEvent = {
   is_anomaly: boolean;
 };
 
+export type MissionLink = {
+  id: string;    // mission identifier, e.g. "ISS"
+  label: string; // display name, e.g. "ISS Live"
+  url: string;   // root URL of the sibling service
+};
+
 export type HealthResponse = {
   status: "ok" | "degraded" | "loading";
   mission: string;
@@ -21,6 +27,7 @@ export type HealthResponse = {
   channel_subsystems: Record<string, string>;
   uptime_s: number;
   mlflow_tracking_uri: string;
+  available_missions: MissionLink[];
 };
 
 export type DriftFeature = {

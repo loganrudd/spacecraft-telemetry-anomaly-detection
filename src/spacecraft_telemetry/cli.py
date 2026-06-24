@@ -1659,6 +1659,14 @@ def api_group() -> None:
     default=None,
     help="Comma-separated channel IDs to load (overrides subsystem).",
 )
+@click.option(
+    "--replay-data-dir",
+    default=None,
+    help=(
+        "Directory for replay Parquet (overrides preprocess.processed_data_dir). "
+        "Useful for pointing the ISS service at the fault-injected dataset."
+    ),
+)
 @click.option("--reload", is_flag=True, default=False, help="Enable uvicorn auto-reload.")
 @click.pass_context
 def api_serve(
@@ -1668,6 +1676,7 @@ def api_serve(
     mission: str | None,
     subsystem: str | None,
     channels: str | None,
+    replay_data_dir: str | None,
     reload: bool,
 ) -> None:
     """Start the FastAPI serving layer (SSE stream + /health)."""
@@ -1687,6 +1696,8 @@ def api_serve(
         api_overrides["subsystem"] = subsystem
     if channels is not None:
         api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
+    if replay_data_dir is not None:
+        api_overrides["replay_data_dir"] = replay_data_dir
 
     if api_overrides:
         settings = settings.model_copy(

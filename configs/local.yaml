@@ -107,3 +107,14 @@ api:
   cors_allowed_origins:
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
+  # Two-terminal local demo: ESA on :8000, ISS on :8001.
+  # Each service gets the full list so the switcher is visible in both.
+  # Run: make serve                         (ESA, :8000)
+  #      make serve MISSION=ISS PORT=8001   (ISS, :8001)
+  available_missions:
+    - id: "ESA-Mission1"
+      label: "ESA Mission 1"
+      url: "http://localhost:8000"
+    - id: "ISS"
+      label: "ISS Live"
+      url: "http://localhost:8001"

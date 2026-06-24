@@ -378,6 +378,19 @@ class DriftConfig(BaseModel):
         return v
 
 
+class MissionLink(BaseModel):
+    """A sibling-mission entry for the dashboard mission selector.
+
+    Each configured entry tells the frontend about a sibling API service.
+    The frontend navigates to ``url`` on selection (full-page navigation,
+    same-origin per service).  Render nothing when the list has ≤ 1 entry.
+    """
+
+    id: str    # mission identifier, e.g. "ISS"
+    label: str  # display name, e.g. "ISS Live"
+    url: str   # root URL of the sibling service, e.g. "https://api-iss-…run.app"
+
+
 class ApiConfig(BaseModel):
     """FastAPI serving configuration (Phase 8)."""
 
@@ -410,6 +423,18 @@ class ApiConfig(BaseModel):
     # When set and the directory exists, create_app mounts it via StaticFiles(html=True)
     # so the SPA shares the API origin (no CORS). None = serve API only.
     static_dir: str | None = None
+    # Override the Parquet source directory for the replay path without
+    # changing preprocess.processed_data_dir (which other tooling reads).
+    # Useful for pointing the ISS service at the fault-injected dataset while
+    # ESA continues to use the nominal processed dir.
+    # None → fall back to preprocess.processed_data_dir.
+    replay_data_dir: str | None = None
+    # Sibling-mission entries for the dashboard mission selector.
+    # Each entry describes a peer API service for a different mission so the
+    # frontend can render a switcher that navigates between them.
+    # Empty list (default) hides the switcher entirely — safe for single-mission
+    # deploys and all existing tests.
+    available_missions: list[MissionLink] = []
 
     @field_validator("port")
     @classmethod

@@ -1,8 +1,10 @@
 .DEFAULT_GOAL := help
 SHELL         := bash
-MISSION       ?= ESA-Mission1
-CHANNEL       ?=
-SUBSYSTEM     ?=
+MISSION          ?= ESA-Mission1
+CHANNEL          ?=
+SUBSYSTEM        ?=
+PORT             ?= 8000
+REPLAY_DATA_DIR  ?=
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
 UV := uv
@@ -209,9 +211,15 @@ clean-all:       ## Remove everything: caches + processed + models + downloaded 
 # FastAPI serving (Phase 8)
 # ---------------------------------------------------------------------------
 
-serve:            ## Start the FastAPI serving layer locally (SUBSYSTEM=subsystem_6)
+serve:            ## Start the FastAPI serving layer locally (MISSION=… PORT=… SUBSYSTEM=… REPLAY_DATA_DIR=…)
 	$(RUN) spacecraft-telemetry --env local api serve \
-		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
+		--port $(PORT) \
+		$(if $(MISSION),--mission $(MISSION),) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),) \
+		$(if $(REPLAY_DATA_DIR),--replay-data-dir $(REPLAY_DATA_DIR),)
+# Two-terminal ISS demo:
+#   make serve                                          # ESA on :8000
+#   make serve MISSION=ISS PORT=8001                   # ISS on :8001 (requires trained ISS models)
 
 # ---------------------------------------------------------------------------
 # React dashboard (Phase 9)
