@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchHealth } from "../api/health";
+import MissionSwitcher from "./MissionSwitcher";
+import type { MissionLink } from "../api/types";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
@@ -8,6 +10,7 @@ type Props = {
   eventsPerSecond: number;
   mission: string | null;
   subsystem: string | null;
+  availableMissions: MissionLink[];
   onBackToOverview: () => void;
 };
 
@@ -30,6 +33,7 @@ export default function StatusBar({
   eventsPerSecond,
   mission,
   subsystem,
+  availableMissions,
   onBackToOverview,
 }: Props) {
   const [uptime, setUptime] = useState<number | null>(null);
@@ -78,6 +82,12 @@ export default function StatusBar({
         ● {STATE_LABELS[connectionState]}
       </span>
       <span className="status-bar__rate">{eventsPerSecond} ev/s</span>
+      {mission && (
+        <MissionSwitcher
+          availableMissions={availableMissions}
+          currentMissionId={mission}
+        />
+      )}
       {apiOnline ? (
         uptime !== null && (
           <span className="status-bar__uptime">

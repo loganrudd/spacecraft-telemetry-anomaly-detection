@@ -28,6 +28,7 @@ import asyncio
 import uuid
 from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -38,6 +39,28 @@ if TYPE_CHECKING:
     from spacecraft_telemetry.api.state import AppState
 
 _log = get_logger("api.broadcast")
+
+
+@dataclass
+class _ActiveInjection:
+    """Transient fault injection applied tick-by-tick by the shared replay loop.
+
+    Fields
+    ------
+    fault_type:       "spike" | "drift" | "flatline"
+    channels:         frozenset of channel IDs to inject; empty = all channels.
+    magnitude_sigma:  Additive offset in z-score units (unused for flatline).
+    total_ticks:      Number of ticks the fault lasts.
+    elapsed:          Ticks elapsed so far (advanced by end_tick).
+    _flatline_values: Per-channel value captured on first apply (sensor-death anchor).
+    """
+
+    fault_type: str  # "spike" | "drift" | "flatline"
+    channels: frozenset[str]
+    magnitude_sigma: float
+    total_ticks: int
+    elapsed: int = 0
+    _flatline_values: dict[str, float] = field(default_factory=dict)
 
 # Per-subscriber queue capacity.  Slow clients drop events rather than
 # back-pressuring the shared loop.
@@ -62,6 +85,10 @@ class EventBroadcaster:
         self._lock = asyncio.Lock()
         # Rolling per-channel backlog for new-subscriber catch-up.
         self._backlogs: dict[str, deque[bytes]] = {}
+        # Fault injection state — both set/read only from the asyncio event loop,
+        # so no additional locking is required (asyncio is single-threaded).
+        self._pending_injection: _ActiveInjection | None = None
+        self._active_injection: _ActiveInjection | None = None
 
     async def subscribe(
         self,
@@ -142,6 +169,88 @@ class EventBroadcaster:
     def subscriber_count(self) -> int:
         return len(self._subscribers)
 
+    # ------------------------------------------------------------------
+    # Fault injection — called by the shared replay loop and the endpoint
+    # ------------------------------------------------------------------
+
+    def request_injection(
+        self,
+        fault_type: str,
+        channels: frozenset[str],
+        magnitude_sigma: float,
+        total_ticks: int,
+    ) -> None:
+        """Queue a fault injection; replaces any already-pending request.
+
+        Called by the POST /api/inject endpoint from the asyncio event loop.
+        The loop activates it at the start of the next tick via begin_tick().
+        """
+        self._pending_injection = _ActiveInjection(
+            fault_type=fault_type,
+            channels=channels,
+            magnitude_sigma=magnitude_sigma,
+            total_ticks=total_ticks,
+        )
+
+    def begin_tick(self) -> None:
+        """Activate any pending injection.  Call once at the start of each tick.
+
+        Separating activation from advancement ensures a pending injection
+        requested during the previous tick is applied starting from tick 0,
+        not tick 1 (elapsed=0 when apply_fault is first called).
+        """
+        if self._pending_injection is not None:
+            self._active_injection = self._pending_injection
+            self._pending_injection = None
+
+    def apply_fault(self, channel: str, value: float) -> tuple[float, bool]:
+        """Apply the active injection (if any) to a single channel value.
+
+        Returns (modified_value, is_injected).  Called once per channel per
+        tick from run_shared_loop; the returned is_injected flag is ORed into
+        the engine's is_anomaly argument so the detector sees the label.
+
+        Fault math (all in z-score space — streaming analog of injection/faults.py;
+        per-tick state replaces array ops, so shapes differ slightly):
+          spike:    sign chosen so the offset moves away from nominal (value >= 0 -> +,
+                    value < 0 -> -), matching the faults.py sign heuristic for z-score data.
+          drift:    linear ramp 0 → magnitude_sigma over the first half of total_ticks,
+                    then holds at magnitude_sigma for the remainder (matches faults.py ramp+hold).
+          flatline: hold the value captured on the first call per channel.
+        """
+        inj = self._active_injection
+        if inj is None:
+            return value, False
+        if inj.channels and channel not in inj.channels:
+            return value, False
+
+        if inj.fault_type == "spike":
+            sign = 1.0 if value >= 0.0 else -1.0
+            return value + sign * inj.magnitude_sigma, True
+
+        if inj.fault_type == "drift":
+            ramp_len = max(1, inj.total_ticks // 2)
+            progress = (
+                inj.elapsed / max(1, ramp_len - 1) if inj.elapsed < ramp_len else 1.0
+            )
+            return value + inj.magnitude_sigma * progress, True
+
+        # flatline: anchor to each channel's first-seen value independently
+        if channel not in inj._flatline_values:
+            inj._flatline_values[channel] = value
+        return inj._flatline_values[channel], True
+
+    def end_tick(self) -> None:
+        """Advance injection elapsed counter.  Call once after all channels are processed.
+
+        Clears the active injection when its duration expires so apply_fault
+        returns clean values on the next tick.
+        """
+        if self._active_injection is not None:
+            self._active_injection.elapsed += 1
+            if self._active_injection.elapsed >= self._active_injection.total_ticks:
+                self._active_injection = None
+
 
 async def run_shared_loop(state: AppState) -> None:
     """Continuously replay all channels and broadcast events to subscribers.
@@ -199,19 +308,23 @@ async def run_shared_loop(state: AppState) -> None:
                 state.engines[ch].reset()
 
         for i in range(n_ticks):
+            broadcaster.begin_tick()
             for ch in channels:
                 if ch not in replay or ch not in state.engines:
                     continue
                 values, anom, timestamps = replay[ch]
                 ts = pd.Timestamp(timestamps[i]).to_pydatetime()
+                raw_value = float(values[i])
+                injected_value, is_injected = broadcaster.apply_fault(ch, raw_value)
                 event = state.engines[ch].step(
-                    float(values[i]), ts, bool(anom[i])
+                    injected_value, ts, bool(anom[i]) or is_injected
                 )
                 payload = (
                     f"event: telemetry\ndata: {event.model_dump_json()}\n\n"
                     .encode()
                 )
                 broadcaster.publish(ch, payload)
+            broadcaster.end_tick()
             await asyncio.sleep(delay)
 
         _log.info(

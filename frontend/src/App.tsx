@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import AnomalyAlerts from "./components/AnomalyAlerts";
 import ChannelPicker from "./components/ChannelPicker";
 import DriftPanel from "./components/DriftPanel";
+import InjectControl from "./components/InjectControl";
 import MissionOverview from "./components/MissionOverview";
 import StatusBar from "./components/StatusBar";
 import TelemetryChart from "./components/TelemetryChart";
@@ -218,6 +219,7 @@ export default function App() {
         eventsPerSecond={evPerSec}
         mission={health?.mission ?? null}
         subsystem={subsystem}
+        availableMissions={health?.available_missions ?? []}
         onBackToOverview={backToOverview}
       />
 
@@ -269,6 +271,7 @@ export default function App() {
             <div className="app__right">
               <AnomalyAlerts channels={selected} />
               <DriftPanel channels={selected} disabled={DRIFT_DISABLED || driftDisabled} />
+              <InjectControl />
             </div>
           </>
         )}
