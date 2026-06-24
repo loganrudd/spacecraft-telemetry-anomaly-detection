@@ -35,7 +35,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from spacecraft_telemetry.api.models import HealthResponse, StreamQueryParams
+from spacecraft_telemetry.api.models import (
+    HealthResponse,
+    InjectRequest,
+    InjectResponse,
+    StreamQueryParams,
+)
 from spacecraft_telemetry.api.state import AppState, LoadingState
 from spacecraft_telemetry.api.streaming import drift_stream, subscriber_stream, telemetry_stream
 
@@ -96,6 +101,7 @@ async def health(request: Request) -> JSONResponse:
                     channels_total=loading.channels_total,
                     channels_ready=loading.channels_ready,
                     uptime_s=loading.uptime_seconds(),
+                    available_missions=settings.api.available_missions,
                 ).model_dump(),
             )
         return JSONResponse(
@@ -106,6 +112,7 @@ async def health(request: Request) -> JSONResponse:
                 channels_total=loading.channels_total,
                 channels_ready=loading.channels_ready,
                 uptime_s=loading.uptime_seconds(),
+                available_missions=settings.api.available_missions,
             ).model_dump(),
         )
 
@@ -119,6 +126,7 @@ async def health(request: Request) -> JSONResponse:
                 channels_total=loading.channels_total if loading else 0,
                 uptime_s=app_state.uptime_seconds(),
                 mlflow_tracking_uri=app_state.mlflow_tracking_uri,
+                available_missions=app_state.settings.api.available_missions,
             ).model_dump(),
         )
 
@@ -142,6 +150,7 @@ async def health(request: Request) -> JSONResponse:
             },
             uptime_s=app_state.uptime_seconds(),
             mlflow_tracking_uri=app_state.mlflow_tracking_uri,
+            available_missions=app_state.settings.api.available_missions,
         ).model_dump(),
     )
 
@@ -251,4 +260,58 @@ async def stream_drift(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/inject
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/inject")
+async def inject_fault(request: Request, body: InjectRequest) -> JSONResponse:
+    """Inject a transient fault into the running shared replay loop.
+
+    The fault is applied to the next ``body.duration_ticks`` ticks in the
+    shared broadcaster loop, modifying the values seen by every connected SSE
+    subscriber simultaneously (correct behaviour for a mission console — all
+    viewers see the same fault).
+
+    Fault types mirror ``injection/faults.py`` so the demo uses the same math
+    as the offline HPO evaluation:
+      spike        — additive offset of ``magnitude_sigma`` sigmas for each tick.
+      drift_inject — linear ramp 0 → ``magnitude_sigma`` sigmas over the duration.
+      flatline     — hold each channel's current value (simulates sensor death).
+
+    Returns 503 when the shared loop is not running (test / no-lifespan mode).
+    Returns 400 for unknown channel names.
+    """
+    state = _get_ready_state(request)
+    broadcaster = state.broadcaster
+    if broadcaster is None:
+        raise HTTPException(
+            status_code=503,
+            detail="inject not available: shared loop is not running",
+        )
+
+    if body.channels:
+        unknown = sorted(set(body.channels) - set(state.channels_loaded))
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown channels: {unknown}")
+
+    effective_channels = body.channels or state.channels_loaded
+    broadcaster.request_injection(
+        fault_type=body.fault_type,
+        channels=frozenset(body.channels),  # empty frozenset = all channels in loop
+        magnitude_sigma=body.magnitude_sigma,
+        total_ticks=body.duration_ticks,
+    )
+    return JSONResponse(
+        InjectResponse(
+            status="accepted",
+            fault_type=body.fault_type,
+            channels=effective_channels,
+            magnitude_sigma=body.magnitude_sigma,
+            duration_ticks=body.duration_ticks,
+        ).model_dump()
     )

@@ -166,9 +166,10 @@ async def _load_replay_slice(
     """
     async with sem:
         try:
+            replay_dir = settings.api.replay_data_dir or settings.preprocess.processed_data_dir
             values, _seg, anom, timestamps = await asyncio.to_thread(
                 load_series_parquet,
-                settings.preprocess.processed_data_dir,
+                replay_dir,
                 settings.api.mission,
                 ch,
                 "test",
@@ -408,7 +409,7 @@ def create_app(settings: Settings) -> FastAPI:
             CORSMiddleware,
             allow_origins=settings.api.cors_allowed_origins,
             allow_credentials=False,
-            allow_methods=["GET"],
+            allow_methods=["GET", "POST"],
             allow_headers=["*"],
             expose_headers=["X-Correlation-Id"],
         )
