@@ -580,6 +580,16 @@ class Settings(BaseSettings):
     collect: CollectorConfig = CollectorConfig()
     injection: InjectionConfig = InjectionConfig()
 
+    @property
+    def replay_dir(self) -> str:
+        """Parquet source directory used by the replay path.
+
+        Returns api.replay_data_dir when set; otherwise falls back to
+        preprocess.processed_data_dir. Single source of truth consumed by
+        _load_replay_slice (app.py) and the streaming pump generators (streaming.py).
+        """
+        return self.api.replay_data_dir or self.preprocess.processed_data_dir
+
     @classmethod
     def settings_customise_sources(
         cls,

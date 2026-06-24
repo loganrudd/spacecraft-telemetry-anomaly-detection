@@ -277,11 +277,11 @@ async def inject_fault(request: Request, body: InjectRequest) -> JSONResponse:
     subscriber simultaneously (correct behaviour for a mission console — all
     viewers see the same fault).
 
-    Fault types mirror ``injection/faults.py`` so the demo uses the same math
-    as the offline HPO evaluation:
-      spike        — additive offset of ``magnitude_sigma`` sigmas for each tick.
-      drift_inject — linear ramp 0 → ``magnitude_sigma`` sigmas over the duration.
-      flatline     — hold each channel's current value (simulates sensor death).
+    Fault types are streaming analogs of ``injection/faults.py``:
+      spike    — offset of ``magnitude_sigma`` sigmas, sign chosen to amplify deviation.
+      drift    — linear ramp 0 → ``magnitude_sigma`` over the first half of the duration,
+                 then holds at ``magnitude_sigma`` for the remainder.
+      flatline — hold each channel's current value (simulates sensor death).
 
     Returns 503 when the shared loop is not running (test / no-lifespan mode).
     Returns 400 for unknown channel names.

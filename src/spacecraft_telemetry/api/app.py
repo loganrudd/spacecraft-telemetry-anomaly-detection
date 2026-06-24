@@ -166,7 +166,7 @@ async def _load_replay_slice(
     """
     async with sem:
         try:
-            replay_dir = settings.api.replay_data_dir or settings.preprocess.processed_data_dir
+            replay_dir = settings.replay_dir
             values, _seg, anom, timestamps = await asyncio.to_thread(
                 load_series_parquet,
                 replay_dir,

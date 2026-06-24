@@ -1,12 +1,12 @@
 import { useState } from "react";
 import { API_BASE } from "../api/types";
 
-type FaultType = "spike" | "drift_inject" | "flatline";
+type FaultType = "spike" | "drift" | "flatline";
 type InjStatus = "idle" | "injecting" | "done" | "error";
 
 const FAULT_LABELS: Record<FaultType, string> = {
   spike: "Spike",
-  drift_inject: "Drift",
+  drift: "Drift",
   flatline: "Flatline",
 };
 
@@ -71,7 +71,7 @@ export default function InjectControl() {
             value={faultType}
             onChange={(e) => setFaultType(e.target.value as FaultType)}
           >
-            {(["spike", "drift_inject", "flatline"] as FaultType[]).map((ft) => (
+            {(["spike", "drift", "flatline"] as FaultType[]).map((ft) => (
               <option key={ft} value={ft}>
                 {FAULT_LABELS[ft]}
               </option>

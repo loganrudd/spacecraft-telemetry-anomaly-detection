@@ -9,8 +9,6 @@ from pydantic import BaseModel, field_validator
 
 from spacecraft_telemetry.core.config import MissionLink
 
-__all__ = ["MissionLink"]  # re-export so callers import from one place
-
 
 class TelemetryEvent(BaseModel):
     """Per-tick inference result emitted by the SSE telemetry stream."""
@@ -97,7 +95,7 @@ class DriftEvent(BaseModel):
 class InjectRequest(BaseModel):
     """Request body for POST /api/inject."""
 
-    fault_type: Literal["spike", "drift_inject", "flatline"]
+    fault_type: Literal["spike", "drift", "flatline"]
     # Channel IDs to inject; empty list = all loaded channels.
     channels: list[str] = []
     # Additive offset in z-score units (ignored for flatline).
@@ -108,15 +106,15 @@ class InjectRequest(BaseModel):
     @field_validator("magnitude_sigma")
     @classmethod
     def mag_positive(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError(f"magnitude_sigma must be > 0, got {v}")
+        if not 0 < v <= 50:
+            raise ValueError(f"magnitude_sigma must be in (0, 50], got {v}")
         return v
 
     @field_validator("duration_ticks")
     @classmethod
     def dur_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"duration_ticks must be >= 1, got {v}")
+        if not 1 <= v <= 1000:
+            raise ValueError(f"duration_ticks must be in [1, 1000], got {v}")
         return v
 
 

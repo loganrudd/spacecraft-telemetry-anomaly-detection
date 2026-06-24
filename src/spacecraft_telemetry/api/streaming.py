@@ -242,10 +242,7 @@ async def telemetry_stream(
         # this, state from a previous stream leaks in and anomaly timing is
         # non-deterministic across page refreshes.
         engine.reset()
-        _replay_dir = (
-            state.settings.api.replay_data_dir
-            or state.settings.preprocess.processed_data_dir
-        )
+        _replay_dir = state.settings.replay_dir
         async for ts, val, anom_true in replay_channel(
             _replay_dir,
             state.mission,
@@ -327,10 +324,7 @@ async def drift_stream(
         )
         drift_event_count = 0
 
-        _replay_dir = (
-            state.settings.api.replay_data_dir
-            or state.settings.preprocess.processed_data_dir
-        )
+        _replay_dir = state.settings.replay_dir
         async for _ts, val, _anom in replay_channel(
             _replay_dir,
             state.mission,

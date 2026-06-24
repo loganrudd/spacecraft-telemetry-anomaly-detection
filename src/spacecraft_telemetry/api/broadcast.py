@@ -47,7 +47,7 @@ class _ActiveInjection:
 
     Fields
     ------
-    fault_type:       "spike" | "drift_inject" | "flatline"
+    fault_type:       "spike" | "drift" | "flatline"
     channels:         frozenset of channel IDs to inject; empty = all channels.
     magnitude_sigma:  Additive offset in z-score units (unused for flatline).
     total_ticks:      Number of ticks the fault lasts.
@@ -55,7 +55,7 @@ class _ActiveInjection:
     _flatline_values: Per-channel value captured on first apply (sensor-death anchor).
     """
 
-    fault_type: str
+    fault_type: str  # "spike" | "drift" | "flatline"
     channels: frozenset[str]
     magnitude_sigma: float
     total_ticks: int
@@ -210,10 +210,13 @@ class EventBroadcaster:
         tick from run_shared_loop; the returned is_injected flag is ORed into
         the engine's is_anomaly argument so the detector sees the label.
 
-        Fault math (all in z-score space, matching injection/faults.py):
-          spike:       additive offset = magnitude_sigma for every tick.
-          drift_inject: linear ramp 0 → magnitude_sigma over total_ticks.
-          flatline:    hold the value captured on the first call per channel.
+        Fault math (all in z-score space — streaming analog of injection/faults.py;
+        per-tick state replaces array ops, so shapes differ slightly):
+          spike:    sign chosen so the offset moves away from nominal (value >= 0 → +,
+                    value < 0 → −), matching the faults.py sign heuristic for z-score data.
+          drift:    linear ramp 0 → magnitude_sigma over the first half of total_ticks,
+                    then holds at magnitude_sigma for the remainder (matches faults.py ramp+hold).
+          flatline: hold the value captured on the first call per channel.
         """
         inj = self._active_injection
         if inj is None:
@@ -222,10 +225,15 @@ class EventBroadcaster:
             return value, False
 
         if inj.fault_type == "spike":
-            return value + inj.magnitude_sigma, True
+            sign = 1.0 if value >= 0.0 else -1.0
+            return value + sign * inj.magnitude_sigma, True
 
-        if inj.fault_type == "drift_inject":
-            progress = inj.elapsed / max(1, inj.total_ticks - 1)
+        if inj.fault_type == "drift":
+            ramp_len = max(1, inj.total_ticks // 2)
+            if inj.elapsed < ramp_len:
+                progress = inj.elapsed / max(1, ramp_len - 1)
+            else:
+                progress = 1.0
             return value + inj.magnitude_sigma * progress, True
 
         # flatline: anchor to each channel's first-seen value independently

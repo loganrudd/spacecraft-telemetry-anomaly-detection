@@ -26,7 +26,7 @@ describe("InjectControl", () => {
 
   it("shows magnitude input for drift", () => {
     render(<InjectControl />);
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "drift_inject" } });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "drift" } });
     expect(screen.getByLabelText(/magnitude/i)).toBeInTheDocument();
   });
 
