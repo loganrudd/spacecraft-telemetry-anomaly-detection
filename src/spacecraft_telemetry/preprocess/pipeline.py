@@ -31,6 +31,7 @@ from upath import UPath
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.paths import absolutize_if_local, to_upath
+from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS
 from spacecraft_telemetry.preprocess.io import (
     discover_iss_channels,
     read_all_iss_ticks_for_los,
@@ -616,6 +617,23 @@ def run_iss_preprocessing(
     channels_txt = mission_out / "channels.txt"
     channels_txt.write_text("\n".join(successful_channels) + "\n")
     log.info("iss_pipeline.channels_manifest", path=str(channels_txt), n=len(successful_channels))
+
+    subsystem_map = {
+        ch: ISS_CHANNELS[ch].subsystem
+        for ch in successful_channels
+        if ch in ISS_CHANNELS
+    }
+    metadata_dir = mission_out / "metadata"
+    if not str(metadata_dir).startswith("gs://"):
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps(subsystem_map, indent=2)
+    )
+    log.info(
+        "iss_pipeline.subsystem_map_written",
+        path=str(metadata_dir / "channel_subsystems.json"),
+        n=len(subsystem_map),
+    )
 
     summary: dict[str, int] = {
         "channels_processed": len(channel_list),
