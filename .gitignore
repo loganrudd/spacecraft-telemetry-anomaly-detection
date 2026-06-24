@@ -79,6 +79,7 @@ docs/PLANNING_MODE_GUIDE.md
 !package-lock.json
 !tsconfig.json
 !pyrightconfig.json
+!configs/injection_profiles.json
 
 # Frontend build artifacts
 frontend/node_modules/

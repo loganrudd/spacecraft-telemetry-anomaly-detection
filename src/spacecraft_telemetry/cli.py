@@ -824,6 +824,13 @@ def ray_train(
     "last 40% (leakage-free baseline-vs-tuned comparison); full_test = every "
     "window (coverage view, scores channels whose anomalies fall outside the held-out slice).",
 )
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir for this run. "
+    "Use with --mission ISS to point at an injected dataset (Phase 15).",
+)
 @click.pass_context
 def ray_score(
     ctx: click.Context,
@@ -834,6 +841,7 @@ def ray_score(
     max_channels: int | None,
     tuned_configs: Path | None,
     eval_split: str,
+    processed_dir: str | None,
 ) -> None:
     """Score channels in parallel using Ray Core.
 
@@ -856,6 +864,14 @@ def ray_score(
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("ray.score.processed_dir_override", path=processed_dir)
 
     tuned: dict[str, Any] | None = None
     if tuned_configs is not None:
@@ -945,6 +961,13 @@ def ray_score(
     default=False,
     help="Overwrite existing tuned_configs.json when it contains invalid JSON.",
 )
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir for this run. "
+    "Use with --mission ISS to point at an injected dataset (Phase 15).",
+)
 @click.pass_context
 def ray_tune(
     ctx: click.Context,
@@ -954,6 +977,7 @@ def ray_tune(
     subsystem: str | None,
     num_samples: int | None,
     overwrite_existing: bool,
+    processed_dir: str | None,
 ) -> None:
     """Run Ray Tune HPO for scoring parameters (Phase 5).
 
@@ -983,6 +1007,14 @@ def ray_tune(
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("ray.tune.processed_dir_override", path=processed_dir)
 
     # Install ID-token auth before any MLflow call reaches Cloud Run.
     # train/score go through _ensure_mlflow_experiments → configure_mlflow;
@@ -1486,6 +1518,121 @@ def drift_batch_mission(
 
 
 main.add_command(drift_group, name="drift")
+
+
+# ---------------------------------------------------------------------------
+# inject group (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+@click.group("inject")
+def inject_group() -> None:
+    """Anomaly injection commands for ISS (Phase 15)."""
+
+
+@inject_group.command("run")
+@click.option(
+    "--mission",
+    default="ISS",
+    show_default=True,
+    help="Mission ID to inject into (reads from settings.preprocess.processed_data_dir).",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs. Defaults to all channels discovered in the test split.",
+)
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir (source of nominal test split).",
+)
+@click.option(
+    "--output-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.injection.output_dir (destination for injected data).",
+)
+@click.pass_context
+def inject_run(
+    ctx: click.Context,
+    mission: str,
+    channels: str | None,
+    processed_dir: str | None,
+    output_dir: str | None,
+) -> None:
+    """Inject synthetic faults into the nominal ISS test split.
+
+    Reads the nominal test split from processed_data_dir, injects faults
+    per-channel using ESA-grounded profiles from injection_profiles.json,
+    and writes an injected copy to injection.output_dir.
+
+    Also copies channel_subsystems.json so downstream `ray score` and
+    `ray tune` commands can group by subsystem without the original dir.
+
+    The run order for ISS HPO:
+
+        spacecraft-telemetry inject run --mission ISS
+        spacecraft-telemetry ray score --mission ISS --processed-dir data/processed_injected
+        spacecraft-telemetry ray tune  --mission ISS --processed-dir data/processed_injected
+
+    Examples:
+
+        # Inject all ISS channels with defaults
+        spacecraft-telemetry inject run --mission ISS
+
+        # Two channels only, custom dirs
+        spacecraft-telemetry inject run --mission ISS \\
+            --channels S1000003,P1000003 \\
+            --processed-dir data/processed \\
+            --output-dir data/processed_injected
+    """
+    from spacecraft_telemetry.injection import generate_injected_dataset
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("inject.processed_dir_override", path=processed_dir)
+
+    if output_dir is not None:
+        settings = settings.model_copy(
+            update={"injection": settings.injection.model_copy(
+                update={"output_dir": output_dir}
+            )}
+        )
+        log.info("inject.output_dir_override", path=output_dir)
+
+    channel_list: list[str] | None = None
+    if channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+
+    log.info(
+        "inject.run.start",
+        mission=mission,
+        channels=channel_list,
+        source=settings.preprocess.processed_data_dir,
+        dest=settings.injection.output_dir,
+    )
+
+    manifest = generate_injected_dataset(settings, mission, channel_list)
+
+    n_channels = len(manifest)
+    n_faults = sum(len(v) for v in manifest.values())
+    click.echo(f"Mission    : {mission}")
+    click.echo(f"Channels   : {n_channels}")
+    click.echo(f"Faults     : {n_faults} total ({n_faults // max(n_channels, 1)} avg/channel)")
+    click.echo(f"Output dir : {settings.injection.output_dir}")
+    click.echo(f"Manifest   : {settings.injection.output_dir}/{mission}/injection_manifest.json")
+
+
+main.add_command(inject_group, name="inject")
 
 
 # ---------------------------------------------------------------------------

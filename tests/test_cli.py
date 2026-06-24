@@ -1238,3 +1238,87 @@ class TestCollectCommand:
         assert captured_dest[0].startswith("gs://"), (
             f"gs:// URI mangled: {captured_dest[0]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# inject group (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+class TestInjectGroup:
+    def test_inject_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["inject", "--help"])
+        assert result.exit_code == 0
+        assert "inject" in result.output.lower()
+
+    def test_inject_run_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["inject", "run", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--processed-dir" in result.output
+        assert "--output-dir" in result.output
+
+    def test_inject_run_calls_generate(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        manifest = {"S1000003": [{"type": "drift", "start": 10, "end": 50, "duration": 40,
+                                  "magnitude_sigma": 1.0, "signal_class": "slow_lownoise"}]}
+
+        with patch(
+            "spacecraft_telemetry.injection.generate_injected_dataset",
+            return_value=manifest,
+        ) as mock_gen:
+            result = runner.invoke(
+                main,
+                ["--env=local", "inject", "run", "--mission=ISS",
+                 "--channels=S1000003",
+                 f"--processed-dir={tmp_path}/proc",
+                 f"--output-dir={tmp_path}/injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_gen.assert_called_once()
+        call_kwargs = mock_gen.call_args
+        assert call_kwargs.args[1] == "ISS"  # mission
+        assert call_kwargs.args[2] == ["S1000003"]  # channel_list
+
+    def test_inject_run_processed_dir_override_applied(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        captured_settings: list = []
+
+        def _fake_gen(settings, mission, channels):
+            captured_settings.append(settings)
+            return {}
+
+        with patch("spacecraft_telemetry.injection.generate_injected_dataset", _fake_gen):
+            result = runner.invoke(
+                main,
+                ["--env=local", "inject", "run", "--mission=ISS",
+                 f"--processed-dir={tmp_path}/custom_proc",
+                 f"--output-dir={tmp_path}/injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured_settings
+        assert str(captured_settings[0].preprocess.processed_data_dir) == str(
+            tmp_path / "custom_proc"
+        )
+
+
+class TestRayScoreProcessedDirOption:
+    def test_processed_dir_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--processed-dir" in result.output
+
+
+class TestRayTuneProcessedDirOption:
+    def test_processed_dir_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "tune", "--help"])
+        assert result.exit_code == 0
+        assert "--processed-dir" in result.output
