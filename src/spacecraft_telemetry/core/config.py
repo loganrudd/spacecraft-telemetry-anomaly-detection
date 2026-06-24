@@ -478,6 +478,57 @@ class CollectorConfig(BaseModel):
         return v
 
 
+class InjectionConfig(BaseModel):
+    """Anomaly injection configuration (Phase 15).
+
+    Controls how synthetic faults are placed into held-out nominal ISS telemetry
+    to manufacture is_anomaly labels for injection-driven HPO.
+
+    Per-channel profiles in ``profiles_path`` override the global fallback
+    fields when present.  The fallback values are ESA-anchored (derived from
+    characterizing 47 anomalous ESA channels): sustained faults dominate
+    (flatline/drift ~70% combined), magnitude 0.5-2 sigma, wide duration range.
+    """
+
+    seed: int = 42
+    output_dir: str = "data/processed_injected"
+    faults_per_channel: int = 8
+    min_gap_between_faults: int = 50
+    # Path to per-ISS-channel injection profiles JSON (from analyze_esa_anomalies.py).
+    profiles_path: str = "configs/injection_profiles.json"
+
+    # Global fallback fault-type weights (ESA-anchored, sustained-leaning).
+    # Indices match: spike, flatline, drift.
+    fault_type_weights: dict[str, float] = {
+        "spike": 0.05,
+        "flatline": 0.65,
+        "drift": 0.30,
+    }
+    # Magnitude sweep range in sigma units (ESA anchor: most anomalies 0.5-1.5 sigma).
+    magnitude_sigma_range: list[float] = [0.5, 2.0]
+    # Duration ranges per fault type (in grid timesteps; ISS grid = 30 s).
+    spike_duration_range: list[int] = [1, 5]
+    drift_duration_range: list[int] = [20, 400]
+    flatline_duration_range: list[int] = [20, 400]
+
+    @field_validator("faults_per_channel")
+    @classmethod
+    def at_least_two(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(
+                f"faults_per_channel must be >= 2 (need at least 1 in each HPO half), got {v}"
+            )
+        return v
+
+    @field_validator("magnitude_sigma_range", "spike_duration_range",
+                     "drift_duration_range", "flatline_duration_range")
+    @classmethod
+    def two_element_range(cls, v: list[float] | list[int]) -> list[float] | list[int]:
+        if len(v) != 2 or v[0] >= v[1]:
+            raise ValueError(f"range must be [low, high] with low < high, got {v}")
+        return v
+
+
 class _YamlConfigSource(PydanticBaseSettingsSource):
     """Reads settings from configs/{env}.yaml.
 
@@ -522,6 +573,7 @@ class Settings(BaseSettings):
     drift: DriftConfig = DriftConfig()
     api: ApiConfig = ApiConfig()
     collect: CollectorConfig = CollectorConfig()
+    injection: InjectionConfig = InjectionConfig()
 
     @classmethod
     def settings_customise_sources(

@@ -8,6 +8,7 @@ from spacecraft_telemetry.core.config import (
     ApiConfig,
     DataConfig,
     DriftConfig,
+    InjectionConfig,
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
@@ -530,3 +531,57 @@ class TestDriftConfig:
         settings = Settings()
         assert isinstance(settings.drift, DriftConfig)
 
+
+
+class TestInjectionConfig:
+    def test_settings_has_injection_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.injection, InjectionConfig)
+
+    def test_defaults(self) -> None:
+        cfg = InjectionConfig()
+        assert cfg.seed == 42
+        assert cfg.faults_per_channel == 8
+        assert cfg.output_dir == "data/processed_injected"
+        assert cfg.profiles_path == "configs/injection_profiles.json"
+        assert cfg.magnitude_sigma_range[0] < cfg.magnitude_sigma_range[1]
+        weights = cfg.fault_type_weights
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_env_var_overrides_seed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SPACECRAFT_INJECTION__SEED", "99")
+        settings = Settings()
+        assert settings.injection.seed == 99
+
+    def test_env_var_overrides_output_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SPACECRAFT_INJECTION__OUTPUT_DIR", "/tmp/injected")
+        settings = Settings()
+        assert settings.injection.output_dir == "/tmp/injected"
+
+    def test_faults_per_channel_minimum(self) -> None:
+        with pytest.raises(ValueError, match="faults_per_channel must be >= 2"):
+            InjectionConfig(faults_per_channel=1)
+
+    def test_invalid_magnitude_range_equal_bounds(self) -> None:
+        with pytest.raises(ValueError, match="low < high"):
+            InjectionConfig(magnitude_sigma_range=[1.0, 1.0])
+
+    def test_invalid_magnitude_range_reversed(self) -> None:
+        with pytest.raises(ValueError, match="low < high"):
+            InjectionConfig(magnitude_sigma_range=[2.0, 1.0])
+
+    def test_profile_lookup_falls_back_to_globals(self, tmp_path: Path) -> None:
+        """When a channel is absent from profiles_path, global fallback applies."""
+        import json
+
+        from spacecraft_telemetry.injection.faults import ChannelProfile
+
+        profiles = {"S1000003": {"signal_class": "slow_lownoise"}}
+        p = tmp_path / "profiles.json"
+        p.write_text(json.dumps(profiles))
+
+        # Unknown channel falls back to ChannelProfile() defaults
+        raw = json.loads(p.read_text())
+        channel_entry = raw.get("UNKNOWN_CHANNEL", {})
+        profile = ChannelProfile.from_dict(channel_entry)
+        assert profile.signal_class == "slow_lownoise"  # default
