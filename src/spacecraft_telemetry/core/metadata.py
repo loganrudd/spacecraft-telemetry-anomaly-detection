@@ -60,10 +60,24 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
 def _load_cached(
     processed_dir: str, sample_dir: str, raw_dir: str, mission: str
 ) -> dict[str, str]:
-    processed_map_path = (
-        to_upath(processed_dir) / mission / "metadata" / "channel_subsystems.json"
-    )
-    if processed_map_path.exists():
+    # When running against an injected test split (_injected subdirectory), the
+    # channel_subsystems.json lives in the nominal processed bucket, not under
+    # _injected. Try the nominal parent as a transparent fallback so that
+    # INJECTED=1 tune jobs find the subsystem map without a separate env var.
+    candidate_dirs = [processed_dir]
+    _INJECTED_SUFFIX = "/_injected"
+    if processed_dir.rstrip("/").endswith("/_injected") or "/_injected/" in processed_dir:
+        nominal = processed_dir.rstrip("/")
+        if nominal.endswith("/_injected"):
+            nominal = nominal[: -len(_INJECTED_SUFFIX)]
+        candidate_dirs.append(nominal)
+
+    for _dir in candidate_dirs:
+        processed_map_path = (
+            to_upath(_dir) / mission / "metadata" / "channel_subsystems.json"
+        )
+        if not processed_map_path.exists():
+            continue
         try:
             loaded = json.loads(processed_map_path.read_text())
         except json.JSONDecodeError:
@@ -71,19 +85,19 @@ def _load_cached(
                 "processed subsystem map is invalid JSON; falling back to channels.csv",
                 path=str(processed_map_path),
             )
-        else:
-            if isinstance(loaded, dict):
-                processed_mapping = {
-                    str(channel): str(subsystem)
-                    for channel, subsystem in loaded.items()
-                    if str(channel).strip() and str(subsystem).strip()
-                }
-                if processed_mapping:
-                    return processed_mapping
-                log.warning(
-                    "processed subsystem map is empty; falling back to channels.csv",
-                    path=str(processed_map_path),
-                )
+            continue
+        if isinstance(loaded, dict):
+            processed_mapping = {
+                str(channel): str(subsystem)
+                for channel, subsystem in loaded.items()
+                if str(channel).strip() and str(subsystem).strip()
+            }
+            if processed_mapping:
+                return processed_mapping
+            log.warning(
+                "processed subsystem map is empty; falling back to channels.csv",
+                path=str(processed_map_path),
+            )
 
     # CSV fallback. Try sample dir first (the one that exists in cloud), then
     # raw (local dev). Both via to_upath so gs:// resolves.
