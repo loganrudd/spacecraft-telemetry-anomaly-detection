@@ -15,11 +15,17 @@
 #   CHANNELS_ARG        Channel selector (--channels or --channels-from).
 #   WINDOW_SIZE_OVERRIDE  128 for ISS, 250 for ESA (set by cloud_score.sh).
 #
-# Sizing rationale:
+# Sizing rationale (SINGLE-NODE — no worker group):
 #   Scoring is an LSTM forward pass (CPU, no CUDA context) + pure-numpy anomaly
-#   scoring. For 6 ISS channels at W=128 the forward pass is fast on CPU.
-#   Worker: 8 vCPU / 8 GiB — runs all 6 score tasks concurrently (num_cpus=1 each).
-#   No GPU node → no 3–5 min provisioning wait.
+#   scoring. For 6 ISS channels at W=128 it is fast and tiny, so a separate
+#   worker group is pure overhead: GKE Autopilot repeatedly failed to place an
+#   8-vCPU worker (Insufficient cpu / NodeTerminated launch→kill cycle) while
+#   tasks sat pending. Instead the head runs the tasks directly — num-cpus=6
+#   schedules all 6 score tasks (num_cpus=1 each) on one node, leaving ~2 vCPU
+#   of the 8-vCPU request for the driver + GCS/dashboard daemons. No autoscaler,
+#   no worker provisioning, no GPU node → no 3–5 min wait, no placement churn.
+#   (If the full 18-channel map is ever scored on CPU, 6 slots → 3 waves; still
+#   fine. For larger jobs, prefer the GPU manifest.)
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -48,12 +54,15 @@ spec:
 
   rayClusterSpec:
     rayVersion: "2.31.0"
-    enableInTreeAutoscaling: true
+    # Single-node: no worker group, so no autoscaler needed.
+    enableInTreeAutoscaling: false
 
     headGroupSpec:
       rayStartParams:
         dashboard-host: "0.0.0.0"
-        num-cpus: "0"
+        # num-cpus>0 so score tasks run ON the head (no worker group). 6 channels
+        # → 6 task slots; ~2 vCPU of the 8-vCPU request left for driver + GCS.
+        num-cpus: "6"
       template:
         spec:
           serviceAccountName: ray-sa
@@ -83,11 +92,11 @@ spec:
                   value: "${TUNED}"
               resources:
                 requests:
-                  cpu: "1"
-                  memory: "2Gi"
+                  cpu: "8"
+                  memory: "16Gi"
                 limits:
-                  cpu: "1"
-                  memory: "2Gi"
+                  cpu: "8"
+                  memory: "16Gi"
               livenessProbe:
                 exec:
                   command:
@@ -117,41 +126,6 @@ spec:
                 timeoutSeconds: 20
                 failureThreshold: 10
 
-    workerGroupSpecs:
-      - groupName: cpu-workers
-        replicas: 1
-        minReplicas: 0
-        maxReplicas: 1
-        rayStartParams: {}
-        template:
-          spec:
-            serviceAccountName: ray-sa
-            containers:
-              - name: ray-worker
-                image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
-                env:
-                  - name: SPACECRAFT_ENV
-                    value: cloud
-                  - name: SPACECRAFT_MLFLOW__TRACKING_URI
-                    value: ${MLFLOW_URL}
-                  - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                    value: ${PROCESSED_DATA_DIR}
-                  - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
-                    value: gs://${PROJECT_ID}-sample-data
-                  - name: MLFLOW_ARTIFACTS_DESTINATION
-                    value: gs://${PROJECT_ID}-artifacts/mlflow
-                  - name: SPACECRAFT_RAY__ADDRESS
-                    value: auto
-                  - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                    value: "0"
-                  - name: SPACECRAFT_MODEL__WINDOW_SIZE
-                    value: "${WINDOW_SIZE_OVERRIDE}"
-                  - name: MLFLOW_HTTP_REQUEST_TIMEOUT
-                    value: "30"
-                resources:
-                  requests:
-                    cpu: "8"
-                    memory: "8Gi"
-                  limits:
-                    cpu: "8"
-                    memory: "8Gi"
+    # No workerGroupSpecs — single-node cluster. Score tasks run on the head
+    # (num-cpus=6 above). See the sizing rationale at the top of this file for
+    # why a separate CPU worker group was removed (Autopilot placement churn).
