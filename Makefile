@@ -392,7 +392,10 @@ cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=�
 		./scripts/cloud_train.sh
 
 cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-processed-data/_injected (PROJECT_ID=… MISSION=ISS CHANNELS=…). Local single-process; reads/writes GCS.
+	# ISS uses W=128 (LOS segment constraint); fault placement must match the
+	# window_size that score/tune evaluate with, or candidate/segment cutoffs skew.
 	SSL_CERT_FILE=$$($(RUN) python -m certifi) \
+	$(if $(filter ISS,$(MISSION)),SPACECRAFT_MODEL__WINDOW_SIZE=128,) \
 	$(RUN) spacecraft-telemetry --env cloud inject run \
 		--mission $(MISSION) \
 		$(if $(CHANNELS),--channels $(CHANNELS),) \
