@@ -18,12 +18,16 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+INJECTED="${INJECTED:-0}"
+CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)     MISSION="$2"; shift 2 ;;
+    --injected)    INJECTED="1"; shift ;;
+    --channels)    CHANNELS="$2"; shift 2 ;;
     --no-wait)     NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -33,7 +37,19 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MLFLOW_URL MISSION
+
+# INJECTED=1 tunes against the manufactured-label dataset (ISS injection-driven
+# HPO): sweep on the _injected hpo_portion and select channels explicitly, since
+# `inject run` writes no channels.txt. Default is the nominal flow.
+if [[ "${INJECTED}" = "1" ]]; then
+  : "${CHANNELS:?INJECTED=1 requires CHANNELS=ch1,ch2,... (the _injected dir has no channels.txt)}"
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
+  CHANNELS_ARG="--channels ${CHANNELS}"
+else
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG
 
 echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION})"
 

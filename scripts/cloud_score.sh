@@ -35,6 +35,8 @@ set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
 TUNED="${TUNED:-}"
+INJECTED="${INJECTED:-0}"
+CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
@@ -42,6 +44,8 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
     --tuned)        TUNED="1"; shift ;;
+    --injected)     INJECTED="1"; shift ;;
+    --channels)     CHANNELS="$2"; shift 2 ;;
     --no-wait)      NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -51,6 +55,18 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+
+# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO):
+# read the test split from the _injected dir and select channels explicitly,
+# because `inject run` writes no channels.txt. Default is the nominal flow.
+if [[ "${INJECTED}" = "1" ]]; then
+  : "${CHANNELS:?INJECTED=1 requires CHANNELS=ch1,ch2,... (the _injected dir has no channels.txt)}"
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
+  CHANNELS_ARG="--channels ${CHANNELS}"
+else
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+fi
 # GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
 # Packing is bounded by GPU MEMORY, not vCPUs: each task is a separate process
 # holding ~3.6 GiB (CUDA context + batch-2048 activations), so ~5 fit on the
@@ -61,7 +77,8 @@ NUM_GPUS="${NUM_GPUS:-0.2}"
 # full_test scores every window — a coverage view that also evaluates channels
 # whose anomalies fall outside the held-out slice.
 EVAL_SPLIT="${EVAL_SPLIT:-final_portion}"
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT \
+  PROCESSED_DATA_DIR CHANNELS_ARG
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"

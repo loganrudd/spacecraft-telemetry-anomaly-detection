@@ -341,6 +341,10 @@ make cloud-up
 # Preprocess all 18 ISS channels (reads gs://{project}-raw-data/ISS/ticks/)
 make cloud-preprocess MISSION=ISS
 
+# Or just the 6 Phase-12 validation channels (one+ per subsystem) for the demo:
+make cloud-preprocess MISSION=ISS \
+  CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+
 make cloud-down
 ```
 
@@ -348,6 +352,12 @@ make cloud-down
 manifest used for ESA — the env var is ignored by the ESA path).  Output lands in
 `gs://{project}-processed-data/ISS/{train,test}/…/part.parquet` alongside
 `normalization_params.json`.
+
+> **ISS prerequisite — raw-data read for the Ray SA.** ESA preprocessing reads the *sample*
+> bucket, but ISS reads ticks from `gs://{project}-raw-data/ISS/ticks/`, so the Ray service
+> account needs `objectViewer` on the raw-data bucket (`ray_raw_viewer` / `ray_wif_raw_viewer`
+> in `infra/iam.tf`). Provisioned by `make cloud-up`. Without it the RayJob fails with
+> `storage.objects.list denied on …-raw-data`.
 
 Wall-clock: ~10 min (18 channels, each a 30 s-grid ~14k-row Parquet).
 
@@ -357,6 +367,83 @@ gsutil ls "gs://${PROJECT_ID}-processed-data/ISS/train/mission_id=ISS/"
 gsutil cat "gs://${PROJECT_ID}-processed-data/ISS/normalization_params.json" \
   | python3 -m json.tool | head -20
 ```
+
+## ISS Training + Injection-Driven HPO (Phases 14–16)
+
+ISS has no labeled anomalies, so detection is evaluated by **fault injection**: inject known
+faults into the nominal test split to manufacture `is_anomaly` ground truth, then run the same
+Ray Tune F0.5 HPO against them. The demo uses the 6 Phase-12 validation channels (drop
+`CHANNELS` to run all 18).
+
+```bash
+export PROJECT_ID=spacecraft-telemetry-ads
+export REGION=us-central1
+export MLFLOW_URL=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)')
+CH=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+
+make cloud-up
+
+# 1. Train one telemanom-ISS-{channel} LSTM per channel
+make cloud-train  MISSION=ISS CHANNELS=$CH
+
+# 2. Inject faults into the nominal test split → gs://{project}-processed-data/_injected
+#    Runs locally (single-process, reads/writes GCS) — no GKE job, it never touches the models.
+make cloud-inject MISSION=ISS CHANNELS=$CH
+
+# 3. Baseline score on the injected data (errors.npy + Hundman-default metrics)
+make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH EVAL_SPLIT=full_test
+
+# 4. Tune scoring params on the injected hpo_portion → artifacts/ISS/tuned_configs.json
+make cloud-tune   MISSION=ISS INJECTED=1 CHANNELS=$CH
+
+# 5. Tuned re-score on the held-out final_portion
+make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
+
+make cloud-down
+
+# 6. Promote champions (the 6 channels span 3 subsystems)
+make mlflow-promote MISSION=ISS SUBSYSTEM=thermal     ENV=cloud
+make mlflow-promote MISSION=ISS SUBSYSTEM=solar_array ENV=cloud
+make mlflow-promote MISSION=ISS SUBSYSTEM=power       ENV=cloud
+make mlflow-promote MISSION=ISS SUBSYSTEM=attitude    ENV=cloud
+```
+
+`INJECTED=1` points `cloud-score`/`cloud-tune` at `gs://{project}-processed-data/_injected` and
+selects channels explicitly (the injected dir has no `channels.txt`). The ESA path is
+unchanged — omit `INJECTED`/`CHANNELS` for the nominal flow. Injection is logically a
+*post-preprocessing* step (it depends on the test split, not the models), so it runs as a cheap
+local step rather than a RayJob.
+
+> **ISS prerequisite — mlflow pin.** The Ray and API images pin `mlflow==3.13.0`
+> (`deploy/ray/Dockerfile`, `deploy/api/Dockerfile`). mlflow 3.14 made `pt2` the default
+> pytorch serialization format, which requires an `input_example` and breaks model logging with
+> *"If `serialization_format` is set to 'pt2', then input_example is required"*; 3.13 keeps the
+> pickle default. The MLflow server image is pinned to the same version. The Ray image is built
+> by `.github/workflows/build-ray-image.yml`, which triggers on `main` **and** `iss_ext`.
+
+### Serving ISS as a selectable mission
+
+The serving layer is mission-parameterized: `settings.api.mission` drives model loading
+(`telemanom-ISS-{channel}@champion`), the replay path, and the dashboard. ESA and ISS run as
+separate processes (and, in Phase 18, separate Cloud Run services from one image). The
+dashboard mission switcher (`available_missions` on `/health`) navigates between them, and the
+**Inject Fault** button (`POST /api/inject`) drives a live spike/drift/flatline on the shared
+replay loop so every viewer sees the same anomaly — the primary way to surface anomalies for
+ISS, which has no pre-labeled segments.
+
+To validate ISS serving locally against the cloud champions (before a dedicated Cloud Run
+service exists), point a local API at the cloud MLflow + processed bucket:
+
+```bash
+SPACECRAFT_MLFLOW__TRACKING_URI=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)') \
+MLFLOW_TRACKING_TOKEN=$(gcloud auth print-identity-token) \
+SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://${PROJECT_ID}-processed-data \
+SSL_CERT_FILE=$(uv run python -m certifi) \
+make serve MISSION=ISS PORT=8001
+```
+
+Run `make serve` (ESA, `:8000`) in another terminal so the mission switcher has both. The
+identity token expires after ~1h.
 
 ## Cost Guardrails
 

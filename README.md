@@ -62,10 +62,16 @@ leakage-free protocol and honest framing).
     (`make seed-reference-profiles`), and run a longer replay. The panel also auto-hides at
     runtime when no reference profiles are available.
 - Fast test, lint, and typecheck workflows
-- **ISS Live telemetry (Phase 14):** preprocessing + training on NASA ISSLive data
+- **ISS Live telemetry (Phases 12–16):** second mission on NASA ISSLive data
   - Collector banks raw ticks to GCS; `preprocess run --mission ISS` resamples to 30 s grid
   - `ray train --mission ISS` trains one `telemanom-ISS-{channel}` LSTM per channel
-  - Channels subsystem-tagged (`power`, `solar_array`, `thermal`, `attitude`) for Phase 15 HPO
+  - Channels subsystem-tagged (`power`, `solar_array`, `thermal`, `attitude`) for HPO grouping
+  - **Fault injection** (`inject run` / `make cloud-inject`): spike/drift/flatline faults
+    manufacture `is_anomaly` labels on held-out nominal data — ISS has no real labels
+  - **Injection-driven HPO**: `cloud-score`/`cloud-tune INJECTED=1` run the F0.5 sweep on the
+    injected dataset (`gs://{project}-processed-data/_injected`)
+  - **Multi-mission serving**: ISS is a selectable mission alongside ESA; dashboard mission
+    switcher + on-demand **Inject Fault** button (`POST /api/inject`) on the shared replay loop
   - Model window `W=250` (global default); same serving path as ESA
 
 
@@ -349,27 +355,46 @@ Expected key artifacts:
 - `models/ESA-Mission1/tuned_configs.json` — per-subsystem scoring params + HPO lineage
 - `mlflow.db` — local SQLite MLflow tracking store (experiments, runs, registered models)
 
-### ISS Live Training
+### ISS Live Telemetry (second mission)
 
-ISS is a second mission alongside ESA — the same training stack, mission-parameterized.
-Real `W=250` training requires ~1 week of banked GCS data (collector started Phase 12).
-Local dev uses synthetic data from the test suite; the commands below work on real collected data:
+ISS runs the same stack as ESA, mission-parameterized. The key difference: ISS has **no
+labeled anomalies**, so detection is evaluated by **fault injection** — known spike / drift /
+flatline faults are injected into the held-out nominal test split to manufacture `is_anomaly`
+ground truth, then the same per-subsystem Ray Tune F0.5 HPO runs against them. Real `W=250`
+training needs ~1 week of GCS-banked ticks (collector started Phase 12); local dev uses
+synthetic test-suite data.
+
+The cloud workflow below demos the 6 Phase-12 validation channels (at least one per subsystem);
+omit `CHANNELS` to run all 18.
 
 ```bash
-# Preprocess banked ISS ticks to partitioned Parquet (30 s grid, 18 channels):
-make preprocess MISSION=ISS
+CH=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+make cloud-up
 
-# Train one telemanom-ISS-{channel} LSTM per channel:
-make ray-train MISSION=ISS
+# Preprocess banked ticks → 30 s-grid Parquet (CHANNELS selects a subset)
+make cloud-preprocess MISSION=ISS CHANNELS=$CH
 
-# Cloud preprocess + train (once a week of ticks is banked to GCS):
-make cloud-preprocess MISSION=ISS
-make cloud-train      MISSION=ISS
+# Train one telemanom-ISS-{channel} LSTM per channel
+make cloud-train      MISSION=ISS CHANNELS=$CH
+
+# Manufacture labels: inject faults into the nominal test split (local, against GCS)
+make cloud-inject     MISSION=ISS CHANNELS=$CH
+
+# Injection-driven HPO: baseline score → tune → tuned re-score on the injected data
+make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH EVAL_SPLIT=full_test
+make cloud-tune       MISSION=ISS INJECTED=1 CHANNELS=$CH
+make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
+
+make cloud-down
 ```
 
 Models register as `telemanom-ISS-{channel}` with subsystem tags (`thermal`, `power`,
-`solar_array`, `attitude`). Phase 15 HPO uses those tags to group channels for tuning.
-Real anomaly labels don't exist for ISS — evaluation uses fault injection (Phase 15).
+`solar_array`, `attitude`). `cloud-inject` writes the injected copy to
+`gs://{project}-processed-data/_injected`; `INJECTED=1` points score/tune at it. The reported
+metrics measure detection of *injected* faults, not unseen on-orbit events — stated plainly by
+design. ESA provides real F0.5 on real anomalies; the contrast is the portfolio narrative. Full
+cloud walkthrough (including promotion + serving ISS as a selectable mission with the live
+**Inject Fault** button) in [docs/deployment.md](docs/deployment.md).
 
 
 ## Deployment
@@ -443,8 +468,8 @@ model and redeploying — there is no hot-reload path.
 | 12 | ISS Live ingestion + collector | Complete |
 | 13 | ISS preprocessing (30 s grid, LOS detection) | Complete |
 | 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
-| 15 | Anomaly injection + injection-driven HPO | Planned |
-| 16 | Multi-mission serving (replay) | Planned |
+| 15 | Anomaly injection + injection-driven HPO | In progress |
+| 16 | Multi-mission serving (replay) | In progress |
 | 17 | Live telemetry pump | Planned |
 | 18 | ISS deployment + docs polish | Planned |
 
