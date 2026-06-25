@@ -1,36 +1,25 @@
-# RayJob — parallel anomaly scoring for all channels on GKE Autopilot.
+# RayJob — parallel anomaly scoring on GKE Autopilot (CPU-only variant).
+#
+# Use this instead of cluster_score.yaml when the dataset is small enough that
+# GPU provisioning overhead exceeds scoring time (e.g. ISS with ~1 week of data
+# and 6 channels). cloud_score.sh selects this file automatically when CPU=1.
 #
 # Environment variables required before applying (cloud_score.sh sets these):
-#   PROJECT_ID   GCP project ID
-#   REGION       GCP region (e.g. us-central1)
-#   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
-#   MISSION      Mission name (e.g. ESA-Mission2)
-#   TUNED        Set to "1" to fetch and apply tuned_configs.json from GCS.
-#                Omit (or set to "") for a clean Hundman-defaults baseline.
-#   NUM_GPUS     GPU fraction per score task (cloud_score.sh defaults to 0.2).
-#   EVAL_SPLIT   Test slice the metrics cover (cloud_score.sh defaults to
-#                final_portion; set full_test for a coverage view).
-#   PROCESSED_DATA_DIR  Base dir for the test split. cloud_score.sh sets the
-#                nominal bucket by default, or the _injected dir when INJECTED=1.
-#   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
-#                injected: --channels <list> (the injected dir has no channels.txt).
-#
-# Apply via:
-#   envsubst < deploy/ray/cluster_score.yaml | kubectl apply -f -
+#   PROJECT_ID          GCP project ID
+#   REGION              GCP region (e.g. us-central1)
+#   MLFLOW_URL          Internal Cloud Run URL for the MLflow tracking server
+#   MISSION             Mission name (e.g. ISS)
+#   TUNED               "1" to load tuned_configs.json; omit for Hundman defaults.
+#   EVAL_SPLIT          Test slice (default: final_portion).
+#   PROCESSED_DATA_DIR  Base dir for the test split.
+#   CHANNELS_ARG        Channel selector (--channels or --channels-from).
+#   WINDOW_SIZE_OVERRIDE  128 for ISS, 250 for ESA (set by cloud_score.sh).
 #
 # Sizing rationale:
-#   Scoring runs predict() (an LSTM forward pass) on the L4, then pure-numpy
-#   anomaly scoring. On CPU the forward pass is ~20 min/channel for large
-#   channels; on the GPU it is far faster. Workers: g2-standard-8 (8 vCPU) + 1× L4
-#   on-demand. Packing is bounded by GPU MEMORY, not vCPUs: each score task is a
-#   separate process holding ~3.6 GiB (CUDA context + batch-2048 activations), so
-#   only ~5 fit on the 22 GiB L4. cloud_score.sh defaults NUM_GPUS=0.2 (5-way);
-#   0.125 (8-way) overcommits (8 × 3.6 ≈ 29 GiB) and OOMs. maxReplicas: 1
-#   (NVIDIA_L4_GPUS quota = 1) — don't run scoring while a training job holds the
-#   L4; score after training. Run after cloud-train for the Hundman-defaults
-#   baseline (TUNED unset); re-run with TUNED=1 after cloud-tune for the held-out
-#   comparison. This worker group always provisions a GPU node — for a CPU-only
-#   score run (no L4), use the pre-GPU revision of this manifest from git history.
+#   Scoring is an LSTM forward pass (CPU, no CUDA context) + pure-numpy anomaly
+#   scoring. For 6 ISS channels at W=128 the forward pass is fast on CPU.
+#   Worker: 8 vCPU / 8 GiB — runs all 6 score tasks concurrently (num_cpus=1 each).
+#   No GPU node → no 3–5 min provisioning wait.
 
 apiVersion: ray.io/v1
 kind: RayJob
@@ -84,11 +73,8 @@ spec:
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
-                # The driver runs score_all_channels and reads num_gpus_per_task
-                # to set each task's GPU fraction, so the head needs the knob too.
                 - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                  value: "${NUM_GPUS}"
-                # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
+                  value: "0"
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
@@ -132,20 +118,14 @@ spec:
                 failureThreshold: 10
 
     workerGroupSpecs:
-      - groupName: gpu-workers
+      - groupName: cpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 1 # NVIDIA_L4_GPUS quota = 1
+        maxReplicas: 1
         rayStartParams: {}
         template:
           spec:
             serviceAccountName: ray-sa
-            nodeSelector:
-              cloud.google.com/gke-accelerator: nvidia-l4
-            tolerations:
-              - key: nvidia.com/gpu
-                operator: Exists
-                effect: NoSchedule
             containers:
               - name: ray-worker
                 image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
@@ -162,32 +142,16 @@ spec:
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
-                  # Packing is bounded by GPU MEMORY, not vCPUs: each score task
-                  # is a separate process with its own ~3.6 GiB CUDA context +
-                  # batch-2048 activations, so only ~5 fit on the 22 GiB L4
-                  # (cloud_score.sh defaults NUM_GPUS=0.2 → 5-way; 8-way OOMs).
-                  # resolve_device("auto") flips to CUDA once a GPU fraction is set.
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
-                    value: "${NUM_GPUS}"
-                  # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
+                    value: "0"
                   - name: SPACECRAFT_MODEL__WINDOW_SIZE
                     value: "${WINDOW_SIZE_OVERRIDE}"
-                  # Reduce CUDA allocator fragmentation under fractional GPU
-                  # sharing to prevent OOM error.
-                  - name: PYTORCH_CUDA_ALLOC_CONF
-                    value: expandable_segments:True
-                  # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
-                  # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
-                  - name: LD_LIBRARY_PATH
-                    value: /usr/local/nvidia/lib64
                   - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                     value: "30"
                 resources:
                   requests:
                     cpu: "8"
-                    memory: "16Gi"
-                    nvidia.com/gpu: "1"
+                    memory: "8Gi"
                   limits:
                     cpu: "8"
-                    memory: "16Gi"
-                    nvidia.com/gpu: "1"
+                    memory: "8Gi"

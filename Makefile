@@ -7,6 +7,7 @@ SUBSYSTEM        ?=
 PORT             ?= 8000
 REPLAY_DATA_DIR  ?=
 INJECTED         ?=
+CPU              ?=
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
 UV := uv
@@ -327,7 +328,6 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 		-target=kubernetes_namespace.ray \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_service_account.ray \
-		-refresh=false \
 		-auto-approve
 	terraform -chdir=infra apply \
 		-target=google_service_account_iam_member.ray_workload_identity \
@@ -344,17 +344,23 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
 cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQL up (see cloud-db-stop).
+	@# Strip KubeRay finalizers BEFORE removing the operator. RayJob/RayCluster
+	@# resources have finalizers processed by the KubeRay operator; if the operator
+	@# is removed first (via Helm uninstall) those finalizers can never be cleared
+	@# and the ray namespace gets permanently stuck in Terminating.
+	kubectl get rayjob -n ray -o name 2>/dev/null \
+		| xargs -I{} kubectl patch {} -n ray -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+	kubectl get raycluster -n ray -o name 2>/dev/null \
+		| xargs -I{} kubectl patch {} -n ray -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
 	terraform -chdir=infra destroy \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
 		-auto-approve
 	@# Block until the ray namespace has fully terminated before destroying the
-	@# cluster. Namespace deletion waits on KubeRay finalizers and can lag the
-	@# terraform destroy return; a later cloud-up then races a still-Terminating
-	@# namespace and fails with "being terminated". Must run while the cluster
-	@# still exists (kubectl is unreachable once the cluster is gone).
-	kubectl wait --for=delete namespace/ray --timeout=300s || true
+	@# cluster. Must run while the cluster still exists (kubectl is unreachable
+	@# once the cluster is gone).
+	kubectl wait --for=delete namespace/ray --timeout=300s
 	terraform -chdir=infra destroy \
 		-target=google_container_cluster.ray \
 		-auto-approve
@@ -380,9 +386,9 @@ cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=�
 	# ISS 6-channel validation set:
 	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1])
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
-		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) \
+		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) CPU=$(CPU) \
 		./scripts/cloud_train.sh
 
 cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-processed-data/_injected (PROJECT_ID=… MISSION=ISS CHANNELS=…). Local single-process; reads/writes GCS.
@@ -400,9 +406,9 @@ cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MI
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 CHANNELS=…] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 CHANNELS=…] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
-		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
+		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
 
 cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [SUBSYSTEM=…] [CHANNEL=…])

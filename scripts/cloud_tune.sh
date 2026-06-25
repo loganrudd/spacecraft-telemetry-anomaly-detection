@@ -49,7 +49,13 @@ else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG
+# ISS W=128 override — see cloud_train.sh for rationale.
+if [[ "${MISSION}" = "ISS" ]]; then
+  WINDOW_SIZE_OVERRIDE="128"
+else
+  WINDOW_SIZE_OVERRIDE="250"
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION})"
 

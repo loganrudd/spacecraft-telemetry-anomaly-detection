@@ -392,8 +392,19 @@ Models register as `telemanom-ISS-{channel}` with subsystem tags (`thermal`, `po
 `solar_array`, `attitude`). `cloud-inject` writes the injected copy to
 `gs://{project}-processed-data/_injected`; `INJECTED=1` points score/tune at it. The reported
 metrics measure detection of *injected* faults, not unseen on-orbit events — stated plainly by
-design. ESA provides real F0.5 on real anomalies; the contrast is the portfolio narrative. Full
-cloud walkthrough (including promotion + serving ISS as a selectable mission with the live
+design. ESA provides real F0.5 on real anomalies; the contrast is the portfolio narrative.
+
+> **GPU vs CPU:** `cloud-train` and `cloud-score` use a GPU worker (L4) by default, which
+> takes 3–5 min to provision on GKE Autopilot. For ISS with ~1 week of data and 6 channels,
+> provisioning overhead can exceed actual compute time. Add `CPU=1` to skip GPU provisioning
+> and run on a CPU-only worker node instead:
+> ```bash
+> make cloud-train MISSION=ISS CPU=1 CHANNELS=$CH
+> make cloud-score MISSION=ISS CPU=1 INJECTED=1 CHANNELS=$CH
+> ```
+> ESA (hundreds of channels, years of data) should keep the default GPU path.
+
+Full cloud walkthrough (including promotion + serving ISS as a selectable mission with the live
 **Inject Fault** button) in [docs/deployment.md](docs/deployment.md).
 
 

@@ -23,10 +23,13 @@ MISSION="${MISSION:-ESA-Mission2}"
 NO_WAIT=false
 DELETE_AFTER=false
 
+CPU="${CPU:-0}"
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)       MISSION="$2"; shift 2 ;;
     --channels-from) CHANNELS_FROM="$2"; shift 2 ;;
+    --cpu)           CPU="1"; shift ;;
     --no-wait)       NO_WAIT=true; shift ;;
     --delete-after)  DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -36,9 +39,14 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-# 0.125 = 8-way L4 packing (default). Pass 1 for slow/large channels that need
-# the full GPU to finish within token/preemption windows.
-NUM_GPUS="${NUM_GPUS:-0.125}"
+# ISS: 6-way L4 packing (floor(1/0.16)=6). ESA: 8-way (floor(1/0.125)=8).
+# 0.167 rounds to floor(5.99)=5 under floating point; 0.16 is the safe 6-way value.
+# Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption issues).
+if [[ "${MISSION}" = "ISS" ]]; then
+  NUM_GPUS="${NUM_GPUS:-0.16}"
+else
+  NUM_GPUS="${NUM_GPUS:-0.125}"
+fi
 
 # Build the channel-selection argument for the RayJob entrypoint.
 # Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.
@@ -50,7 +58,15 @@ else
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
 fi
 
-export PROJECT_ID REGION MLFLOW_URL MISSION CHANNELS_ARG NUM_GPUS
+# ISS LOS fragmentation limits contiguous segments to <240 rows on the 30 s grid.
+# W=250 requires 251 consecutive rows → 0 valid test windows → scoring crash.
+# W=128 (64 min ≈ 0.7 orbits) fits comfortably; ESA keeps the 250 global default.
+if [[ "${MISSION}" = "ISS" ]]; then
+  WINDOW_SIZE_OVERRIDE="128"
+else
+  WINDOW_SIZE_OVERRIDE="250"
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION CHANNELS_ARG NUM_GPUS WINDOW_SIZE_OVERRIDE
 
 echo "==> Submitting spacecraft-train RayJob (mission=${MISSION})"
 
@@ -61,7 +77,13 @@ if kubectl get rayjob spacecraft-train -n ray &>/dev/null; then
   kubectl wait --for=delete rayjob/spacecraft-train -n ray --timeout=120s
 fi
 
-envsubst < "$(dirname "$0")/../deploy/ray/cluster_train.yaml" | kubectl apply -f -
+if [[ "${CPU}" = "1" ]]; then
+  CLUSTER_YAML="deploy/ray/cluster_train_cpu.yaml"
+  echo "==> CPU mode: skipping GPU node provisioning"
+else
+  CLUSTER_YAML="deploy/ray/cluster_train.yaml"
+fi
+envsubst < "$(dirname "$0")/../${CLUSTER_YAML}" | kubectl apply -f -
 
 if $NO_WAIT; then
   echo "==> RayJob submitted. Monitor with:"

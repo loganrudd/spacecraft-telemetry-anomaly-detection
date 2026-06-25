@@ -97,6 +97,12 @@ def predict(
                     total=n_batches,
                 )
 
+    if not all_preds:
+        raise ValueError(
+            f"predict() got an empty DataLoader — no test windows for channel {channel!r}. "
+            "The test split likely has no segments long enough for the model's window_size. "
+            "Check for LOS fragmentation or reduce window_size."
+        )
     predictions = np.concatenate(all_preds).astype(np.float32)
     targets = np.concatenate(all_targets).astype(np.float32)
     return predictions, targets

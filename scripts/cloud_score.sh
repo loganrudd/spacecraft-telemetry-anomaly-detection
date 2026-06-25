@@ -40,12 +40,15 @@ CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
+CPU="${CPU:-0}"
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
     --tuned)        TUNED="1"; shift ;;
     --injected)     INJECTED="1"; shift ;;
     --channels)     CHANNELS="$2"; shift 2 ;;
+    --cpu)          CPU="1"; shift ;;
     --no-wait)      NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -77,8 +80,14 @@ NUM_GPUS="${NUM_GPUS:-0.2}"
 # full_test scores every window — a coverage view that also evaluates channels
 # whose anomalies fall outside the held-out slice.
 EVAL_SPLIT="${EVAL_SPLIT:-final_portion}"
+# ISS W=128 override — see cloud_train.sh for rationale.
+if [[ "${MISSION}" = "ISS" ]]; then
+  WINDOW_SIZE_OVERRIDE="128"
+else
+  WINDOW_SIZE_OVERRIDE="250"
+fi
 export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT \
-  PROCESSED_DATA_DIR CHANNELS_ARG
+  PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"
@@ -92,7 +101,13 @@ if kubectl get rayjob spacecraft-score -n ray &>/dev/null; then
   kubectl wait --for=delete rayjob/spacecraft-score -n ray --timeout=120s
 fi
 
-envsubst < "$(dirname "$0")/../deploy/ray/cluster_score.yaml" | kubectl apply -f -
+if [[ "${CPU}" = "1" ]]; then
+  CLUSTER_YAML="deploy/ray/cluster_score_cpu.yaml"
+  echo "==> CPU mode: skipping GPU node provisioning"
+else
+  CLUSTER_YAML="deploy/ray/cluster_score.yaml"
+fi
+envsubst < "$(dirname "$0")/../${CLUSTER_YAML}" | kubectl apply -f -
 
 if $NO_WAIT; then
   echo "==> RayJob submitted. Monitor with:"

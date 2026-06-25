@@ -1,42 +1,33 @@
-# RayJob — Ray Tune HPO for scoring parameters on GKE Autopilot.
+# RayJob — parallel channel training on GKE Autopilot (CPU-only variant).
 #
-# Environment variables required before applying (cloud_tune.sh sets these):
+# Use this instead of cluster_train.yaml when the dataset is small enough that
+# GPU provisioning overhead exceeds training time (e.g. ISS with ~1 week of data
+# and 6 channels). cloud_train.sh selects this file automatically when CPU=1.
+#
+# Environment variables required before applying (cloud_train.sh sets these):
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (e.g. us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
-#   MISSION      Mission name (e.g. ESA-Mission2)
-#   PROCESSED_DATA_DIR  Base dir for the hpo_portion split. cloud_tune.sh sets the
-#                nominal bucket by default, or the _injected dir when INJECTED=1.
-#   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
-#                injected: --channels <list> (the injected dir has no channels.txt).
-#
-# Apply via:
-#   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
+#   MISSION      Mission name (e.g. ISS)
+#   WINDOW_SIZE_OVERRIDE  128 for ISS, 250 for ESA (set by cloud_train.sh)
 #
 # Sizing rationale:
-#   Tune trials are pure-numpy scoring — no GPU needed.
-#   Head: 2 vCPU / 8 GiB. The driver process holds errors.npy + labels for all
-#   channels in each running subsystem sweep in its Python heap for the full
-#   tuner.fit() duration. With max_parallel_subsystems=2, two subsystem datasets
-#   live in the heap simultaneously; on a full mission this peaks at ~3.8 GiB
-#   driver + ~0.7 GiB Ray daemons. 8 GiB gives ~3.5 GiB headroom. The extra
-#   vCPU is required by GKE Autopilot's ≤6.5 GiB/vCPU floor, not for compute
-#   (num-cpus=0 so Ray never schedules tasks on the head).
-#   Workers: 4 vCPU / 4 GiB each, max 4 concurrent (one trial per CPU).
+#   Head: 1 vCPU / 4 GiB — driver only.
+#   Worker: 8 vCPU / 16 GiB on-demand (no GPU nodeSelector → n2-standard family).
+#   num_cpus=1 per task → 8 concurrent channels on one worker; all 6 ISS channels
+#   run in a single wave with 2 CPUs spare. CPU nodes provision in ~1 min vs 3–5 min
+#   for L4 GPU nodes — faster end-to-end for small datasets.
 
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
-  name: spacecraft-tune
+  name: spacecraft-train
   namespace: ray
 spec:
   entrypoint: >-
-    bash -c 'spacecraft-telemetry --env cloud ray tune
+    spacecraft-telemetry --env cloud ray train
     --mission ${MISSION}
     ${CHANNELS_ARG}
-    && python -c "import gcsfs;
-    gcsfs.GCSFileSystem().put(\"models/${MISSION}/tuned_configs.json\",
-    \"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\")"'
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -61,23 +52,24 @@ spec:
                 - name: SPACECRAFT_MLFLOW__TRACKING_URI
                   value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                  value: ${PROCESSED_DATA_DIR}
-                - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
-                  value: gs://${PROJECT_ID}-sample-data
+                  value: gs://${PROJECT_ID}-processed-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
-                # ISS=128, ESA=250 — set by cloud_tune.sh (LOS segment constraint).
+                - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                  value: "0"
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+                  value: "30"
               resources:
                 requests:
-                  cpu: "2"
-                  memory: "8Gi"
+                  cpu: "1"
+                  memory: "4Gi"
                 limits:
-                  cpu: "2"
-                  memory: "8Gi"
+                  cpu: "1"
+                  memory: "4Gi"
               livenessProbe:
                 exec:
                   command:
@@ -111,7 +103,7 @@ spec:
       - groupName: cpu-workers
         replicas: 1
         minReplicas: 0
-        maxReplicas: 4
+        maxReplicas: 1
         rayStartParams: {}
         template:
           spec:
@@ -125,20 +117,21 @@ spec:
                   - name: SPACECRAFT_MLFLOW__TRACKING_URI
                     value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                    value: ${PROCESSED_DATA_DIR}
-                  - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
-                    value: gs://${PROJECT_ID}-sample-data
+                    value: gs://${PROJECT_ID}-processed-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
-                  # ISS=128, ESA=250 — set by cloud_tune.sh (LOS segment constraint).
+                  - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                    value: "0"
                   - name: SPACECRAFT_MODEL__WINDOW_SIZE
                     value: "${WINDOW_SIZE_OVERRIDE}"
+                  - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+                    value: "30"
                 resources:
                   requests:
-                    cpu: "4"
-                    memory: "4Gi"
+                    cpu: "8"
+                    memory: "16Gi"
                   limits:
-                    cpu: "4"
-                    memory: "4Gi"
+                    cpu: "8"
+                    memory: "16Gi"
