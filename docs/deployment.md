@@ -390,13 +390,18 @@ make cloud-train  MISSION=ISS CHANNELS=$CH
 #    Runs locally (single-process, reads/writes GCS) — no GKE job, it never touches the models.
 make cloud-inject MISSION=ISS CHANNELS=$CH
 
-# 3. Baseline score on the injected data (errors.npy + Hundman-default metrics)
-make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH EVAL_SPLIT=full_test
+# 3. Baseline score on the injected data (errors.npy + Hundman-default metrics).
+#    Use the DEFAULT eval split (final_portion) so it is directly comparable to the
+#    tuned re-score in step 5. errors.npy is always saved from the full smoothed
+#    array regardless of eval split, so tune (step 4) still sees all windows.
+#    Do NOT pass EVAL_SPLIT=full_test here — that scores a different (larger) slice
+#    than the tuned run, making the baseline-vs-tuned comparison invalid.
+make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH
 
 # 4. Tune scoring params on the injected hpo_portion → artifacts/ISS/tuned_configs.json
 make cloud-tune   MISSION=ISS INJECTED=1 CHANNELS=$CH
 
-# 5. Tuned re-score on the held-out final_portion
+# 5. Tuned re-score on the same held-out final_portion (leakage-free comparison vs step 3)
 make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
 
 make cloud-down
