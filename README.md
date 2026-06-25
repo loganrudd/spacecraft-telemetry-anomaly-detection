@@ -360,9 +360,9 @@ Expected key artifacts:
 ISS runs the same stack as ESA, mission-parameterized. The key difference: ISS has **no
 labeled anomalies**, so detection is evaluated by **fault injection** — known spike / drift /
 flatline faults are injected into the held-out nominal test split to manufacture `is_anomaly`
-ground truth, then the same per-subsystem Ray Tune F0.5 HPO runs against them. Real `W=250`
-training needs ~1 week of GCS-banked ticks (collector started Phase 12); local dev uses
-synthetic test-suite data.
+ground truth, then the same per-subsystem Ray Tune F0.5 HPO runs against them. Real `W=128`
+training (ISS-only override; ESA stays 250) needs ~1 week of GCS-banked ticks (collector
+started Phase 12); local dev uses synthetic test-suite data.
 
 The cloud workflow below demos the 6 Phase-12 validation channels (at least one per subsystem);
 omit `CHANNELS` to run all 18.
@@ -380,10 +380,13 @@ make cloud-train      MISSION=ISS CHANNELS=$CH
 # Manufacture labels: inject faults into the nominal test split (local, against GCS)
 make cloud-inject     MISSION=ISS CHANNELS=$CH
 
-# Injection-driven HPO: baseline score → tune → tuned re-score on the injected data
-make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH EVAL_SPLIT=full_test
+# Injection-driven HPO: baseline score → tune → tuned re-score on the injected data.
+# Baseline and tuned MUST use the same eval split (both default to final_portion =
+# held-out last 40%) or the comparison is apples-to-oranges. HPO searches the first
+# 60% (hpo_portion); final_portion is the leakage-free held-out set both are scored on.
+make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH   # baseline, final_portion
 make cloud-tune       MISSION=ISS INJECTED=1 CHANNELS=$CH
-make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
+make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1   # tuned, final_portion
 
 make cloud-down
 ```
