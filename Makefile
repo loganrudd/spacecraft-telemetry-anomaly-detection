@@ -331,9 +331,11 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 	terraform -chdir=infra apply \
 		-target=google_service_account_iam_member.ray_workload_identity \
 		-target=google_storage_bucket_iam_member.ray_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_raw_viewer \
 		-target=google_storage_bucket_iam_member.ray_processed_admin \
 		-target=google_storage_bucket_iam_member.ray_artifacts_admin \
 		-target=google_storage_bucket_iam_member.ray_wif_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_wif_raw_viewer \
 		-target=google_storage_bucket_iam_member.ray_wif_processed_admin \
 		-target=google_storage_bucket_iam_member.ray_wif_artifacts_admin \
 		-refresh=false \

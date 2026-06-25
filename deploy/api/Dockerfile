@@ -55,6 +55,12 @@ ENV PIP_NO_CACHE_DIR=1 \
 # and importable without the source tree being writable.
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
+# Pin mlflow to match the MLflow server + Ray training images. Installed first so
+# the .[tracking] extra below won't resolve the loose pyproject range up to mlflow
+# 3.14, whose pytorch flavor defaults to 'pt2' serialization. Training logs models
+# in pickle format (3.13.0); keep the serving loader on the same major/minor.
+# See deploy/ray/Dockerfile for the full rationale.
+RUN pip install "mlflow==3.13.0"
 # Cloud Run is CPU-only. Pin the CPU-only torch wheel to avoid pulling ~2 GB
 # of unused CUDA libraries from the default PyPI index.
 RUN pip install ".[serving,tracking,gcp,inference]" \

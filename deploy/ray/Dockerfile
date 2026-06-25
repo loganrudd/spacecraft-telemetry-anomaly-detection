@@ -26,6 +26,17 @@ ENV SPACECRAFT_CONFIG_DIR=/app/configs
 # (provided by GKE's nvidia device plugin on GPU nodes).
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 
+# Pin mlflow to match the MLflow server image (deploy/mlflow/Dockerfile). Installed
+# BEFORE the .[tracking] extra so pip sees the constraint already satisfied and does
+# NOT resolve the loose pyproject range (mlflow>=3.0,<4) up to the latest release.
+# mlflow 3.14 flipped the pytorch flavor's default serialization_format to 'pt2'
+# (a torch.export traced graph that REQUIRES an input_example); register_pytorch_model
+# passes none, so an unpinned 3.14 image fails model logging with
+# "If `serialization_format` is set to 'pt2', then input_example is required".
+# 3.13.0 defaults to 'pickle' and needs no input_example. Same torch-first pattern
+# used for the CUDA wheel above.
+RUN pip install --no-cache-dir "mlflow==3.13.0"
+
 # ml: torch (already installed above), ray[tune], hyperopt
 # tracking: mlflow, evidently
 # gcp: google-cloud-storage, gcsfs, google-auth

@@ -34,14 +34,19 @@ ml = [
     "torch>=2.0",
     "ray[default,tune]>=2.31,<3",
     "hyperopt>=0.2.7",
-    "mlflow>=3.0,<4",
+    # <3.14: mlflow 3.14 flipped the pytorch flavor default serialization_format
+    # to 'pt2' (torch.export traced graph) which requires an input_example we don't
+    # pass; 3.13.x defaults to 'pickle'. Keep cloud images (which pip-resolve this
+    # range) off 3.14. See deploy/ray/Dockerfile.
+    "mlflow>=3.0,<3.14",
 ]
 serving = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
 ]
 tracking = [
-    "mlflow>=3.0,<4",
+    # <3.14: see [ml] extra — avoids the pt2 default-serialization break.
+    "mlflow>=3.0,<3.14",
     "evidently>=0.4,<1",
 ]
 gcp = [

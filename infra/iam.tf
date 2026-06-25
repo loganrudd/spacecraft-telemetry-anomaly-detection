@@ -89,9 +89,20 @@ resource "google_storage_bucket_iam_member" "mlflow_artifacts_admin" {
   member = "serviceAccount:${google_service_account.mlflow.email}"
 }
 
-# ray: read sample Parquet (Spark input), write to processed and artifacts buckets.
+# ray: read sample Parquet (ESA preprocessing input), write to processed and artifacts buckets.
 resource "google_storage_bucket_iam_member" "ray_sample_viewer" {
   bucket = google_storage_bucket.sample_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.ray.email}"
+}
+
+# ray: read raw ISS Lightstreamer ticks. ESA preprocessing reads from sample-data,
+# but run_iss_preprocessing reads raw ticks from raw-data/ISS/ticks/ (list + get),
+# so the Ray SA needs objectViewer on the raw-data bucket. Without this, the RayJob
+# fails with "storage.objects.list denied on …-raw-data". Read-only: the pipeline
+# only consumes ticks here; all writes go to processed-data.
+resource "google_storage_bucket_iam_member" "ray_raw_viewer" {
+  bucket = google_storage_bucket.raw_data.name
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.ray.email}"
 }
@@ -121,6 +132,12 @@ locals {
 
 resource "google_storage_bucket_iam_member" "ray_wif_sample_viewer" {
   bucket = google_storage_bucket.sample_data.name
+  role   = "roles/storage.objectViewer"
+  member = local.ray_wif_pool
+}
+
+resource "google_storage_bucket_iam_member" "ray_wif_raw_viewer" {
+  bucket = google_storage_bucket.raw_data.name
   role   = "roles/storage.objectViewer"
   member = local.ray_wif_pool
 }
