@@ -263,6 +263,18 @@ resource "google_cloud_run_v2_service" "api" {
           value = jsonencode(var.api_subsystems)
         }
       }
+
+      # Mission switcher: activated once api_iss_url is populated (two-pass
+      # apply — see variable "api_iss_url" in variables.tf for the workflow).
+      dynamic "env" {
+        for_each = var.api_iss_url != "" ? [1] : []
+        content {
+          name = "SPACECRAFT_API__AVAILABLE_MISSIONS"
+          value = jsonencode([
+            { id = "ISS", label = "NASA ISS", url = var.api_iss_url }
+          ])
+        }
+      }
     }
   }
 
@@ -282,12 +294,139 @@ resource "google_cloud_run_v2_service" "api" {
 }
 
 # ---------------------------------------------------------------------------
+# ISS API service — second mission, shares the api container image.
+# Serves ISS telemanom-ISS-* models; baseline replay is nominal data;
+# anomalies are demonstrated via the on-demand Inject Fault button.
+# Phase 17 will bump iss_min_instances to 1 for the always-on live pump.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_service" "api_iss" {
+  name     = "api-iss"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account = google_service_account.api.email
+
+    scaling {
+      min_instance_count = var.iss_min_instances
+      max_instance_count = 3
+    }
+
+    # Same caps as the ESA api service — SSE streams are long-lived.
+    max_instance_request_concurrency = 10
+    execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
+    timeout                          = "3600s"
+
+    containers {
+      image = local.placeholder_image
+
+      resources {
+        limits = {
+          # 6 ISS channels (Phase 16) fit in 1 vCPU / 2 GiB; bump to 2/4
+          # if expanded to the full 18-channel set (same as ESA sizing).
+          cpu    = "1"
+          memory = "2Gi"
+        }
+        cpu_idle          = false
+        startup_cpu_boost = true
+      }
+
+      env {
+        name  = "SPACECRAFT_ENV"
+        value = "cloud"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__MISSION"
+        value = "ISS"
+      }
+
+      env {
+        name  = "SPACECRAFT_MLFLOW__TRACKING_URI"
+        value = google_cloud_run_v2_service.mlflow.uri
+      }
+
+      env {
+        name  = "SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR"
+        value = "gs://${var.project_id}-processed-data"
+      }
+
+      env {
+        name  = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+        value = "gs://${var.project_id}-sample-data"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR"
+        value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      env {
+        name  = "SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR"
+        value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      env {
+        name  = "MLFLOW_ARTIFACTS_DESTINATION"
+        value = "gs://${var.project_id}-artifacts/mlflow"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__STATIC_DIR"
+        value = "/app/frontend/dist"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_WARMUP_ROWS"
+        value = "-1350"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_MAX_ROWS"
+        value = "1350"
+      }
+
+      # Mission switcher: ISS service always references the ESA service URI
+      # directly (cross-resource ref, no circular dependency). api.uri is
+      # already known since the api service exists before api_iss is created.
+      env {
+        name = "SPACECRAFT_API__AVAILABLE_MISSIONS"
+        value = jsonencode([
+          { id = "ESA-Mission1", label = "ESA Mission 1", url = google_cloud_run_v2_service.api.uri }
+        ])
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    google_cloud_run_v2_service.mlflow,
+    google_project_iam_member.api_cloudsql_client,
+  ]
+
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Cloud Run IAM
 # ---------------------------------------------------------------------------
 
 # Public access to the api service.
 resource "google_cloud_run_v2_service_iam_member" "api_public" {
   name     = google_cloud_run_v2_service.api.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# Public access to the api-iss service (same audience as api — portfolio demo).
+# sa-api already has mlflow invoker access (mlflow_api_invoker below), so no
+# new IAM is needed for the shared service account.
+resource "google_cloud_run_v2_service_iam_member" "api_iss_public" {
+  name     = google_cloud_run_v2_service.api_iss.name
   location = var.region
   role     = "roles/run.invoker"
   member   = "allUsers"

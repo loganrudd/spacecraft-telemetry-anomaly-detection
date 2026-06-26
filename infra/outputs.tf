@@ -1,6 +1,11 @@
 output "api_url" {
-  description = "Public URL of the api Cloud Run service"
+  description = "Public URL of the api Cloud Run service (ESA mission)"
   value       = google_cloud_run_v2_service.api.uri
+}
+
+output "api_iss_url" {
+  description = "Public URL of the api-iss Cloud Run service (ISS mission)"
+  value       = google_cloud_run_v2_service.api_iss.uri
 }
 
 output "mlflow_url" {

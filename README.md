@@ -70,9 +70,11 @@ leakage-free protocol and honest framing).
     manufacture `is_anomaly` labels on held-out nominal data — ISS has no real labels
   - **Injection-driven HPO**: `cloud-score`/`cloud-tune INJECTED=1` run the F0.5 sweep on the
     injected dataset (`gs://{project}-processed-data/_injected`)
-  - **Multi-mission serving**: ISS is a selectable mission alongside ESA; dashboard mission
-    switcher + on-demand **Inject Fault** button (`POST /api/inject`) on the shared replay loop
-  - Model window `W=250` (global default); same serving path as ESA
+  - **Multi-mission serving**: ISS is a selectable mission alongside ESA; two separate Cloud
+    Run services (`api` / `api-iss`), shared image, server-driven mission switcher on each
+  - On-demand **Inject Fault** button (`POST /api/inject`) is the ISS anomaly showcase —
+    baseline replay uses nominal data (ISS has no real pre-labeled anomaly segments)
+  - Model window `W=128` (ISS-only override; ESA keeps W=250)
 
 
 ## Architecture Overview
@@ -482,8 +484,8 @@ model and redeploying — there is no hot-reload path.
 | 12 | ISS Live ingestion + collector | Complete |
 | 13 | ISS preprocessing (30 s grid, LOS detection) | Complete |
 | 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
-| 15 | Anomaly injection + injection-driven HPO | In progress |
-| 16 | Multi-mission serving (replay) | In progress |
+| 15 | Anomaly injection + injection-driven HPO | Complete |
+| 16 | Multi-mission serving (replay) | Complete |
 | 17 | Live telemetry pump | Planned |
 | 18 | ISS deployment + docs polish | Planned |
 
