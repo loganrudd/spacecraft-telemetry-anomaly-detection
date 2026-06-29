@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { TelemetryEvent } from "../api/types";
+import type { RawTelemetryEvent, TelemetryEvent } from "../api/types";
 
 const BUFFER_SIZE = 600;
 
@@ -22,6 +22,9 @@ export type StoredAlert = {
   smoothed_error: number | null;
   threshold: number | null;
   ground_truth_match: boolean;
+  // False for ISS live events where is_anomaly=false (no injection active — GT
+  // unknown). True for ESA (all events are labeled) and ISS during injection.
+  gt_available: boolean;
 };
 // Stable empty reference — useSyncExternalStore requires getSnapshot to return
 // the same reference when nothing has changed. A `?? []` literal creates a new
@@ -117,6 +120,10 @@ export class TelemetryStore {
     // Rising-edge detection: false → true transition triggers a stored alert.
     const prevPred = this.prevPredicted[event.channel] ?? false;
     if (!prevPred && event.is_anomaly_predicted) {
+      // GT is available for ESA (always labeled) and for ISS during injection
+      // (is_anomaly=true). For ISS without injection is_anomaly=false means
+      // "label unknown" — not a confirmed FP — so gt_available=false.
+      const gt_available = event.is_anomaly || !event.mission.startsWith("ISS");
       const alert: StoredAlert = {
         id: ++_alertId,
         capturedAtCount: count,
@@ -125,13 +132,60 @@ export class TelemetryStore {
         smoothed_error: event.smoothed_error,
         threshold: event.threshold,
         ground_truth_match: event.is_anomaly,
+        gt_available,
       };
       this.recentAlerts = [alert, ...this.recentAlerts].slice(0, MAX_ALERTS);
     }
     this.prevPredicted[event.channel] = event.is_anomaly_predicted;
     this.lastTsMs[event.channel] = tsMs;
     this.dirty.add(event.channel);
+    this._scheduleFlush();
+  }
 
+  /**
+   * Push a raw tick from the live pump (event: raw) into the ring buffer.
+   *
+   * Raw events carry only value_normalized — no prediction or anomaly fields.
+   * They drive the continuous chart line at native Lightstreamer cadence (1-10s)
+   * while the slower TelemetryEvents (event: telemetry, 30s) carry predictions.
+   * Anomaly / alert state is NOT updated here.
+   */
+  pushRaw(event: RawTelemetryEvent): void {
+    const tsMs = Date.parse(event.timestamp);
+    const prevTsMs = this.lastTsMs[event.channel];
+    if (prevTsMs !== undefined && tsMs < prevTsMs) {
+      this.clear();
+    }
+    // Construct a synthetic TelemetryEvent with null prediction/anomaly fields
+    // so the existing chart pipeline can render the value_normalized point.
+    const synthetic: TelemetryEvent = {
+      timestamp: event.timestamp,
+      mission: "",
+      channel: event.channel,
+      value_normalized: event.value_normalized,
+      prediction: null,
+      residual: null,
+      smoothed_error: null,
+      threshold: null,
+      is_anomaly_predicted: false,
+      is_anomaly: false,
+    };
+    let ring = this.buffers.get(synthetic.channel);
+    if (!ring) {
+      ring = { items: new Array<TelemetryEvent>(BUFFER_SIZE), head: 0, size: 0 };
+      this.buffers.set(synthetic.channel, ring);
+    }
+    ringPush(ring, synthetic);
+    const nowMs = Date.now();
+    this.lastTickAtMs[synthetic.channel] = nowMs;
+    const count = (this._pushCount[synthetic.channel] ?? 0) + 1;
+    this._pushCount[synthetic.channel] = count;
+    this.lastTsMs[synthetic.channel] = tsMs;
+    this.dirty.add(synthetic.channel);
+    this._scheduleFlush();
+  }
+
+  private _scheduleFlush(): void {
     if (!this.rafScheduled) {
       this.rafScheduled = true;
       requestAnimationFrame(() => {
