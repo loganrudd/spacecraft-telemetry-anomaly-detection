@@ -62,8 +62,8 @@ leakage-free protocol and honest framing).
     (`make seed-reference-profiles`), and run a longer replay. The panel also auto-hides at
     runtime when no reference profiles are available.
 - Fast test, lint, and typecheck workflows
-- **ISS Live telemetry (Phases 12–16):** second mission on NASA ISSLive data
-  - Collector banks raw ticks to GCS; `preprocess run --mission ISS` resamples to 30 s grid
+- **ISS Live telemetry (Phases 12–17):** second mission on NASA ISSLive data
+  - `preprocess run --mission ISS` resamples to 30 s grid from GCS raw ticks
   - `ray train --mission ISS` trains one `telemanom-ISS-{channel}` LSTM per channel
   - Channels subsystem-tagged (`power`, `solar_array`, `thermal`, `attitude`) for HPO grouping
   - **Fault injection** (`inject run` / `make cloud-inject`): spike/drift/flatline faults
@@ -73,7 +73,12 @@ leakage-free protocol and honest framing).
   - **Multi-mission serving**: ISS is a selectable mission alongside ESA; two separate Cloud
     Run services (`api` / `api-iss`), shared image, server-driven mission switcher on each
   - On-demand **Inject Fault** button (`POST /api/inject`) is the ISS anomaly showcase —
-    baseline replay uses nominal data (ISS has no real pre-labeled anomaly segments)
+    ISS baseline streams live nominal data (ISS has no pre-labeled anomaly segments)
+  - **Live Lightstreamer pump** (Phase 17): `api-iss` subscribes all 18 ISS PUIs in real
+    time; engines fed live 30 s grid values via `OnlineGridResampler` + normalization;
+    on Loss-of-Signal (TDRS handover) the dashboard shows a `LiveStatusBanner` with an
+    empirical ETA — live-only, no replay fallback; pump also archives raw ticks to GCS
+    replacing the standalone collector VM
   - Model window `W=128` (ISS-only override; ESA keeps W=250)
 
 
@@ -89,22 +94,27 @@ flowchart TD
     E --> G["MLflow — experiment tracking + model registry"]
     F --> G
     G --> H["Evidently — batch drift reports logged to MLflow"]
-    G --> I["FastAPI + SSE serving"]
+    G --> I["FastAPI + SSE serving (ESA — replay)"]
+    G --> J["FastAPI + SSE serving (ISS — live pump)"]
+    LS["NASA ISSLive<br/>push.lightstreamer.com"] --> J
     I --> K["GET /api/stream/telemetry<br/>real-time LSTM inference"]
+    J --> K2["GET /api/stream/telemetry<br/>live + event:raw + LOS banner"]
     I --> L["GET /api/stream/drift<br/>scipy Wasserstein, rolling window"]
     K --> M["React dashboard — Vite + TS + Recharts"]
+    K2 --> M
     L --> M
     M --> N["Live telemetry charts + anomaly bands"]
     M --> O["Subsystem drift gauge — alert at 30%+ channels"]
 
     subgraph CLOUD ["GCP deployment"]
         direction LR
-        P["Cloud Run<br/>API + MLflow, scale to zero"]
+        P["Cloud Run api — ESA, scale-to-zero<br/>Cloud Run api-iss — ISS, min=1 always-on"]
         Q["GKE Autopilot + KubeRay<br/>preprocess / train / tune / score"]
         R["Terraform IaC · GitHub Actions CI/CD<br/>Workload Identity Federation"]
     end
 
     I -. deployed on .-> P
+    J -. deployed on .-> P
     E -. runs on .-> Q
 ```
 Architecture decisions: [docs/architecture/gcp.md](docs/architecture/gcp.md)
@@ -363,8 +373,14 @@ ISS runs the same stack as ESA, mission-parameterized. The key difference: ISS h
 labeled anomalies**, so detection is evaluated by **fault injection** — known spike / drift /
 flatline faults are injected into the held-out nominal test split to manufacture `is_anomaly`
 ground truth, then the same per-subsystem Ray Tune F0.5 HPO runs against them. Real `W=128`
-training (ISS-only override; ESA stays 250) needs ~1 week of GCS-banked ticks (collector
-started Phase 12); local dev uses synthetic test-suite data.
+training (ISS-only override; ESA stays 250) needs ~1 week of GCS-banked ticks; local dev uses
+synthetic test-suite data.
+
+**Phase 17 — live pump:** `api-iss` is now always-on (min=1/max=1) and streams **real-time**
+ISS telemetry directly from Lightstreamer. On Loss-of-Signal (TDRS handover, ~16×/day) the
+dashboard shows a banner: "Signal lost — typically restored within ~N min." No replay fallback:
+the stream is genuinely live or silent. The pump also archives all 18 channels to GCS,
+replacing the standalone collector VM.
 
 The cloud workflow below demos the 6 Phase-12 validation channels (at least one per subsystem);
 omit `CHANNELS` to run all 18.
@@ -486,7 +502,7 @@ model and redeploying — there is no hot-reload path.
 | 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
 | 15 | Anomaly injection + injection-driven HPO | Complete |
 | 16 | Multi-mission serving (replay) | Complete |
-| 17 | Live telemetry pump | Planned |
+| 17 | Live telemetry pump | Complete |
 | 18 | ISS deployment + docs polish | Planned |
 
 
