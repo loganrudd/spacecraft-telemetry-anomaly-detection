@@ -50,6 +50,7 @@ from mlflow.tracking.client import MlflowClient
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.broadcast import EventBroadcaster, run_shared_loop
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
+from spacecraft_telemetry.api.live.los_stats import compute_los_stats
 from spacecraft_telemetry.api.live.normalization import load_normalization_params
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.replay import ReplayData, _anomaly_slice
@@ -387,6 +388,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 # feeds the broadcaster directly — no replay loop needed.
                 from spacecraft_telemetry.api.live.pump import LivePump
 
+                raw_ticks_dir = (
+                    settings.collect.raw_ticks_dir if settings.api.archive_to_gcs else None
+                )
+                los_stats = None
+                if raw_ticks_dir:
+                    los_stats = await asyncio.to_thread(
+                        compute_los_stats, raw_ticks_dir, settings.api.mission
+                    )
+                    if los_stats:
+                        log.info(
+                            "api.lifespan.los_stats.loaded",
+                            median_s=round(los_stats.median_s),
+                            n_events=los_stats.n_events,
+                        )
+
                 pump = LivePump(
                     loop=asyncio.get_running_loop(),
                     broadcaster=broadcaster,
@@ -395,12 +411,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     collect_config=settings.collect,
                     state=app.state.app_state,
                     archive_to_gcs=settings.api.archive_to_gcs,
-                    raw_ticks_dir=(
-                        settings.collect.raw_ticks_dir
-                        if settings.api.archive_to_gcs
-                        else None
-                    ),
-                    los_stats_median_s=None,  # Step 6 computes this from archive
+                    raw_ticks_dir=raw_ticks_dir,
+                    los_stats_median_s=los_stats.median_s if los_stats else None,
                 )
                 app.state.live_pump = pump
                 await pump.start()
