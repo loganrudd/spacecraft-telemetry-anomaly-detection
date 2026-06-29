@@ -162,10 +162,10 @@ class LivePump:
         }
 
         # Recent grid-bucket values per channel for LOS-recovery re-prime.
-        # maxlen=window_size so prime() always gets a full (or partial) window.
-        window_size = collect_config.grid_interval_seconds  # will be overridden in Step 4
+        # maxlen=engine.window_size so prime() always gets exactly one full window.
         self._recent_buckets: dict[str, deque[float]] = {
-            ch: deque(maxlen=window_size) for ch in self._served_channels
+            ch: deque(maxlen=getattr(engines[ch], "window_size", 128))
+            for ch in self._served_channels
         }
 
         # Archive buffers (all subscribed channels).

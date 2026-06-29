@@ -119,6 +119,11 @@ class ChannelInferenceEngine:
             maxlen=params.threshold_min_anomaly_len
         )
 
+    @property
+    def window_size(self) -> int:
+        """Number of timesteps the LSTM requires for a valid prediction."""
+        return self._window_size
+
     def reset(self) -> None:
         """Reset all rolling state so the next stream replay starts cold.
 

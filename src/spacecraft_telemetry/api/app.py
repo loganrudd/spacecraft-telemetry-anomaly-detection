@@ -50,6 +50,7 @@ from mlflow.tracking.client import MlflowClient
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.broadcast import EventBroadcaster, run_shared_loop
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
+from spacecraft_telemetry.api.live.normalization import load_normalization_params
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
 from spacecraft_telemetry.api.replay import ReplayData, _anomaly_slice
 from spacecraft_telemetry.api.state import AppState, LoadingState
@@ -334,6 +335,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if data is not None:
                     replay_slices[ch] = data
 
+            # Load normalization params for the live pump (no-op in replay mode).
+            norm_params: dict[str, Any] = {}
+            if settings.api.live:
+                try:
+                    norm_params = await asyncio.to_thread(
+                        load_normalization_params,
+                        settings.replay_dir,
+                        settings.api.mission,
+                    )
+                    log.info(
+                        "api.lifespan.norm_params.loaded", channels=len(norm_params)
+                    )
+                except (FileNotFoundError, OSError) as exc:
+                    log.warning("api.lifespan.norm_params.missing", error=str(exc))
+
+            # In live mode, prime each engine from the tail of its replay slice
+            # so the first live tick produces a valid prediction immediately
+            # rather than waiting window_size ticks for the buffer to fill.
+            if settings.api.live:
+                for ch, engine in engines.items():
+                    if ch in replay_slices:
+                        values, _, _ = replay_slices[ch]
+                        seed = values[-engine.window_size :].tolist()
+                        engine.prime(seed)
+                        log.info(
+                            "api.lifespan.engine.primed",
+                            channel=ch,
+                            seed_len=len(seed),
+                        )
+
             broadcaster = EventBroadcaster()
             app.state.app_state = AppState(
                 settings=settings,
@@ -347,15 +378,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
                 drift_references=MappingProxyType(drift_references),
                 resolved_channels=resolved,
+                normalization_params=MappingProxyType(norm_params),
                 broadcaster=broadcaster,
             )
-            # Start the shared replay loop.  All SSE subscribers attach to the
-            # in-progress stream — no per-connection warmup.  The task runs until
-            # the lifespan shuts down (FastAPI cancels it on exit).
-            app.state.loop_task = asyncio.create_task(
-                run_shared_loop(app.state.app_state),
-                name="shared-replay-loop",
-            )
+
+            if settings.api.live:
+                # Live pump: subscribes Lightstreamer, archives to GCS, and
+                # feeds the broadcaster directly — no replay loop needed.
+                from spacecraft_telemetry.api.live.pump import LivePump
+
+                pump = LivePump(
+                    loop=asyncio.get_running_loop(),
+                    broadcaster=broadcaster,
+                    engines=dict(engines),
+                    norm_params=norm_params,
+                    collect_config=settings.collect,
+                    state=app.state.app_state,
+                    archive_to_gcs=settings.api.archive_to_gcs,
+                    raw_ticks_dir=(
+                        settings.collect.raw_ticks_dir
+                        if settings.api.archive_to_gcs
+                        else None
+                    ),
+                    los_stats_median_s=None,  # Step 6 computes this from archive
+                )
+                app.state.live_pump = pump
+                await pump.start()
+                log.info("api.lifespan.live_pump.started")
+            else:
+                # Replay loop: walks pre-collected Parquet and broadcasts events.
+                # All SSE subscribers attach to the in-progress stream — no
+                # per-connection warmup.  The task runs until lifespan shuts down.
+                app.state.loop_task = asyncio.create_task(
+                    run_shared_loop(app.state.app_state),
+                    name="shared-replay-loop",
+                )
+
             log.info("api.lifespan.startup.complete", channels_loaded=sorted(engines.keys()))
 
         except asyncio.CancelledError:
@@ -381,6 +439,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             loop_task.cancel()
             with suppress(asyncio.CancelledError):
                 await loop_task
+        live_pump = getattr(app.state, "live_pump", None)
+        if live_pump is not None:
+            await live_pump.stop()
         log.info("api.lifespan.shutdown")
 
 

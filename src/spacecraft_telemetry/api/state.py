@@ -78,6 +78,13 @@ class AppState:
     drift_references: MappingProxyType[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    # Normalization parameters loaded from normalization_params.json at startup
+    # and used by the live pump to convert raw physical-unit ticks to z-scores
+    # before passing them to the LSTM engine.  Empty in replay (non-live) mode
+    # and in tests that construct AppState without going through the lifespan.
+    normalization_params: MappingProxyType[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     # Shared SSE fan-out hub.  Set when the shared replay loop is running
     # (production lifespan).  None in tests that construct AppState directly
     # without going through the lifespan — those fall back to the per-connection
