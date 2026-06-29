@@ -136,6 +136,27 @@ class ChannelInferenceEngine:
         self._smoothed_count = 0
         self._raw_flag_buf.clear()
 
+    def prime(self, values: list[float]) -> None:
+        """Pre-fill the window buffer from collected data without emitting events.
+
+        Fills ``_window_buf`` from the last ``min(len(values), window_size)``
+        entries in *values* and resets all scoring state (EWMA, threshold
+        ring buffer, anomaly flag buffer) so the first real ``step()`` call
+        starts with a full window but no history bias.
+
+        Use at startup and after LOS recovery (replay resets the buffers; this
+        restores the pre-LOS window so the very first live tick after recovery
+        produces a valid prediction rather than re-entering model warmup).
+
+        Args:
+            values: Pre-normalized values in chronological order.  Only the
+                    last ``window_size`` entries are used.
+        """
+        self.reset()
+        seed = values[-self._window_size :]
+        for v in seed:
+            self._window_buf.append(v)
+
     @torch.no_grad()
     def step(
         self, value: float, timestamp: datetime, is_anomaly: bool
