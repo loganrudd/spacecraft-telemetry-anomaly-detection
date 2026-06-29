@@ -310,7 +310,10 @@ resource "google_cloud_run_v2_service" "api_iss" {
 
     scaling {
       min_instance_count = var.iss_min_instances
-      max_instance_count = 3
+      # Single instance: one Lightstreamer session, one broadcaster, one GCS
+      # archive writer. Multiple instances would cause split-brain SSE state and
+      # duplicate tick archival. SSE fan-out within the instance is O(1) viewers.
+      max_instance_count = 1
     }
 
     # Same caps as the ESA api service — SSE streams are long-lived.
@@ -385,6 +388,35 @@ resource "google_cloud_run_v2_service" "api_iss" {
       env {
         name  = "SPACECRAFT_API__REPLAY_MAX_ROWS"
         value = "1350"
+      }
+
+      # Phase 17: live Lightstreamer pump mode.
+      env {
+        name  = "SPACECRAFT_API__LIVE"
+        value = "true"
+      }
+
+      # Archive raw ticks for all 18 channels to GCS (replaces standalone VM).
+      env {
+        name  = "SPACECRAFT_API__ARCHIVE_TO_GCS"
+        value = "true"
+      }
+
+      env {
+        name  = "SPACECRAFT_COLLECT__CHANNEL_SET"
+        value = "all"
+      }
+
+      env {
+        name  = "SPACECRAFT_COLLECT__RAW_TICKS_DIR"
+        value = "gs://${var.project_id}-raw-data"
+      }
+
+      # Flush raw-tick buffers every 5 min — bounds loss on Cloud Run recycle
+      # to an interval indistinguishable from a normal LOS gap (~53 s median).
+      env {
+        name  = "SPACECRAFT_COLLECT__FLUSH_INTERVAL_SECONDS"
+        value = "300"
       }
 
       # Mission switcher: ISS service always references the ESA service URI
