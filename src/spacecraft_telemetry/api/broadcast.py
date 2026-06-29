@@ -25,6 +25,7 @@ all engines so the next pass starts cold.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections import deque
 from contextlib import suppress
@@ -168,6 +169,34 @@ class EventBroadcaster:
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    def publish_status(
+        self,
+        event_type: str,
+        *,
+        mode: str | None = None,
+        expected_resume_in_s: float | None = None,
+    ) -> None:
+        """Fan a ``event: status`` frame to ALL subscribers, ignoring channel filters.
+
+        Used for mission-wide status transitions (LOS onset/recovery) that every
+        connected dashboard tab must receive regardless of which channels it watches.
+
+        Args:
+            event_type:           ``"los"`` or ``"resumed"``.
+            mode:                 ``"replay"`` when the LOS fallback is active.
+            expected_resume_in_s: Historical median LOS duration; surfaced as an
+                                  estimate, not a countdown promise.
+        """
+        data: dict[str, Any] = {"type": event_type}
+        if mode is not None:
+            data["mode"] = mode
+        if expected_resume_in_s is not None:
+            data["expected_resume_in_s"] = expected_resume_in_s
+        payload = f"event: status\ndata: {json.dumps(data)}\n\n".encode()
+        for _cid, (_channels, q) in list(self._subscribers.items()):
+            with suppress(asyncio.QueueFull):
+                q.put_nowait(payload)
 
     # ------------------------------------------------------------------
     # Fault injection — called by the shared replay loop and the endpoint

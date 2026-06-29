@@ -92,6 +92,19 @@ class DriftEvent(BaseModel):
         return v
 
 
+class RawTelemetryEvent(BaseModel):
+    """Per-tick raw event emitted at native Lightstreamer cadence (event: raw).
+
+    Carries the normalized value immediately on each received tick before the
+    30-second grid bucket closes.  Drives the continuous live chart line.
+    No prediction or anomaly fields — those arrive via TelemetryEvent at 30 s.
+    """
+
+    timestamp: datetime
+    channel: str
+    value_normalized: float
+
+
 class InjectRequest(BaseModel):
     """Request body for POST /api/inject."""
 
