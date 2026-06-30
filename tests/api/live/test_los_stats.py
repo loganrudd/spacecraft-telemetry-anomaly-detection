@@ -14,7 +14,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from spacecraft_telemetry.api.live.los_stats import LosStats, _measure_los_runs, compute_los_stats
+from spacecraft_telemetry.api.live.los_stats import (
+    LosStats,
+    _measure_los_runs,
+    _shard_in_lookback,
+    compute_los_stats,
+)
+from spacecraft_telemetry.ingest.collector_io import flush_buffer
 
 
 def _write_shard(
@@ -121,16 +127,23 @@ def test_compute_los_stats_returns_stats(los_fixture_dir: Path) -> None:
 def test_compute_los_stats_correct_n_events(los_fixture_dir: Path) -> None:
     stats = compute_los_stats(los_fixture_dir, mission="ISS", grid_interval_seconds=30)
     assert stats is not None
-    # Three blackout windows → 3 LOS events (each expanded by 1 bucket each side)
+    # Three blackout windows → 3 LOS events. compute_los_stats requests
+    # expand=False, so no TDRS-smear expansion is applied here (see
+    # test_compute_los_stats_median_reasonable below for the exact duration).
     assert stats.n_events >= 3
 
 
 def test_compute_los_stats_median_reasonable(los_fixture_dir: Path) -> None:
+    """Duration stats measure the raw gap (expand=False), not the smear-expanded mask.
+
+    Each fixture blackout is exactly 60 s (2 x 30 s buckets). If duration
+    measurement used the +-1-bucket TDRS-smear expansion (as Phase 13's
+    is_los column does), each gap would read as 180 s instead -- this
+    assertion would have caught that regression.
+    """
     stats = compute_los_stats(los_fixture_dir, mission="ISS", grid_interval_seconds=30)
     assert stats is not None
-    # Each gap is 60 s raw; expansion by 1 bucket each side adds 60 s (2x30).
-    # So each expanded gap is 180 s (3 buckets). Median should be ~180 s.
-    assert 60.0 <= stats.median_s <= 360.0
+    assert stats.median_s == pytest.approx(60.0)
 
 
 def test_compute_los_stats_missing_dir(tmp_path: Path) -> None:
@@ -173,3 +186,94 @@ def test_compute_los_stats_returns_none_below_min_events(tmp_path: Path) -> None
         # If the expansion caused more events, just verify n_events is correct.
         assert result.n_events >= _MIN_LOS_EVENTS
     # Test passes either way — the important behavior is "doesn't crash."
+
+
+# ---------------------------------------------------------------------------
+# Helper: _shard_in_lookback
+# ---------------------------------------------------------------------------
+
+
+def test_shard_in_lookback_recent_kept() -> None:
+    cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+    stem = "20260615T000000"  # well after cutoff
+    assert _shard_in_lookback(stem, cutoff) is True
+
+
+def test_shard_in_lookback_old_excluded() -> None:
+    cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+    stem = "20260101T000000"  # well before cutoff
+    assert _shard_in_lookback(stem, cutoff) is False
+
+
+def test_shard_in_lookback_exact_cutoff_kept() -> None:
+    cutoff = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
+    stem = "20260601T000000"
+    assert _shard_in_lookback(stem, cutoff) is True
+
+
+def test_shard_in_lookback_unparseable_kept() -> None:
+    """Filenames that don't match the shard stamp format fail open."""
+    cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+    assert _shard_in_lookback("shard", cutoff) is True
+    assert _shard_in_lookback("not-a-timestamp", cutoff) is True
+
+
+# ---------------------------------------------------------------------------
+# compute_los_stats lookback_days filtering
+# ---------------------------------------------------------------------------
+
+
+def test_compute_los_stats_excludes_shards_outside_lookback(tmp_path: Path) -> None:
+    """A shard older than lookback_days is not read into the duration calc."""
+    from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS
+
+    channels = list(ISS_CHANNELS.keys())[:2]
+    now = datetime.now(UTC)
+    recent_t0 = now - timedelta(days=1)
+    old_t0 = now - timedelta(days=30)
+
+    blackouts = [(90, 150), (240, 300), (390, 450)]
+
+    def in_blackout(secs: int) -> bool:
+        return any(start <= secs < end for start, end in blackouts)
+
+    recent_timestamps = [
+        recent_t0 + timedelta(seconds=s) for s in range(0, 540, 5) if not in_blackout(s)
+    ]
+    # Old shard has a single, differently-shaped gap that would change the
+    # median if it were included.
+    old_timestamps = [
+        old_t0 + timedelta(seconds=s) for s in range(0, 540, 5) if not (200 <= s < 500)
+    ]
+
+    for ch in channels:
+        rows_recent = [
+            {"telemetry_timestamp": ts, "value": 1.0, "aos_timestamp": None}
+            for ts in recent_timestamps
+        ]
+        rows_old = [
+            {"telemetry_timestamp": ts, "value": 1.0, "aos_timestamp": None}
+            for ts in old_timestamps
+        ]
+        flush_buffer(rows_recent, tmp_path, ch, bucket_ts=now)
+        flush_buffer(rows_old, tmp_path, ch, bucket_ts=old_t0)
+
+    # Sanity: both shards are on disk.
+    shard_dir = tmp_path / "ISS" / "ticks" / f"channel_id={channels[0]}"
+    assert len(list(shard_dir.glob("*.parquet"))) == 2
+
+    stats_bounded = compute_los_stats(
+        tmp_path, mission="ISS", grid_interval_seconds=30, lookback_days=7
+    )
+    stats_unbounded = compute_los_stats(
+        tmp_path, mission="ISS", grid_interval_seconds=30, lookback_days=3650
+    )
+
+    assert stats_bounded is not None
+    assert stats_unbounded is not None
+    # The bounded read only sees the 3 small recent gaps (60 s each); the
+    # unbounded read also sees the old shard's single 300 s gap, which drags
+    # the median or event distribution to differ from the bounded read.
+    assert stats_bounded.median_s != stats_unbounded.median_s or (
+        stats_bounded.n_events != stats_unbounded.n_events
+    )

@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,9 @@ log = get_logger("api.live.los_stats")
 # shows no ETA rather than a noise-dominated estimate.
 _MIN_LOS_EVENTS = 3
 
+# Shard filename stamp format written by collector_io.shard_path.
+_SHARD_STAMP_FORMAT = "%Y%m%dT%H%M%S"
+
 
 @dataclass(frozen=True)
 class LosStats:
@@ -45,6 +49,7 @@ def compute_los_stats(
     raw_ticks_dir: Path | UPath | str,
     mission: str = "ISS",
     grid_interval_seconds: int = 30,
+    lookback_days: int = 7,
 ) -> LosStats | None:
     """Load the raw-tick archive and compute LOS gap duration statistics.
 
@@ -65,6 +70,13 @@ def compute_los_stats(
                                ``raw_ticks_dir``.
         grid_interval_seconds: Grid resolution in seconds (must match the
                                pump's resampler).
+        lookback_days:         Only read shards whose filename timestamp falls
+                               within this many days of now. LOS cadence is
+                               stable, so recent data suffices — bounds the
+                               scan so cold start on an always-on (min=1)
+                               service doesn't read the entire archive history.
+                               Shards with an unparseable filename are kept
+                               (fail open rather than silently drop data).
 
     Returns:
         ``LosStats`` with median and p90 LOS duration in seconds, or ``None``.
@@ -75,6 +87,7 @@ def compute_los_stats(
     ticks_root = UPath(raw_ticks_dir) / mission / "ticks"
     telemetry_channels = set(ISS_CHANNELS.keys())
     frames: list[pd.DataFrame] = []
+    cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
 
     for channel_id in telemetry_channels:
         channel_dir = ticks_root / f"channel_id={channel_id}"
@@ -84,6 +97,8 @@ def compute_los_stats(
             log.debug("los_stats.channel_glob_failed", channel_id=channel_id, error=str(exc))
             continue
         for path in sorted(parquet_files):
+            if not _shard_in_lookback(path.stem, cutoff):
+                continue
             try:
                 df = pd.read_parquet(path, columns=["telemetry_timestamp"])
                 df["channel_id"] = channel_id
@@ -141,6 +156,20 @@ def compute_los_stats(
         p90_s=round(p90_s),
     )
     return LosStats(median_s=median_s, p90_s=p90_s, n_events=len(durations_s))
+
+
+def _shard_in_lookback(stem: str, cutoff: datetime) -> bool:
+    """True if a shard filename stem's timestamp is at or after ``cutoff``.
+
+    Shard filenames are written by ``collector_io.shard_path`` as
+    ``{YYYYMMDDTHHMMSS}.parquet`` in UTC. Filenames that don't match the
+    expected format are kept (fail open) rather than silently excluded.
+    """
+    try:
+        stamp = datetime.strptime(stem, _SHARD_STAMP_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return True
+    return stamp >= cutoff
 
 
 def _measure_los_runs(
