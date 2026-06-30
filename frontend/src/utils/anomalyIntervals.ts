@@ -23,6 +23,9 @@ export function collapseFlags(
         open.endTs = e.timestamp;
       }
     } else if (open) {
+      // Extend to the first non-flagged event so single-bucket anomalies have
+      // visible width on the chart (startTs === endTs renders as zero-width).
+      open.endTs = e.timestamp;
       out.push(open);
       open = null;
     }
@@ -57,6 +60,9 @@ export function labeledIntervalsWithDetection(
         open.detected = open.detected || e.is_anomaly_predicted;
       }
     } else if (open) {
+      // Extend to the first non-labeled event for visible width (same reason as
+      // collapseFlags above).
+      open.endTs = e.timestamp;
       out.push(open);
       open = null;
     }

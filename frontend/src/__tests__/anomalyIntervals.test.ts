@@ -53,9 +53,11 @@ describe("collapseFlags — is_anomaly", () => {
       event("t8", true),
       event("t9", true),
     ];
+    // Closed intervals extend endTs to the first non-flagged event for visible
+    // chart width. The last cluster has no closing event so endTs stays at t9.
     expect(collapseFlags(events, "is_anomaly")).toEqual([
-      { startTs: "t2", endTs: "t3" },
-      { startTs: "t5", endTs: "t5" },
+      { startTs: "t2", endTs: "t4" },
+      { startTs: "t5", endTs: "t6" },
       { startTs: "t7", endTs: "t9" },
     ]);
   });
@@ -75,8 +77,9 @@ describe("collapseFlags — is_anomaly_predicted", () => {
       event("t2", false, true),
       event("t3", false, false),
     ];
+    // Interval closes at t3 (first non-flagged), extending endTs for visible width.
     expect(collapseFlags(events, "is_anomaly_predicted")).toEqual([
-      { startTs: "t1", endTs: "t2" },
+      { startTs: "t1", endTs: "t3" },
     ]);
   });
 });
@@ -91,8 +94,9 @@ describe("labeledIntervalsWithDetection", () => {
       event("t4", true, false),
       event("t5", false, false),
     ];
+    // Interval closes at t5 (first non-labeled event), extending endTs.
     expect(labeledIntervalsWithDetection(events)).toEqual([
-      { startTs: "t2", endTs: "t4", detected: true },
+      { startTs: "t2", endTs: "t5", detected: true },
     ]);
   });
 
@@ -113,8 +117,9 @@ describe("labeledIntervalsWithDetection", () => {
       event("t3", true, false), // miss window start
       event("t4", true, false),
     ];
+    // First window closes at t2 (first non-labeled event), extending endTs.
     expect(labeledIntervalsWithDetection(events)).toEqual([
-      { startTs: "t1", endTs: "t1", detected: true },
+      { startTs: "t1", endTs: "t2", detected: true },
       { startTs: "t3", endTs: "t4", detected: false },
     ]);
   });
