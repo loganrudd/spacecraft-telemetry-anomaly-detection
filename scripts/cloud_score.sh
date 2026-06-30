@@ -59,13 +59,16 @@ done
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
 
-# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO):
-# read the test split from the _injected dir and select channels explicitly,
-# because `inject run` writes no channels.txt. Default is the nominal flow.
+# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO).
+# `inject run` writes no channels.txt, so fall back to the base channels.txt
+# (injected data covers exactly the same channels as the preprocessed dataset).
 if [[ "${INJECTED}" = "1" ]]; then
-  : "${CHANNELS:?INJECTED=1 requires CHANNELS=ch1,ch2,... (the _injected dir has no channels.txt)}"
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
-  CHANNELS_ARG="--channels ${CHANNELS}"
+  if [[ -n "${CHANNELS:-}" ]]; then
+    CHANNELS_ARG="--channels ${CHANNELS}"
+  else
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
