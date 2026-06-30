@@ -82,6 +82,21 @@ resource "google_storage_bucket_iam_member" "api_sample_viewer" {
   member = "serviceAccount:${google_service_account.api.email}"
 }
 
+# api-iss (Phase 17): live pump archives raw ticks for all 18 ISS channels to
+# raw-data/ISS/ticks/. objectCreator + objectViewer (list) mirrors the collector
+# SA grants and is the minimum needed for flush_buffer to write Parquet shards.
+resource "google_storage_bucket_iam_member" "api_raw_data_creator" {
+  bucket = google_storage_bucket.raw_data.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_storage_bucket_iam_member" "api_raw_data_viewer" {
+  bucket = google_storage_bucket.raw_data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.api.email}"
+}
+
 # mlflow: write MLflow artifacts (model files, reports) to the artifacts bucket.
 resource "google_storage_bucket_iam_member" "mlflow_artifacts_admin" {
   bucket = google_storage_bucket.artifacts.name

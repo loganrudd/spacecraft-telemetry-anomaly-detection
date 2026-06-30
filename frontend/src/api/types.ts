@@ -47,4 +47,18 @@ export type DriftEvent = {
   subsystem_alert: boolean | null;
 };
 
+/** Per-tick raw event from the live Lightstreamer pump (event: raw). */
+export type RawTelemetryEvent = {
+  timestamp: string;
+  channel: string;
+  value_normalized: number;
+};
+
+/** Mission-wide status event emitted on LOS onset and recovery (event: status). */
+export type StatusEvent = {
+  type: "los" | "resumed";
+  mode?: string;
+  expected_resume_in_s?: number;
+};
+
 export const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "";

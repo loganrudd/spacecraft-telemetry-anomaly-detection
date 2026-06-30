@@ -228,7 +228,7 @@ gcloud run jobs execute mlflow-db-upgrade \
   --region $REGION --project $PROJECT_ID --wait
 ```
 
-## ISS Collector (Phase 12)
+## ISS Collector (Phase 12; retired Phase 17)
 
 The ISS Live telemetry collector runs as a long-lived Docker container on an always-on,
 non-preemptible `e2-small` GCE VM. It must be running for ~9–10 days before Phase 13
@@ -449,6 +449,59 @@ make serve MISSION=ISS PORT=8001
 
 Run `make serve` (ESA, `:8000`) in another terminal so the mission switcher has both. The
 identity token expires after ~1h.
+
+## ISS Live Pump + VM Teardown (Phase 17)
+
+Phase 17 folds collection into the `api-iss` Cloud Run service (live Lightstreamer
+pump), making the standalone collector VM redundant. The pump is always-on
+(`min_instances=1`) and archives all 18 channels to GCS on the same 5-minute flush
+cycle as the former collector.
+
+### Deploy the live pump
+
+```bash
+# Build and push the api image (CI does this automatically on push to main):
+./scripts/cloud_build_api.sh
+
+# Deploy api-iss with the live pump config (min=1, max=1, LIVE=true):
+gcloud run deploy api-iss \
+  --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/api:latest \
+  --region ${REGION} \
+  --project ${PROJECT_ID} \
+  --min-instances 1 \
+  --max-instances 1 \
+  --set-env-vars "SPACECRAFT_API__LIVE=true,SPACECRAFT_API__ARCHIVE_TO_GCS=true,SPACECRAFT_COLLECT__CHANNEL_SET=all,SPACECRAFT_COLLECT__RAW_TICKS_DIR=gs://${PROJECT_ID}-raw-data,SPACECRAFT_COLLECT__FLUSH_INTERVAL_SECONDS=300"
+```
+
+Or simply `terraform apply` — `infra/cloud_run.tf` now carries all the env vars.
+`terraform apply` will also grant `sa-api` write access to the raw-data bucket
+(`api_raw_data_creator` + `api_raw_data_viewer` IAM members).
+
+### Verify the pump is archiving
+
+```bash
+# Wait ~5 minutes after deploy, then check that fresh shards are arriving:
+gsutil ls -l gs://${PROJECT_ID}-raw-data/ISS/ticks/ | tail -5
+# Each active channel should have a shard timestamped within the last 5 minutes.
+```
+
+### Retire the collector VM
+
+Once the pump is confirmed archiving, destroy the VM:
+
+```bash
+# The google_compute_instance.collector resource was removed from Terraform in
+# Phase 17. Running terraform apply will destroy the instance.
+terraform -chdir=infra apply \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+# The raw-data bucket contents are preserved. sa-collector SA + IAM remain as
+# an emergency backstop — they cost nothing.
+```
+
+> **Note:** there will be a brief overlap between the pump archiving and the VM
+> archiving (both write to the same GCS paths). This is harmless — shard filenames
+> are second-unique and neither writer deletes existing shards.
 
 ## Cost Guardrails
 

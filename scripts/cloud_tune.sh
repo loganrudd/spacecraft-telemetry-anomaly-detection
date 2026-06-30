@@ -39,12 +39,15 @@ done
 REGION="${REGION:-us-central1}"
 
 # INJECTED=1 tunes against the manufactured-label dataset (ISS injection-driven
-# HPO): sweep on the _injected hpo_portion and select channels explicitly, since
-# `inject run` writes no channels.txt. Default is the nominal flow.
+# HPO). `inject run` writes no channels.txt, so fall back to the base channels.txt
+# (injected data covers exactly the same channels as the preprocessed dataset).
 if [[ "${INJECTED}" = "1" ]]; then
-  : "${CHANNELS:?INJECTED=1 requires CHANNELS=ch1,ch2,... (the _injected dir has no channels.txt)}"
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
-  CHANNELS_ARG="--channels ${CHANNELS}"
+  if [[ -n "${CHANNELS:-}" ]]; then
+    CHANNELS_ARG="--channels ${CHANNELS}"
+  else
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"

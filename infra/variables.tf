@@ -82,9 +82,9 @@ variable "mlflow_admin_invokers" {
 # ---------------------------------------------------------------------------
 
 variable "iss_min_instances" {
-  description = "Minimum instances for the api-iss Cloud Run service (0 = scale-to-zero; Phase 17 sets to 1 for the always-on live Lightstreamer pump)"
+  description = "Minimum instances for the api-iss Cloud Run service (Phase 17+: always 1 for the always-on live Lightstreamer pump)"
   type        = number
-  default     = 0
+  default     = 1
 }
 
 variable "api_iss_url" {

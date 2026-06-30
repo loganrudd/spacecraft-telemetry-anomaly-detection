@@ -1,24 +1,23 @@
 # ---------------------------------------------------------------------------
 # Phase 12: ISS Live telemetry collector VM
 #
-# Always-on, non-preemptible e2-small instance.  Spot/preemptible is
-# intentionally NOT used — a mid-run eviction breaks the 9-10 day collection
-# window.  e2-small runs ~$12/mo; the ~10-day collection window costs ~$4-5.
+# Phase 17: The standalone VM is RETIRED.  Collection now runs inside the
+# api-iss Cloud Run service (LivePump subscribes all 18 PUIs and archives raw
+# ticks via flush_buffer — same path, no separate process).  sa-collector and
+# its IAM bindings are retained as a zero-cost emergency backstop in case the
+# pump needs to be manually bypassed.
 #
-# The VM pulls and runs the collector image from Artifact Registry using a
-# dedicated service account with write-only access to the raw-data bucket.
-# Workload Identity Federation is not used here (GCE, not GKE); instead the
-# SA is attached directly to the instance so the metadata server vends tokens
-# without any key files in the image or container.
+# Retirement sequence at deploy time (manual, once pump is confirmed):
+#   1. Deploy api-iss with SPACECRAFT_API__LIVE=true + SPACECRAFT_API__ARCHIVE_TO_GCS=true
+#   2. Confirm GCS raw-data shards for all 18 channels are arriving fresh
+#   3. terraform apply  # destroys the VM; SA + IAM remain
+#   4. Brief tick overlap during the window is harmless (same shard filenames).
 #
-# To start collection:
-#   terraform apply -target=google_compute_instance.collector
-#   (Then SSH in and check: sudo docker logs collector -f)
-#
-# To stop and destroy:
-#   terraform destroy -target=google_compute_instance.collector
+# To re-enable the VM for emergency collection (without Terraform):
+#   gcloud compute instances create iss-collector ... --service-account=sa-collector@...
 # ---------------------------------------------------------------------------
 
+# Kept for emergency manual collection (no VM attached = no cost).
 locals {
   collector_image = "${var.region}-docker.pkg.dev/${var.project_id}/spacecraft-telemetry/collector:latest"
 }
@@ -61,91 +60,7 @@ resource "google_project_iam_member" "collector_log_writer" {
   member  = "serviceAccount:${google_service_account.collector.email}"
 }
 
-resource "google_compute_instance" "collector" {
-  name         = "iss-collector"
-  machine_type = "e2-small"
-  zone         = "${var.region}-a"
-
-  tags = ["iss-collector"]
-
-  labels = {
-    owner     = "spacecraft-telemetry"
-    component = "iss-collector"
-    phase     = "12"
-  }
-
-  # Container-Optimized OS — ships with Docker, handles auto-updates.
-  boot_disk {
-    initialize_params {
-      image = "cos-cloud/cos-stable"
-      size  = 20 # GB — holds the image layers and log buffers; data goes to GCS
-      type  = "pd-standard"
-    }
-  }
-
-  network_interface {
-    network = "default"
-    # Ephemeral public IP so the VM can reach push.lightstreamer.com without
-    # a NAT gateway (saves ~$3/mo vs Cloud NAT for a single egress-only VM).
-    access_config {}
-  }
-
-  # Workload Identity is a GKE concept; for GCE we attach the SA directly.
-  service_account {
-    email  = google_service_account.collector.email
-    scopes = ["cloud-platform"]
-  }
-
-  scheduling {
-    # Non-preemptible: a mid-run eviction breaks the collection window.
-    preemptible         = false
-    on_host_maintenance = "MIGRATE"
-    automatic_restart   = true
-  }
-
-  metadata = {
-    # cloud-init startup script: pull and run the collector container.
-    # Environment variables configure GCS output and structured logging.
-    # --restart unless-stopped ensures recovery from crashes within seconds.
-    startup-script = <<-SCRIPT
-      #!/bin/bash
-      set -euo pipefail
-
-      # COS mounts / read-only, so the default $HOME (/root) is not writable and
-      # docker-credential-gcr can't create /root/.docker. Point HOME at a
-      # writable path; both the credential helper (writes $HOME/.docker/config.json)
-      # and the docker CLI (reads it) then agree. /var is writable on COS.
-      export HOME=/var/lib/collector
-      mkdir -p "$HOME"
-
-      # Authenticate Docker with Artifact Registry. Container-Optimized OS does
-      # NOT ship gcloud, so we use docker-credential-gcr (preinstalled on COS),
-      # which vends tokens from the attached service account via the metadata
-      # server. gcloud here would fail with "command not found" and, under
-      # `set -euo pipefail`, abort the script before docker pull.
-      docker-credential-gcr configure-docker --registries=${var.region}-docker.pkg.dev
-
-      # Stop any existing container from a previous startup.
-      docker stop collector 2>/dev/null || true
-      docker rm   collector 2>/dev/null || true
-
-      docker pull ${local.collector_image}
-
-      docker run --name collector \
-        --restart unless-stopped \
-        --detach \
-        -e SPACECRAFT_COLLECT__RAW_TICKS_DIR=gs://${var.project_id}-raw-data \
-        -e SPACECRAFT_COLLECT__CHANNEL_SET=all \
-        ${local.collector_image}
-    SCRIPT
-  }
-
-  depends_on = [
-    google_project_service.apis,
-    google_service_account.collector,
-    google_storage_bucket_iam_member.collector_raw_writer,
-    google_storage_bucket_iam_member.collector_raw_viewer,
-    google_project_iam_member.collector_ar_reader,
-    google_project_iam_member.collector_log_writer,
-  ]
-}
+# google_compute_instance.collector removed in Phase 17.
+# The VM is destroyed via `terraform apply` after confirming the live pump
+# is archiving all 18 ISS channels to GCS (see retirement sequence above).
+# SA + IAM bindings above are kept as an emergency backstop.

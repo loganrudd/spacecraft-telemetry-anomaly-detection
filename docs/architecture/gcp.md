@@ -114,3 +114,56 @@ cloud infrastructure (GCS bucket paths, channels.csv, preprocessed Parquet) was 
 for Mission1. The serving mission is set via `cloud.yaml` (`api.mission`) and
 `SPACECRAFT_API__MISSION` env var; switching missions is a Terraform + config change
 with no code changes required.
+
+## Phase 17: api-iss always-on + live pump architecture
+
+### Why max_instances=1 for api-iss
+
+`api-iss` is pinned to a single instance (min=1, max=1). Allowing multiple instances
+would cause:
+
+1. **Split-brain SSE state**: each instance has its own in-process `EventBroadcaster`;
+   a client that reconnects might land on a different instance with a different event
+   history, producing discontinuous telemetry charts.
+2. **Duplicate GCS writes**: both instances would subscribe to Lightstreamer and archive
+   ticks, producing duplicate shard files or competing writes at the same path.
+3. **Two Lightstreamer sessions**: the broker rate-limits per session; two sessions from
+   the same credentials could hit limits or produce ordering ambiguity.
+
+SSE fan-out within the single instance scales to many viewers (all drain the same
+broadcaster ring buffer) — horizontal scale is not needed for this use case.
+
+### LOS design (transparent replay fallback)
+
+When the ISS enters a Loss-of-Signal window (TDRS handover, ~16x/day), the pump stops
+receiving ticks. The design choice is **a labeled replay fallback**: emit
+`event: status {type: "los", mode: "replay"}` and start the shared replay loop
+(the same one ESA uses) over recently collected telemetry so the chart stays alive;
+resume on `{type: "resumed"}`.
+
+Rationale: running replay during LOS without labeling it would imply to the viewer
+that the SSE stream is real-time when it is actually historical data. Instead, the
+`mode: "replay"` field drives a dashboard banner that explicitly says the stream is
+showing recent recorded data until live resumes. The portfolio narrative is "live
+ISS telemetry, honestly labeled" — going silent on every TDRS handover (~16x/day)
+would be a worse viewer experience for no added honesty, since the replay path
+already exists as permanent infrastructure shared with ESA.
+
+The `expected_resume_in_s` field in the LOS status event is derived from the
+**historical median LOS duration** computed at startup from the raw-tick archive
+(see `api/live/los_stats.py`). It is presented as "typically restored within ~N min"
+— an honest estimate, not a countdown promise.
+
+### Collection folded into the pump (VM retired)
+
+The standalone `iss-collector` GCE VM from Phase 12 is retired in Phase 17. The pump
+already holds an open Lightstreamer session and sees every tick; archiving them via
+`flush_buffer` is ~$0 marginal compute on the already-always-on instance.
+
+Benefits: one fewer billable resource (~$12/mo), simpler ops (no SSH, no VM
+startup-script maintenance), and aligned ownership (the same binary that serves also
+collects, eliminating any collector/server version skew).
+
+The `sa-collector` SA and its IAM bindings are preserved as a zero-cost emergency
+backstop. If the pump needs to be bypassed, a GCE instance can be created manually
+and attached to `sa-collector` without any Terraform changes.

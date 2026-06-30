@@ -1681,6 +1681,15 @@ def api_group() -> None:
     ),
 )
 @click.option("--reload", is_flag=True, default=False, help="Enable uvicorn auto-reload.")
+@click.option(
+    "--live",
+    is_flag=True,
+    default=False,
+    help=(
+        "Live pump mode: subscribe Lightstreamer and feed the broadcaster directly "
+        "instead of replaying pre-collected Parquet (ISS only)."
+    ),
+)
 @click.pass_context
 def api_serve(
     ctx: click.Context,
@@ -1691,6 +1700,7 @@ def api_serve(
     channels: str | None,
     replay_data_dir: str | None,
     reload: bool,
+    live: bool,
 ) -> None:
     """Start the FastAPI serving layer (SSE stream + /health)."""
     import uvicorn
@@ -1711,6 +1721,8 @@ def api_serve(
         api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
     if replay_data_dir is not None:
         api_overrides["replay_data_dir"] = replay_data_dir
+    if live:
+        api_overrides["live"] = True
 
     if api_overrides:
         settings = settings.model_copy(

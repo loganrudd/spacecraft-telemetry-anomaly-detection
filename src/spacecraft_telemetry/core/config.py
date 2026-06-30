@@ -429,6 +429,12 @@ class ApiConfig(BaseModel):
     # ESA continues to use the nominal processed dir.
     # None → fall back to preprocess.processed_data_dir.
     replay_data_dir: str | None = None
+    # Live pump mode: when True, api-iss subscribes Lightstreamer and feeds the
+    # broadcaster directly instead of replaying pre-collected data.
+    # Set via SPACECRAFT_API__LIVE=true in the Cloud Run environment.
+    live: bool = False
+    # When live=True, archive raw ticks to GCS via collector_io.flush_buffer.
+    archive_to_gcs: bool = False
     # Sibling-mission entries for the dashboard mission selector.
     # Each entry describes a peer API service for a different mission so the
     # frontend can render a switcher that navigates between them.

@@ -119,6 +119,11 @@ class ChannelInferenceEngine:
             maxlen=params.threshold_min_anomaly_len
         )
 
+    @property
+    def window_size(self) -> int:
+        """Number of timesteps the LSTM requires for a valid prediction."""
+        return self._window_size
+
     def reset(self) -> None:
         """Reset all rolling state so the next stream replay starts cold.
 
@@ -135,6 +140,27 @@ class ChannelInferenceEngine:
         self._smoothed_pos = 0
         self._smoothed_count = 0
         self._raw_flag_buf.clear()
+
+    def prime(self, values: list[float]) -> None:
+        """Pre-fill the window buffer from collected data without emitting events.
+
+        Fills ``_window_buf`` from the last ``min(len(values), window_size)``
+        entries in *values* and resets all scoring state (EWMA, threshold
+        ring buffer, anomaly flag buffer) so the first real ``step()`` call
+        starts with a full window but no history bias.
+
+        Use at startup and after LOS recovery (replay resets the buffers; this
+        restores the pre-LOS window so the very first live tick after recovery
+        produces a valid prediction rather than re-entering model warmup).
+
+        Args:
+            values: Pre-normalized values in chronological order.  Only the
+                    last ``window_size`` entries are used.
+        """
+        self.reset()
+        seed = values[-self._window_size :]
+        for v in seed:
+            self._window_buf.append(v)
 
     @torch.no_grad()
     def step(

@@ -3,6 +3,7 @@ import AnomalyAlerts from "./components/AnomalyAlerts";
 import ChannelPicker from "./components/ChannelPicker";
 import DriftPanel from "./components/DriftPanel";
 import InjectControl from "./components/InjectControl";
+import LiveStatusBanner from "./components/LiveStatusBanner";
 import MissionOverview from "./components/MissionOverview";
 import StatusBar from "./components/StatusBar";
 import TelemetryChart from "./components/TelemetryChart";
@@ -11,7 +12,7 @@ import { openTelemetryStream } from "./api/telemetryStream";
 import { openDriftStream } from "./api/driftStream";
 import { telemetryStore } from "./state/telemetryStore";
 import { driftStore } from "./state/driftStore";
-import type { HealthResponse } from "./api/types";
+import type { HealthResponse, StatusEvent } from "./api/types";
 import type { StreamHandle } from "./api/telemetryStream";
 import type { DriftStreamHandle } from "./api/driftStream";
 
@@ -20,6 +21,7 @@ import type { DriftStreamHandle } from "./api/driftStream";
 const DRIFT_DISABLED = true;
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
+type LiveStreamStatus = "live" | "los" | "connecting" | "closed";
 type DensityTier = "comfortable" | "compact" | "dense";
 
 type View =
@@ -37,6 +39,9 @@ export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [view, setView] = useState<View>({ kind: "overview" });
   const [connState, setConnState] = useState<ConnectionState>("closed");
+  const [liveStatus, setLiveStatus] = useState<LiveStreamStatus>("closed");
+  const [losEtaS, setLosEtaS] = useState<number | undefined>(undefined);
+  const [losMode, setLosMode] = useState<string | undefined>(undefined);
   const [evPerSec, setEvPerSec] = useState(0);
   const [driftDisabled, setDriftDisabled] = useState(false);
   const streamRef = useRef<StreamHandle | null>(null);
@@ -98,6 +103,24 @@ export default function App() {
         onEvent: (e) => {
           telemetryStore.push(e);
           tickCountRef.current += 1;
+          // Receiving a telemetry event means the live pump is active.
+          setLiveStatus((prev) => (prev === "los" ? prev : "live"));
+        },
+        onRawEvent: (e) => {
+          telemetryStore.pushRaw(e);
+          tickCountRef.current += 1;
+          setLiveStatus((prev) => (prev === "los" ? prev : "live"));
+        },
+        onStatusEvent: (e: StatusEvent) => {
+          if (e.type === "los") {
+            setLiveStatus("los");
+            setLosEtaS(e.expected_resume_in_s);
+            setLosMode(e.mode);
+          } else if (e.type === "resumed") {
+            setLiveStatus("live");
+            setLosEtaS(undefined);
+            setLosMode(undefined);
+          }
         },
         onOpen: () => {
           if (streamHasOpenedRef.current) {
@@ -108,8 +131,12 @@ export default function App() {
           }
           streamHasOpenedRef.current = true;
           setConnState("open");
+          setLiveStatus("connecting");
         },
-        onError: () => setConnState("error"),
+        onError: () => {
+          setConnState("error");
+          setLiveStatus("closed");
+        },
       });
 
       setDriftDisabled(false);
@@ -129,6 +156,9 @@ export default function App() {
       streamRef.current = null;
       driftStreamRef.current = null;
       setConnState("closed");
+      setLiveStatus("closed");
+      setLosEtaS(undefined);
+      setLosMode(undefined);
     };
 
     const onVisibility = () => {
@@ -216,12 +246,14 @@ export default function App() {
     <div className="app">
       <StatusBar
         connectionState={connState}
+        liveStatus={liveStatus}
         eventsPerSecond={evPerSec}
         mission={health?.mission ?? null}
         subsystem={subsystem}
         availableMissions={health?.available_missions ?? []}
         onBackToOverview={backToOverview}
       />
+      <LiveStatusBanner status={liveStatus} expectedResumeInS={losEtaS} mode={losMode} />
 
       <div className="app__body">
         {view.kind === "overview" ? (
@@ -269,7 +301,7 @@ export default function App() {
             </main>
 
             <div className="app__right">
-              <AnomalyAlerts channels={selected} />
+              <AnomalyAlerts channels={selected} mission={health?.mission} />
               <DriftPanel channels={selected} disabled={DRIFT_DISABLED || driftDisabled} />
               <InjectControl />
             </div>
