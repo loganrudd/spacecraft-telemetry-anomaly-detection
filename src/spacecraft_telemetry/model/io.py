@@ -81,6 +81,7 @@ def find_latest_run_for_channel(
     experiment_name: str,
     channel: str,
     tracking_uri: str,
+    extra_filter: str | None = None,
 ) -> Any:
     """Return the most recent MLflow run for a channel in an experiment, or None.
 
@@ -88,6 +89,10 @@ def find_latest_run_for_channel(
         experiment_name: MLflow experiment name to search within.
         channel:         Channel ID to filter by (matched against tags.channel_id).
         tracking_uri:    MLflow tracking server URI.
+        extra_filter:    Optional additional MLflow filter clause, ANDed onto the
+                          channel filter (e.g. "tags.data_source = 'nominal'" to
+                          distinguish a baseline scoring run from an injected one —
+                          see ray_fanout/tune.py's nominal false-positive penalty).
 
     Returns:
         An ``mlflow.entities.Run`` or ``None`` if no matching run is found.
@@ -98,9 +103,12 @@ def find_latest_run_for_channel(
     exp = client.get_experiment_by_name(experiment_name)
     if exp is None:
         return None
+    filter_string = f"tags.channel_id = '{channel}'"
+    if extra_filter:
+        filter_string += f" and {extra_filter}"
     runs = client.search_runs(
         [exp.experiment_id],
-        filter_string=f"tags.channel_id = '{channel}'",
+        filter_string=filter_string,
         order_by=["attributes.start_time DESC"],
         max_results=1,
     )

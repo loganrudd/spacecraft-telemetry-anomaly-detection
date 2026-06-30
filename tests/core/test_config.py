@@ -280,6 +280,15 @@ class TestTuneConfig:
         assert cfg.max_concurrent_trials == 2
         assert cfg.hpo_eval_fraction == 0.6
         assert cfg.parallel_subsystems is False
+        assert cfg.fp_penalty_weight == 5.0
+
+    def test_fp_penalty_weight_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="fp_penalty_weight"):
+            TuneConfig(fp_penalty_weight=-1.0)
+
+    def test_fp_penalty_weight_zero_is_valid(self) -> None:
+        cfg = TuneConfig(fp_penalty_weight=0.0)
+        assert cfg.fp_penalty_weight == 0.0
 
     def test_hpo_eval_fraction_zero_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="hpo_eval_fraction"):

@@ -844,6 +844,16 @@ def ray_train(
     help="Override settings.preprocess.processed_data_dir for this run. "
     "Use with --mission ISS to point at an injected dataset (Phase 15).",
 )
+@click.option(
+    "--injected",
+    is_flag=True,
+    default=False,
+    help="Tag this run's data_source as 'injected' (Phase 15 manufactured-label "
+    "dataset) instead of 'nominal'. Pass alongside --processed-dir pointing at "
+    "the injected dataset. ray_fanout.tune uses this tag to find a channel's "
+    "nominal baseline run for the HPO false-positive-rate penalty — omit this "
+    "flag for the baseline/nominal scoring pass.",
+)
 @click.pass_context
 def ray_score(
     ctx: click.Context,
@@ -855,6 +865,7 @@ def ray_score(
     tuned_configs: Path | None,
     eval_split: str,
     processed_dir: str | None,
+    injected: bool,
 ) -> None:
     """Score channels in parallel using Ray Core.
 
@@ -870,6 +881,14 @@ def ray_score(
         # With Phase 5 HPO-tuned params
         spacecraft-telemetry ray score --mission ESA-Mission1 \\
             --tuned-configs outputs/tuned_configs.json
+
+        # ISS injection-driven HPO (Phase 15): score the manufactured-label
+        # dataset and tag the run so `ray tune` can find it for recall, and
+        # tag a separate nominal baseline run so `ray tune` can find it for
+        # the false-positive-rate penalty.
+        spacecraft-telemetry ray score --mission ISS \\
+            --processed-dir data/processed_injected --injected
+        spacecraft-telemetry ray score --mission ISS
     """
     import json
 
@@ -911,6 +930,7 @@ def ray_score(
             max_channels=max_channels,
             tuned_configs=tuned,
             eval_split=eval_split,
+            data_source="injected" if injected else "nominal",
         )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")

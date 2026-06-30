@@ -87,7 +87,7 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
 
 
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_scoring_trial returns a final metrics dict containing f0_5."""
+    """_scoring_trial returns a final metrics dict containing f0_5 and objective."""
     from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
 
     _ = monkeypatch
@@ -107,12 +107,48 @@ def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
             "threshold_min_anomaly_len": 1,
         },
         channel_data=channel_data,
+        nominal_errors={},
+        fp_penalty_weight=5.0,
     )
 
     assert "f0_5" in result
     assert isinstance(result["f0_5"], float)
     assert "seg_f0_5" in result
     assert isinstance(result["seg_f0_5"], float)
+    # No nominal_errors provided -> zero penalty -> objective == seg_f0_5.
+    assert result["nominal_fp_rate"] == 0.0
+    assert result["objective"] == result["seg_f0_5"]
+
+
+def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config that fires constantly on nominal data is penalized in objective."""
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    _ = monkeypatch
+
+    channel_data = {
+        "channel_1": (
+            np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64),
+            np.array([False, False, True, True], dtype=np.bool_),
+        )
+    }
+    # Monotonically increasing nominal errors -> smoothed value always exceeds
+    # the prior window's (mean + tiny z*std) -> near-1.0 fp_rate with z~0.
+    nominal_errors = {"channel_1": np.linspace(0.0, 5.0, 20, dtype=np.float64)}
+
+    config = {
+        "error_smoothing_window": 5,
+        "threshold_window": 3,
+        "threshold_z": 0.01,
+        "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config, channel_data=channel_data, nominal_errors=nominal_errors, fp_penalty_weight=5.0
+    )
+
+    assert result["nominal_fp_rate"] > 0.0
+    assert result["objective"] < result["seg_f0_5"]
 
 
 def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,7 +372,9 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     score_channel(settings, mission, channel)
 
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
-    assert set(best.keys()) == {"config", "seg_f0_5", "run_id"}
+    assert set(best.keys()) == {
+        "config", "seg_f0_5", "nominal_fp_rate", "objective", "run_id",
+    }
     config = best["config"]
     assert set(config.keys()) == {
         "error_smoothing_window",

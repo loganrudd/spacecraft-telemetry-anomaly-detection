@@ -9,9 +9,11 @@ train_all_channels(settings, mission, channels, *, max_channels=None) -> list[di
     Fan out train_channel across all channels using Ray Core.
 
 score_all_channels(settings, mission, channels, *, max_channels=None,
-                   tuned_configs=None) -> list[dict]
+                   tuned_configs=None, data_source="nominal") -> list[dict]
     Fan out score_channel across all channels, optionally applying per-subsystem
     scoring param overrides from Phase 5 HPO output (tuned_configs.json).
+    data_source tags each run "nominal" or "injected" (Phase 15) so HPO can
+    later locate a channel's nominal baseline run for the FP-rate penalty.
 
 tuned_configs schema (Phase 5 writes, score_all_channels reads)
 ---------------------------------------------------------------
@@ -208,6 +210,7 @@ def score_all_channels(
     max_channels: int | None = None,
     tuned_configs: dict[str, dict[str, Any]] | None = None,
     eval_split: str = "final_portion",
+    data_source: str = "nominal",
 ) -> list[dict[str, Any]]:
     """Fan out score_channel across channels using Ray Core.
 
@@ -230,6 +233,12 @@ def score_all_channels(
                        receive the base settings (Hundman defaults). Keys must
                        be a subset of: threshold_z, threshold_window,
                        error_smoothing_window, threshold_min_anomaly_len.
+        data_source:   "nominal" (default) or "injected" — tags each scoring
+                       run so ray_fanout.tune can find a channel's nominal
+                       baseline run independently of its injected-data run for
+                       the HPO false-positive-rate penalty. Pass "injected"
+                       when ``settings.preprocess.processed_data_dir`` points
+                       at the fault-injected dataset (Phase 15).
 
     Returns:
         List of per-channel result dicts in the same order as the channels input.
@@ -330,7 +339,9 @@ def score_all_channels(
         max_retries=settings.ray.max_retries,
     )
     futures = [
-        score_task.remote(_get_settings_ref(ch), mission, ch, eval_split, _get_hpo_run_id(ch))
+        score_task.remote(
+            _get_settings_ref(ch), mission, ch, eval_split, _get_hpo_run_id(ch), data_source
+        )
         for ch in work
     ]
     results: list[dict[str, Any]] = ray.get(futures)

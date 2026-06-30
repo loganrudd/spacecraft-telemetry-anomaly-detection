@@ -119,6 +119,7 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
         channel: str,
         eval_split: str = "full_test",
         parent_hpo_run_id: str | None = None,
+        data_source: str = "nominal",
     ) -> dict[str, Any]:
         log = get_logger(__name__)
         # Ray auto-dereferences ObjectRefs passed to .remote() — settings is
@@ -132,10 +133,12 @@ def make_score_task(num_gpus: float, max_retries: int = 3) -> Any:
             _split = cast(
                 Literal["full_test", "hpo_portion", "final_portion"], eval_split
             )
+            _data_source = cast(Literal["nominal", "injected"], data_source)
             metrics = score_channel(
                 typed_settings, mission, channel,
                 eval_split=_split,
                 parent_hpo_run_id=parent_hpo_run_id,
+                data_source=_data_source,
             )
             return {
                 "channel": channel,

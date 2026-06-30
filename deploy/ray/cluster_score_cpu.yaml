@@ -12,6 +12,10 @@
 #   TUNED               "1" to load tuned_configs.json; omit for Hundman defaults.
 #   EVAL_SPLIT          Test slice (default: final_portion).
 #   PROCESSED_DATA_DIR  Base dir for the test split.
+#   INJECTED_FLAG       "--injected" when scoring the injected dataset, else
+#                       empty. Tags the run data_source=injected so
+#                       ray_fanout.tune's false-positive penalty can find the
+#                       nominal baseline run separately.
 #   CHANNELS_ARG        Channel selector (--channels or --channels-from).
 #   WINDOW_SIZE_OVERRIDE  128 for ISS, 250 for ESA (set by cloud_score.sh).
 #
@@ -40,13 +44,13 @@ spec:
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     ${CHANNELS_ARG}
-    --eval-split ${EVAL_SPLIT}
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG}
     --tuned-configs /tmp/tuned_configs.json;
     else
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     ${CHANNELS_ARG}
-    --eval-split ${EVAL_SPLIT};
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG};
     fi'
 
   shutdownAfterJobFinishes: true

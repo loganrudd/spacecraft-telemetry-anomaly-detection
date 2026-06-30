@@ -234,6 +234,13 @@ class TuneConfig(BaseModel):
     # the remaining (1 - fraction) are the held-out final-eval portion.
     # This prevents the HPO target and the reported metric from being the same data.
     hpo_eval_fraction: float = 0.6
+    # Weight on the nominal (un-injected) false-positive rate in the HPO
+    # objective: objective = seg_f0_5 - fp_penalty_weight * nominal_fp_rate.
+    # Without this, a config that fires on 100% of nominal windows can still
+    # win on injected-only F0.5 (see ISS Phase 15 floored-z incident). Weight
+    # of 5.0 means a 10% nominal-window false-positive rate costs 0.5 off the
+    # objective — enough to push the optimizer off a hair-trigger threshold.
+    fp_penalty_weight: float = 5.0
 
     @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
     @classmethod
@@ -247,6 +254,13 @@ class TuneConfig(BaseModel):
     def fraction_in_open_unit_interval(cls, v: float) -> float:
         if not 0.0 < v < 1.0:
             raise ValueError(f"hpo_eval_fraction must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("fp_penalty_weight")
+    @classmethod
+    def non_negative_penalty(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"fp_penalty_weight must be >= 0, got {v}")
         return v
 
 

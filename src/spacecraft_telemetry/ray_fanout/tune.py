@@ -2,9 +2,10 @@
 
 Tunes 4 scoring parameters (error_smoothing_window, threshold_window,
 threshold_z, threshold_min_anomaly_len) without re-training any LSTM models.
-The objective is segment-overlap F0.5 on the un-pruned pipeline; Hundman §3.3
-pruning is intentionally excluded to preserve train/serve parity (see
-SEARCH_SPACE).
+The objective is segment-overlap F0.5 on the un-pruned pipeline, minus a
+penalty on the false-positive rate measured against each channel's nominal
+(un-injected) baseline scoring run; Hundman §3.3 pruning is intentionally
+excluded to preserve train/serve parity (see SEARCH_SPACE).
 Each trial is a single pure-numpy scoring pass (~50ms), so FIFOScheduler is
 used rather than ASHA — ASHA's pruning requires intermediate checkpoints that
 don't exist for single-pass trials.
@@ -12,6 +13,22 @@ don't exist for single-pass trials.
 Channels are grouped by spacecraft subsystem before sweeping. Individual
 channels have only 2-5 anomaly events (too few for stable F0.5 optimisation);
 pooling channels within a subsystem (6-30 channels each) gives a robust signal.
+
+Nominal false-positive penalty (ISS Phase 15)
+----------------------------------------------
+seg_f0_5 alone is computed only against injected-fault labels, which are
+common in the injected eval portion. A config can win on seg_f0_5 purely by
+flagging *everything* — Telemanom's one-step forecaster barely reacts to slow
+drift faults, so the optimizer can floor threshold_z to "detect" them, at the
+cost of also firing on nominal noise. ISS replay has no real anomalies, so
+the live demo is the worst case for that failure mode: an uncalibrated config
+flags constantly. _load_nominal_errors() fetches each channel's nominal
+(un-injected) scoring run — tagged ``data_source=nominal`` by score_channel,
+see model/scoring.py and cli.py `ray score --injected` — and the objective
+subtracts ``fp_penalty_weight * mean(nominal_fp_rate)`` from seg_f0_5. A
+channel with no nominal-tagged run yet contributes no penalty (logged once
+as a warning) rather than failing the sweep — run `ray score --mission ISS`
+(no --injected) to backfill it.
 
 Public API
 ----------
@@ -76,7 +93,11 @@ log = get_logger(__name__)
 SEARCH_SPACE: dict[str, Any] = {
     "error_smoothing_window":    tune.randint(5, 101),   # EWMA span: [5, 100]
     "threshold_window":          tune.randint(50, 501),  # rolling window: [50, 500]
-    "threshold_z":               tune.uniform(1.5, 5.0), # z-score multiplier
+    # z floor raised 1.5 -> 2.5: below ~2.5 the optimizer was flooring z to chase
+    # undetectable drift faults (see docs/architecture — attitude/solar_array
+    # pegged to z~1.6 during ISS Phase 15 HPO, firing on nominal noise in replay).
+    # The nominal-FP penalty below is the principled fix; this floor is a backstop.
+    "threshold_z":               tune.uniform(2.5, 5.0), # z-score multiplier
     "threshold_min_anomaly_len": tune.randint(1, 11),    # min run length: [1, 10]
 }
 
@@ -198,6 +219,62 @@ def _prepare_channel_data(
     return prepared, scoring_run_ids
 
 
+def _load_nominal_errors(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+) -> dict[str, np.ndarray[Any, Any]]:
+    """Load smoothed-error arrays from each channel's latest nominal scoring run.
+
+    "Nominal" means scored against the un-injected test split — tagged
+    ``data_source=nominal`` by score_channel() (the default; pass
+    ``ray score --injected`` to tag the injected-data pass instead). Used as
+    the false-positive-rate baseline in _scoring_trial(): a trial config that
+    fires frequently on nominal data is penalized even if it scores well on
+    the injected fault labels (see module docstring).
+
+    Channels with no nominal-tagged scoring run yet are simply omitted from
+    the returned dict — the caller treats a missing channel as "no penalty
+    data available for this channel" rather than failing the sweep. This is
+    expected the first time a mission's HPO runs after this penalty shipped;
+    a baseline ``ray score --mission <mission>`` (no --injected) backfills it.
+    """
+    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
+    out: dict[str, np.ndarray[Any, Any]] = {}
+    missing: list[str] = []
+
+    for channel in channels:
+        run = find_latest_run_for_channel(
+            _scoring_exp,
+            channel,
+            settings.mlflow.tracking_uri,
+            extra_filter="tags.data_source = 'nominal'",
+        )
+        if run is None:
+            missing.append(channel)
+            continue
+        try:
+            raw = download_artifact_bytes(
+                run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+            )
+        except (OSError, Exception):
+            missing.append(channel)
+            continue
+        out[channel] = bytes_to_errors(raw)
+
+    if missing:
+        log.warning(
+            "tune.nominal_baseline.missing",
+            mission=mission,
+            n_missing=len(missing),
+            channels=missing[:10],
+            note="FP penalty skipped for these channels until a nominal-tagged "
+            "scoring run exists — run `ray score --mission <mission>` "
+            "(no --injected) to backfill.",
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Trial function — pure numpy, no torch dependency
 # ---------------------------------------------------------------------------
@@ -206,11 +283,15 @@ def _scoring_trial(
     config: dict[str, Any],
     *,
     channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
+    nominal_errors: dict[str, np.ndarray[Any, Any]],
+    fp_penalty_weight: float,
 ) -> dict[str, float]:
     """Ray Tune trial: score all channels in a subsystem group with config params.
 
     Each trial applies the scoring pipeline with the sampled hyperparameters
-    over pre-loaded immutable channel data and returns mean F0.5.
+    over pre-loaded immutable channel data and returns mean F0.5, mean nominal
+    false-positive rate, and the combined objective the sweep actually
+    optimizes (see module docstring for the rationale).
 
     No model re-training occurs — only the numpy scoring pass is repeated.
     Returns a dict rather than calling ray.train.report() so that the function
@@ -222,6 +303,11 @@ def _scoring_trial(
         channel_data: Mapping channel -> (errors, labels), pre-validated and
             pre-sliced to the HPO portion by ``_prepare_channel_data``.  Never
             contains the held-out eval tail.
+        nominal_errors: Mapping channel -> smoothed-error array from that
+            channel's nominal (un-injected) scoring run.  Channels absent here
+            (no nominal-tagged run yet) contribute no penalty term.
+        fp_penalty_weight: Weight on mean nominal false-positive rate,
+            subtracted from mean seg_f0_5 to form "objective".
     """
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,
@@ -248,12 +334,35 @@ def _scoring_trial(
         f0_5_scores.append(evaluate(labels, flags)["f0_5"])
         seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
 
-    # seg_f0_5 (segment-overlap) is the HPO objective — it matches how long ESA
-    # anomalies should be scored and what serving produces. point-level f0_5 is
-    # reported alongside for observability.
+    fp_rates: list[float] = []
+    for nom_errors in nominal_errors.values():
+        nom_smoothed = smooth_errors(nom_errors, int(config["error_smoothing_window"]))
+        nom_threshold = dynamic_threshold(
+            nom_smoothed,
+            int(config["threshold_window"]),
+            float(config["threshold_z"]),
+        )
+        nom_flags = flag_anomalies(
+            nom_smoothed, nom_threshold, int(config["threshold_min_anomaly_len"])
+        )
+        fp_rates.append(float(nom_flags.mean()) if len(nom_flags) else 0.0)
+
+    # seg_f0_5 (segment-overlap) measures fault recall/precision against
+    # injected labels — it matches how long ESA anomalies should be scored and
+    # what serving produces. point-level f0_5 is reported alongside for
+    # observability. nominal_fp_rate measures how often this config fires on
+    # data with no real anomalies (the live-replay failure mode). "objective"
+    # is what the sweep actually optimizes (see run_hpo_sweep).
     mean_f0_5 = float(np.mean(f0_5_scores)) if f0_5_scores else 0.0
     mean_seg_f0_5 = float(np.mean(seg_f0_5_scores)) if seg_f0_5_scores else 0.0
-    return {"f0_5": mean_f0_5, "seg_f0_5": mean_seg_f0_5}
+    mean_fp_rate = float(np.mean(fp_rates)) if fp_rates else 0.0
+    objective = mean_seg_f0_5 - fp_penalty_weight * mean_fp_rate
+    return {
+        "f0_5": mean_f0_5,
+        "seg_f0_5": mean_seg_f0_5,
+        "nominal_fp_rate": mean_fp_rate,
+        "objective": objective,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +391,15 @@ def run_hpo_sweep(
 
     Returns:
         Dict with keys:
-        - ``"config"``    — best scoring-param dict (4 keys from SEARCH_SPACE).
-        - ``"seg_f0_5"``  — best segment-overlap F0.5 over the HPO portion
-          (un-pruned; the objective).
-        - ``"run_id"``    — MLflow run ID of the best trial (None if unavailable).
+        - ``"config"``           — best scoring-param dict (4 keys from SEARCH_SPACE).
+        - ``"seg_f0_5"``         — segment-overlap F0.5 of the selected trial over
+          the HPO portion (un-pruned; fault-recall component only).
+        - ``"nominal_fp_rate"``  — mean fraction of nominal-data windows the
+          selected trial's config flags as anomalous (0.0 if no channel in this
+          subsystem has a nominal-tagged baseline run yet).
+        - ``"objective"``        — ``seg_f0_5 - fp_penalty_weight * nominal_fp_rate``,
+          the actual quantity the sweep optimizes.
+        - ``"run_id"``           — MLflow run ID of the best trial (None if unavailable).
     """
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
@@ -315,10 +429,13 @@ def run_hpo_sweep(
     # Load immutable per-channel data once and validate compatibility before
     # launching Tune trials.
     channel_data, scoring_run_ids = _prepare_channel_data(settings_abs, mission, channels)
+    nominal_errors = _load_nominal_errors(settings_abs, mission, channels)
 
     trial_fn = tune.with_parameters(
         _scoring_trial,
         channel_data=channel_data,
+        nominal_errors=nominal_errors,
+        fp_penalty_weight=settings.tune.fp_penalty_weight,
     )
 
     # Capture the wall-clock time just before launching the sweep.  Used below
@@ -330,11 +447,11 @@ def run_hpo_sweep(
         trial_fn,
         param_space=SEARCH_SPACE,
         tune_config=tune.TuneConfig(
-            metric="seg_f0_5",
+            metric="objective",
             mode="max",
             num_samples=settings.tune.num_samples,
             max_concurrent_trials=settings.tune.max_concurrent_trials,
-            search_alg=HyperOptSearch(metric="seg_f0_5", mode="max"),
+            search_alg=HyperOptSearch(metric="objective", mode="max"),
             scheduler=FIFOScheduler(),  # type: ignore[no-untyped-call]
         ),
         run_config=tune.RunConfig(
@@ -358,10 +475,13 @@ def run_hpo_sweep(
     )
 
     results = tuner.fit()
-    best = results.get_best_result(metric="seg_f0_5", mode="max")
+    best = results.get_best_result(metric="objective", mode="max")
 
     best_config: dict[str, Any] = best.config or {}
-    best_seg_f0_5: float = (best.metrics or {}).get("seg_f0_5", 0.0)
+    best_metrics = best.metrics or {}
+    best_seg_f0_5: float = best_metrics.get("seg_f0_5", 0.0)
+    best_nominal_fp_rate: float = best_metrics.get("nominal_fp_rate", 0.0)
+    best_objective: float = best_metrics.get("objective", best_seg_f0_5)
 
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
@@ -379,7 +499,7 @@ def run_hpo_sweep(
                     f"tags.subsystem = '{subsystem}'"
                     f" and attributes.start_time >= {_sweep_start_ms}"
                 ),
-                order_by=["metrics.seg_f0_5 DESC"],
+                order_by=["metrics.objective DESC"],
                 max_results=1,
             )
             if _runs:
@@ -411,14 +531,37 @@ def run_hpo_sweep(
                 artifact_file="hpo_channel_manifest.json",
             )
 
+    # threshold_z pegged near the search-space floor is the signature of an
+    # optimizer chasing undetectable faults at the expense of nominal-data
+    # precision (see module docstring) — worth a loud signal even though the
+    # penalty above should now make this rare.
+    _z_floor = SEARCH_SPACE["threshold_z"].lower
+    if best_config.get("threshold_z", _z_floor) <= _z_floor + 0.1:
+        log.warning(
+            "tune.sweep.z_pegged_to_floor",
+            subsystem=subsystem,
+            threshold_z=best_config.get("threshold_z"),
+            nominal_fp_rate=round(best_nominal_fp_rate, 4),
+            note="best config sits at the threshold_z search-space floor — "
+            "likely chasing undetectable faults rather than a real threshold.",
+        )
+
     log.info(
         "tune.sweep.end",
         subsystem=subsystem,
+        best_objective=round(best_objective, 4),
         best_seg_f0_5=round(best_seg_f0_5, 4),
+        best_nominal_fp_rate=round(best_nominal_fp_rate, 4),
         best_config=best_config,
         best_run_id=best_run_id,
     )
-    return {"config": best_config, "seg_f0_5": best_seg_f0_5, "run_id": best_run_id}
+    return {
+        "config": best_config,
+        "seg_f0_5": best_seg_f0_5,
+        "nominal_fp_rate": best_nominal_fp_rate,
+        "objective": best_objective,
+        "run_id": best_run_id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +637,8 @@ def run_all_sweeps(
             "_meta": {
                 "run_id": sweep_result.get("run_id"),
                 "seg_f0_5": sweep_result.get("seg_f0_5", 0.0),
+                "nominal_fp_rate": sweep_result.get("nominal_fp_rate", 0.0),
+                "objective": sweep_result.get("objective", sweep_result.get("seg_f0_5", 0.0)),
             },
         }
 
@@ -555,7 +700,10 @@ def write_tuned_configs(
             "subsystem_1": {
                 "threshold_z": 2.8, "threshold_window": 200,
                 "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
-                "_meta": {"run_id": "abc123...", "seg_f0_5": 0.72}
+                "_meta": {
+                    "run_id": "abc123...", "seg_f0_5": 0.72,
+                    "nominal_fp_rate": 0.01, "objective": 0.67
+                }
             }
         }
 

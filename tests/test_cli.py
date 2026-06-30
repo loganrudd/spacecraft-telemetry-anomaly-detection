@@ -1317,6 +1317,67 @@ class TestRayScoreProcessedDirOption:
         assert "--processed-dir" in result.output
 
 
+class TestRayScoreInjectedOption:
+    """--injected (Phase 15) tags scoring runs so ray_fanout.tune can locate a
+    channel's nominal baseline run independently of its injected-data run for
+    the HPO false-positive-rate penalty."""
+
+    def _mock_cm(self) -> MagicMock:
+        cm = MagicMock()
+        cm.__enter__.return_value = None
+        cm.__exit__.return_value = None
+        return cm
+
+    def test_injected_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--injected" in result.output
+
+    def test_injected_flag_passes_injected_data_source(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.discover_channels",
+                return_value=["ch_a"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+                return_value=[],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ISS", "--injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_score.call_args.kwargs["data_source"] == "injected"
+
+    def test_no_injected_flag_defaults_to_nominal_data_source(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.discover_channels",
+                return_value=["ch_a"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+                return_value=[],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ISS"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_score.call_args.kwargs["data_source"] == "nominal"
+
+
 class TestRayTuneProcessedDirOption:
     def test_processed_dir_flag_in_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["ray", "tune", "--help"])

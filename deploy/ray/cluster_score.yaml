@@ -12,6 +12,9 @@
 #                final_portion; set full_test for a coverage view).
 #   PROCESSED_DATA_DIR  Base dir for the test split. cloud_score.sh sets the
 #                nominal bucket by default, or the _injected dir when INJECTED=1.
+#   INJECTED_FLAG  "--injected" when INJECTED=1, else empty. Tags the scoring
+#                run data_source=injected so ray_fanout.tune's false-positive
+#                penalty can tell it apart from the nominal baseline run.
 #   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
 #                injected: --channels <list> (the injected dir has no channels.txt).
 #
@@ -45,13 +48,13 @@ spec:
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     ${CHANNELS_ARG}
-    --eval-split ${EVAL_SPLIT}
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG}
     --tuned-configs /tmp/tuned_configs.json;
     else
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
     ${CHANNELS_ARG}
-    --eval-split ${EVAL_SPLIT};
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG};
     fi'
 
   shutdownAfterJobFinishes: true

@@ -9,8 +9,17 @@
 # Use --tuned after cloud-tune to score the held-out 40% with HPO params.
 # tuned_configs.json must exist in GCS before using --tuned; the job exits 1 if missing.
 #
+# --injected (ISS Phase 15 only): scores the manufactured-label dataset and
+# tags the run data_source=injected. ray_fanout.tune's false-positive-rate
+# penalty needs BOTH a tagged injected run (for fault recall) AND a tagged
+# nominal run (for the FP baseline) per channel — run a plain baseline pass
+# (no --injected) at least once for any mission using injection-driven HPO:
+#   ./scripts/cloud_score.sh --mission ISS                # nominal baseline
+#   ./scripts/cloud_score.sh --mission ISS --injected      # injected pass
+#   ./scripts/cloud_tune.sh  --mission ISS --injected      # HPO uses both
+#
 # Usage:
-#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--no-wait] [--delete-after]
+#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--injected] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -59,11 +68,14 @@ done
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
 
-# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO).
-# `inject run` writes no channels.txt, so fall back to the base channels.txt
-# (injected data covers exactly the same channels as the preprocessed dataset).
+# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO)
+# and tags the run data_source=injected (see model/scoring.py, cli.py
+# `ray score --injected`). `inject run` writes no channels.txt, so fall back
+# to the base channels.txt (injected data covers exactly the same channels as
+# the preprocessed dataset).
 if [[ "${INJECTED}" = "1" ]]; then
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
+  INJECTED_FLAG="--injected"
   if [[ -n "${CHANNELS:-}" ]]; then
     CHANNELS_ARG="--channels ${CHANNELS}"
   else
@@ -71,6 +83,7 @@ if [[ "${INJECTED}" = "1" ]]; then
   fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
+  INJECTED_FLAG=""
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
 fi
 # GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
@@ -89,7 +102,7 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT \
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED INJECTED_FLAG NUM_GPUS EVAL_SPLIT \
   PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 if [[ "${TUNED}" = "1" ]]; then
