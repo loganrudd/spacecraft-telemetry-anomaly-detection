@@ -76,9 +76,10 @@ leakage-free protocol and honest framing).
     ISS baseline streams live nominal data (ISS has no pre-labeled anomaly segments)
   - **Live Lightstreamer pump** (Phase 17): `api-iss` subscribes all 18 ISS PUIs in real
     time; engines fed live 30 s grid values via `OnlineGridResampler` + normalization;
-    on Loss-of-Signal (TDRS handover) the dashboard shows a `LiveStatusBanner` with an
-    empirical ETA — live-only, no replay fallback; pump also archives raw ticks to GCS
-    replacing the standalone collector VM
+    on Loss-of-Signal (TDRS handover) the pump falls back to replaying recent collected
+    data and the dashboard's `LiveStatusBanner` labels it ("showing recent recorded data")
+    with an empirical ETA; pump also archives raw ticks to GCS replacing the standalone
+    collector VM
   - Model window `W=128` (ISS-only override; ESA keeps W=250)
 
 
@@ -378,8 +379,9 @@ synthetic test-suite data.
 
 **Phase 17 — live pump:** `api-iss` is now always-on (min=1/max=1) and streams **real-time**
 ISS telemetry directly from Lightstreamer. On Loss-of-Signal (TDRS handover, ~16×/day) the
-dashboard shows a banner: "Signal lost — typically restored within ~N min." No replay fallback:
-the stream is genuinely live or silent. The pump also archives all 18 channels to GCS,
+pump falls back to replaying recent collected telemetry so the chart stays alive, and the
+dashboard banner is explicit about it: "Signal lost (TDRS handover) — showing recent recorded
+data, typically restored within ~N min." The pump also archives all 18 channels to GCS,
 replacing the standalone collector VM.
 
 The cloud workflow below demos the 6 Phase-12 validation channels (at least one per subsystem);

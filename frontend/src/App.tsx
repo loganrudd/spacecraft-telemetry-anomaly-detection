@@ -41,6 +41,7 @@ export default function App() {
   const [connState, setConnState] = useState<ConnectionState>("closed");
   const [liveStatus, setLiveStatus] = useState<LiveStreamStatus>("closed");
   const [losEtaS, setLosEtaS] = useState<number | undefined>(undefined);
+  const [losMode, setLosMode] = useState<string | undefined>(undefined);
   const [evPerSec, setEvPerSec] = useState(0);
   const [driftDisabled, setDriftDisabled] = useState(false);
   const streamRef = useRef<StreamHandle | null>(null);
@@ -114,9 +115,11 @@ export default function App() {
           if (e.type === "los") {
             setLiveStatus("los");
             setLosEtaS(e.expected_resume_in_s);
+            setLosMode(e.mode);
           } else if (e.type === "resumed") {
             setLiveStatus("live");
             setLosEtaS(undefined);
+            setLosMode(undefined);
           }
         },
         onOpen: () => {
@@ -155,6 +158,7 @@ export default function App() {
       setConnState("closed");
       setLiveStatus("closed");
       setLosEtaS(undefined);
+      setLosMode(undefined);
     };
 
     const onVisibility = () => {
@@ -249,7 +253,7 @@ export default function App() {
         availableMissions={health?.available_missions ?? []}
         onBackToOverview={backToOverview}
       />
-      <LiveStatusBanner status={liveStatus} expectedResumeInS={losEtaS} />
+      <LiveStatusBanner status={liveStatus} expectedResumeInS={losEtaS} mode={losMode} />
 
       <div className="app__body">
         {view.kind === "overview" ? (

@@ -52,4 +52,23 @@ describe("LiveStatusBanner", () => {
     const el = screen.getByRole("alert");
     expect(el.className).toContain("live-banner--los");
   });
+
+  it("labels the replay fallback when mode=replay", () => {
+    render(<LiveStatusBanner status="los" mode="replay" />);
+    const el = screen.getByText(/Signal lost/i);
+    expect(el.textContent).toMatch(/showing recent recorded data/i);
+  });
+
+  it("omits the replay label when mode is not replay", () => {
+    render(<LiveStatusBanner status="los" />);
+    const el = screen.getByText(/Signal lost/i);
+    expect(el.textContent).not.toMatch(/recorded data/i);
+  });
+
+  it("includes both the replay label and ETA when both are provided", () => {
+    render(<LiveStatusBanner status="los" mode="replay" expectedResumeInS={240} />);
+    const el = screen.getByText(/Signal lost/i);
+    expect(el.textContent).toMatch(/showing recent recorded data/i);
+    expect(el.textContent).toMatch(/~4 min/);
+  });
 });

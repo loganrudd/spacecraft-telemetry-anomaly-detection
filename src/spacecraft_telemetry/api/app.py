@@ -385,7 +385,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             if settings.api.live:
                 # Live pump: subscribes Lightstreamer, archives to GCS, and
-                # feeds the broadcaster directly — no replay loop needed.
+                # feeds the broadcaster directly. state= wires up the LOS
+                # fallback — on LOS the pump starts run_shared_loop() as a
+                # labeled replay so the chart stays alive (see live/pump.py).
                 from spacecraft_telemetry.api.live.pump import LivePump
 
                 raw_ticks_dir = (

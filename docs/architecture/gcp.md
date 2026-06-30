@@ -133,16 +133,21 @@ would cause:
 SSE fan-out within the single instance scales to many viewers (all drain the same
 broadcaster ring buffer) — horizontal scale is not needed for this use case.
 
-### Live-only LOS design (no replay fallback)
+### LOS design (transparent replay fallback)
 
 When the ISS enters a Loss-of-Signal window (TDRS handover, ~16x/day), the pump stops
-receiving ticks. The design choice is **live-only**: emit a `event: status {type: "los"}`
-SSE event and show a dashboard banner; resume on `{type: "resumed"}`. No replay loop.
+receiving ticks. The design choice is **a labeled replay fallback**: emit
+`event: status {type: "los", mode: "replay"}` and start the shared replay loop
+(the same one ESA uses) over recently collected telemetry so the chart stays alive;
+resume on `{type: "resumed"}`.
 
-Rationale: running replay during LOS would imply to the viewer that the SSE stream is
-real-time when it is actually historical data. The portfolio narrative is "genuinely live
-ISS telemetry"; a replay fallback would undermine this. ESA already demonstrates the
-replay path.
+Rationale: running replay during LOS without labeling it would imply to the viewer
+that the SSE stream is real-time when it is actually historical data. Instead, the
+`mode: "replay"` field drives a dashboard banner that explicitly says the stream is
+showing recent recorded data until live resumes. The portfolio narrative is "live
+ISS telemetry, honestly labeled" — going silent on every TDRS handover (~16x/day)
+would be a worse viewer experience for no added honesty, since the replay path
+already exists as permanent infrastructure shared with ESA.
 
 The `expected_resume_in_s` field in the LOS status event is derived from the
 **historical median LOS duration** computed at startup from the raw-tick archive
