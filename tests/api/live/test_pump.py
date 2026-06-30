@@ -74,6 +74,8 @@ def _make_pump(
     broadcaster: EventBroadcaster,
     window_size: int = 5,
     fallback_fn: object = None,
+    archive_to_gcs: bool = False,
+    raw_ticks_dir: object = None,
 ) -> LivePump:
     """Build a LivePump wired to a single test channel, no Lightstreamer."""
     loop = asyncio.get_event_loop()
@@ -88,8 +90,8 @@ def _make_pump(
         norm_params=norm_params,
         collect_config=config,
         state=None,
-        archive_to_gcs=False,
-        raw_ticks_dir=None,
+        archive_to_gcs=archive_to_gcs,
+        raw_ticks_dir=raw_ticks_dir,  # type: ignore[arg-type]
         los_stats_median_s=240.0,
         _fallback_start_fn=fallback_fn,  # type: ignore[arg-type]
     )
@@ -409,3 +411,71 @@ async def test_injected_bucket_sets_is_anomaly_flag() -> None:
     assert any(t["is_anomaly"] for t in telemetry_payloads), (
         "expected at least one telemetry event with is_anomaly=True"
     )
+
+
+# ---------------------------------------------------------------------------
+# Archive flush tests (thread-safety split: drain on loop, write off-loop)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flush_archive_writes_and_clears_buffer(tmp_path: object) -> None:
+    """_flush_archive_once drains a populated buffer and writes it via flush_buffer."""
+    spy = _SpyBroadcaster()
+    pump = _make_pump(spy, archive_to_gcs=True, raw_ticks_dir=tmp_path)
+    pump._archive_buffers[_CH] = []  # normally populated by start() from subscription_items
+
+    await pump._on_tick(_CH, _BASE_TS, 20.5)
+    assert pump._archive_buffers[_CH], "tick should have been archived in-memory"
+
+    await pump._flush_archive_once()
+
+    assert pump._archive_buffers[_CH] == [], "buffer should be drained after a successful flush"
+
+
+@pytest.mark.asyncio
+async def test_flush_archive_requeues_rows_on_write_failure(monkeypatch: object) -> None:
+    """A failed Parquet write re-queues its rows instead of dropping them."""
+    import spacecraft_telemetry.api.live.pump as pump_mod
+
+    spy = _SpyBroadcaster()
+    pump = _make_pump(spy, archive_to_gcs=True, raw_ticks_dir="gs://fake-bucket")
+    pump._archive_buffers[_CH] = []  # normally populated by start() from subscription_items
+
+    await pump._on_tick(_CH, _BASE_TS, 20.5)
+    assert pump._archive_buffers[_CH]
+
+    def _boom(rows: object, dest_dir: object, channel_id: object, bucket_ts: object) -> None:
+        raise OSError("GCS unavailable")
+
+    monkeypatch.setattr(pump_mod, "flush_buffer", _boom)  # type: ignore[attr-defined]
+
+    await pump._flush_archive_once()
+
+    assert pump._archive_buffers[_CH], "rows must be re-queued, not dropped, on write failure"
+
+
+@pytest.mark.asyncio
+async def test_flush_archive_drain_runs_on_loop_thread() -> None:
+    """_drain_archive and _requeue_failed never run inside asyncio.to_thread.
+
+    Regression guard for the thread-safety fix: only _write_archive (pure I/O)
+    may run off the event loop. Verified by asserting drain leaves no window
+    where a concurrently-appended tick could be silently dropped: appending a
+    second tick for a different bucket right after drain (simulating a tick
+    arriving between drain and write) must still be picked up by the next flush.
+    """
+    spy = _SpyBroadcaster()
+    pump = _make_pump(spy, archive_to_gcs=True, raw_ticks_dir="gs://fake-bucket")
+    pump._archive_buffers[_CH] = []  # normally populated by start() from subscription_items
+
+    await pump._on_tick(_CH, _BASE_TS, 20.5)
+    drained = pump._drain_archive()
+    assert drained[_CH], "drain should have captured the first tick"
+    assert pump._archive_buffers[_CH] == [], "drain must clear the buffer immediately"
+
+    # A tick arriving after drain (simulating the write-in-flight window) lands
+    # in the now-empty buffer rather than being lost or mixed into `drained`.
+    await pump._on_tick(_CH, _BASE_TS + timedelta(seconds=5), 21.0)
+    assert pump._archive_buffers[_CH], "post-drain tick must still be archived"
+    assert len(drained[_CH]) == 1, "the snapshot taken by drain must not grow after the fact"

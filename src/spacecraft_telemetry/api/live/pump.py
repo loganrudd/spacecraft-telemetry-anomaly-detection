@@ -21,7 +21,11 @@ Fault injection (POST /api/inject) works unchanged:
 
 Thread-safety: Lightstreamer callbacks arrive on library threads.  All asyncio
 state (broadcaster, engines, resampler) lives on the event loop and is only
-touched via run_coroutine_threadsafe or call_soon_threadsafe.
+touched via run_coroutine_threadsafe or call_soon_threadsafe.  The archive
+flush follows the same discipline: draining and re-queuing ``_archive_buffers``
+(``_drain_archive`` / ``_requeue_failed``) always run on the loop thread; only
+the blocking Parquet write (``_write_archive``) is offloaded via
+``asyncio.to_thread``, so no lock is needed on the shared buffers.
 """
 
 from __future__ import annotations
@@ -254,7 +258,7 @@ class LivePump:
             self._ls_client.disconnect()
 
         if self._archive_to_gcs and self._raw_ticks_dir:
-            await asyncio.to_thread(self._flush_archive)
+            await self._flush_archive_once()
 
         log.info("pump.stopped")
 
@@ -392,23 +396,65 @@ class LivePump:
         """Periodically flush archive buffers to GCS."""
         while True:
             await asyncio.sleep(self._collect_config.flush_interval_seconds)
-            await asyncio.to_thread(self._flush_archive)
+            await self._flush_archive_once()
 
-    def _flush_archive(self) -> None:
-        """Drain all non-empty archive buffers to Parquet shards (blocking I/O)."""
+    async def _flush_archive_once(self) -> None:
+        """Drain buffers on the loop thread, write via a worker thread.
+
+        Splitting drain (mutates ``_archive_buffers``, which ``_on_tick`` also
+        appends to) from write (blocking Parquet I/O) keeps every mutation of
+        shared state on the event loop, so no lock is needed: ``_on_tick`` and
+        ``_drain_archive``/``_requeue_failed`` never run concurrently with each
+        other. Only the actual I/O happens off-loop.
+        """
         if not self._raw_ticks_dir:
             return
-        now = datetime.now(UTC)
+        drained = self._drain_archive()
+        if not drained:
+            return
+        failed = await asyncio.to_thread(self._write_archive, drained)
+        if failed:
+            self._requeue_failed(failed)
+
+    def _drain_archive(self) -> dict[str, list[dict[str, Any]]]:
+        """Pop all non-empty archive buffers. Loop-thread only."""
+        drained: dict[str, list[dict[str, Any]]] = {}
         for channel_id, rows in self._archive_buffers.items():
-            if not rows:
-                continue
-            self._archive_buffers[channel_id] = []
+            if rows:
+                drained[channel_id] = rows
+                self._archive_buffers[channel_id] = []
+        return drained
+
+    def _write_archive(
+        self, drained: dict[str, list[dict[str, Any]]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Write drained rows to Parquet shards (blocking I/O; runs in a worker thread).
+
+        Returns the subset of ``drained`` that failed to write, for the caller
+        to re-queue on the loop thread.
+        """
+        assert self._raw_ticks_dir is not None  # caller checks before invoking
+        now = datetime.now(UTC)
+        failed: dict[str, list[dict[str, Any]]] = {}
+        for channel_id, rows in drained.items():
             try:
                 flush_buffer(rows, self._raw_ticks_dir, channel_id, bucket_ts=now)
             except Exception:
                 log.exception("pump.archive_flush_error", channel_id=channel_id)
-                existing = self._archive_buffers.get(channel_id, [])
-                merged = rows + existing
-                if len(merged) > _MAX_ARCHIVE_ROWS:
-                    merged = merged[-_MAX_ARCHIVE_ROWS:]
-                self._archive_buffers[channel_id] = merged
+                failed[channel_id] = rows
+        return failed
+
+    def _requeue_failed(self, failed: dict[str, list[dict[str, Any]]]) -> None:
+        """Re-queue failed-write rows at the front of each buffer. Loop-thread only."""
+        for channel_id, rows in failed.items():
+            existing = self._archive_buffers.get(channel_id, [])
+            merged = rows + existing
+            if len(merged) > _MAX_ARCHIVE_ROWS:
+                dropped = len(merged) - _MAX_ARCHIVE_ROWS
+                merged = merged[-_MAX_ARCHIVE_ROWS:]
+                log.warning(
+                    "pump.archive_buffer_overflow",
+                    channel_id=channel_id,
+                    dropped_rows=dropped,
+                )
+            self._archive_buffers[channel_id] = merged
