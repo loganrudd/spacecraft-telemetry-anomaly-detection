@@ -345,6 +345,93 @@ async def test_los_recovery_reprimes_engine() -> None:
     assert primed_values[0] == seed
 
 
+@pytest.mark.asyncio
+async def test_los_recovery_resets_resamplers_no_backfill_flood() -> None:
+    """Regression: LOS recovery must not backfill one telemetry event per
+    grid bucket spanned by the outage.
+
+    Before the resampler-reset fix, OnlineGridResampler._current_bucket stayed
+    frozen at the last pre-LOS bucket for the whole outage (ticks return early
+    in _on_tick during LOS, before reaching the resampler). The first
+    post-recovery tick then landed far ahead of that stale bucket, and
+    push()'s gap-fill loop emitted one backfilled telemetry event per grid
+    step across the entire outage. A single post-recovery tick should never
+    close a bucket by itself -- it can only ever open one.
+    """
+    spy = _SpyBroadcaster()
+    pump = _make_pump(spy)
+
+    # One pre-LOS tick opens (but does not close) a bucket, so the resampler's
+    # _current_bucket is non-None going into LOS -- the exact precondition
+    # for the flood bug.
+    await pump._on_tick(_CH, _BASE_TS, 20.0)
+
+    pump._in_los = True
+    await pump._on_los_recovery()
+    spy.published.clear()
+
+    # One post-recovery tick, far ahead of the stale pre-LOS bucket (simulates
+    # a long outage). With the resampler reset, this only opens a fresh
+    # bucket -- it cannot close anything yet, so zero telemetry events fire.
+    far_ts = _BASE_TS + timedelta(hours=1)
+    await pump._on_tick(_CH, far_ts, 21.0)
+
+    telemetry_events = [
+        t for t in _published_event_types([p for _, p in spy.published]) if t == "telemetry"
+    ]
+    assert telemetry_events == [], (
+        f"expected no telemetry events from a single post-recovery tick that can "
+        f"only open a fresh bucket, got {len(telemetry_events)} -- resampler was "
+        "not reset on recovery, so the stale bucket closed and backfilled the gap"
+    )
+
+
+@pytest.mark.asyncio
+async def test_los_onset_uses_default_fallback_when_state_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With state set and no injected fallback, _on_los_onset starts the
+    real run_shared_loop() default.
+
+    This documents the A1 decision: LOS triggers a transparent replay
+    fallback (labeled via mode="replay" in the status event), not silence.
+    All other LOS tests in this file inject a fake _fallback_start_fn; this
+    one exercises the actual production wiring (state=app_state in app.py).
+    """
+    import spacecraft_telemetry.api.broadcast as broadcast_mod
+
+    called_with: list[object] = []
+
+    async def _fake_run_shared_loop(state: object) -> None:
+        called_with.append(state)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(broadcast_mod, "run_shared_loop", _fake_run_shared_loop)
+
+    spy = _SpyBroadcaster()
+    sentinel_state = object()
+    pump = LivePump(
+        loop=asyncio.get_event_loop(),
+        broadcaster=spy,
+        engines={_CH: _make_engine()},
+        norm_params={_CH: {"mean": _MEAN, "std": _STD}},
+        collect_config=_make_collect_config(),
+        state=sentinel_state,  # type: ignore[arg-type]
+        archive_to_gcs=False,
+        raw_ticks_dir=None,
+        los_stats_median_s=240.0,
+        # No _fallback_start_fn — exercise the real default wiring.
+    )
+
+    await pump._on_los_onset()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert called_with == [sentinel_state], (
+        "expected the default fallback to call run_shared_loop(state)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fault injection choreography
 # ---------------------------------------------------------------------------
