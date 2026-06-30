@@ -319,29 +319,31 @@ async def test_los_recovery_cancels_replay_task() -> None:
 
 @pytest.mark.asyncio
 async def test_los_recovery_reprimes_engine() -> None:
-    """_on_los_recovery calls engine.prime() from recent_buckets."""
+    """_on_los_recovery calls engine.prime_with_scoring() from recent_buckets."""
     spy = _SpyBroadcaster()
     W = 5
     pump = _make_pump(spy, window_size=W)
     pump._in_los = True
 
-    # Populate recent_buckets with W values so prime() gets a full window.
+    # Populate recent_buckets with W values so prime_with_scoring() gets a
+    # full input window (scoring warmup is partial — only W values — but that's
+    # the best available after a short AOS window; prime_with_scoring handles it).
     seed = [float(i) for i in range(W)]
     pump._recent_buckets[_CH].extend(seed)
 
-    # Spy on prime().
+    # Spy on prime_with_scoring().
     primed_values: list[list[float]] = []
-    original_prime = pump._engines[_CH].prime
+    original_prime_ws = pump._engines[_CH].prime_with_scoring
 
-    def _spy_prime(values: list[float]) -> None:
+    def _spy_prime_ws(values: list[float]) -> None:
         primed_values.append(values)
-        original_prime(values)
+        original_prime_ws(values)
 
-    pump._engines[_CH].prime = _spy_prime  # type: ignore[method-assign]
+    pump._engines[_CH].prime_with_scoring = _spy_prime_ws  # type: ignore[method-assign]
 
     await pump._on_los_recovery()
 
-    assert primed_values, "prime() was not called"
+    assert primed_values, "prime_with_scoring() was not called"
     assert primed_values[0] == seed
 
 

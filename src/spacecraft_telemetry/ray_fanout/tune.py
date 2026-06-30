@@ -90,6 +90,17 @@ log = get_logger(__name__)
 # serving engine produces. Pruning stays a fixed offline-report knob.
 # ---------------------------------------------------------------------------
 
+# ISS AOS (Acquisition of Signal) window constraint for threshold_window.
+# ISS has a 90-min orbital period; TDRS coverage gives ~70 min AOS per orbit
+# (~16 LOS events/day). At the 30s grid, 70 min = 140 buckets. The threshold
+# ring buffer must fill (threshold_window ticks) PLUS leave time for actual
+# detection. Capping at half the AOS window (70 buckets = 35 min) ensures the
+# threshold goes finite in the first half of each pass and detection is
+# possible in the second half. Without this cap, HPO can choose
+# threshold_window up to 500 (250 min warmup), which exceeds the AOS window
+# entirely — the detector never warms up during live operation.
+_ISS_MAX_THRESHOLD_WINDOW = 70  # buckets at 30s grid ≈ 35 min
+
 SEARCH_SPACE: dict[str, Any] = {
     "error_smoothing_window":    tune.randint(5, 101),   # EWMA span: [5, 100]
     "threshold_window":          tune.randint(50, 501),  # rolling window: [50, 500]
@@ -99,6 +110,13 @@ SEARCH_SPACE: dict[str, Any] = {
     # The nominal-FP penalty below is the principled fix; this floor is a backstop.
     "threshold_z":               tune.uniform(2.5, 5.0), # z-score multiplier
     "threshold_min_anomaly_len": tune.randint(1, 11),    # min run length: [1, 10]
+}
+
+# ISS-specific search space: threshold_window capped at _ISS_MAX_THRESHOLD_WINDOW
+# so warmup fits inside a single AOS pass. All other bounds unchanged.
+ISS_SEARCH_SPACE: dict[str, Any] = {
+    **SEARCH_SPACE,
+    "threshold_window": tune.randint(50, _ISS_MAX_THRESHOLD_WINDOW + 1),
 }
 
 
@@ -374,6 +392,8 @@ def run_hpo_sweep(
     channels: list[str],
     settings: Settings,
     mission: str,
+    *,
+    search_space: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a Tune experiment for one subsystem; return result dict.
 
@@ -443,9 +463,10 @@ def run_hpo_sweep(
     # re-runs don't accidentally return the best run from a previous sweep.
     _sweep_start_ms = int(time.time() * 1000)
 
+    _search_space = search_space if search_space is not None else SEARCH_SPACE
     tuner = tune.Tuner(
         trial_fn,
-        param_space=SEARCH_SPACE,
+        param_space=_search_space,
         tune_config=tune.TuneConfig(
             metric="objective",
             mode="max",
@@ -535,7 +556,7 @@ def run_hpo_sweep(
     # optimizer chasing undetectable faults at the expense of nominal-data
     # precision (see module docstring) — worth a loud signal even though the
     # penalty above should now make this rare.
-    _z_floor = SEARCH_SPACE["threshold_z"].lower
+    _z_floor = _search_space["threshold_z"].lower
     if best_config.get("threshold_z", _z_floor) <= _z_floor + 0.1:
         log.warning(
             "tune.sweep.z_pegged_to_floor",
@@ -630,6 +651,17 @@ def run_all_sweeps(
         log.warning("tune.all_sweeps.no_eligible_subsystems", mission=mission)
         write_tuned_configs({}, output)
         return output
+
+    # ISS threshold_window is capped so warmup fits inside a single AOS pass
+    # (70-min window at 30s grid = 140 buckets; cap = half that so detection
+    # starts in the second half of each orbit).  ESA uses the default space.
+    _space = ISS_SEARCH_SPACE if mission.startswith("ISS") else SEARCH_SPACE
+    if mission.startswith("ISS"):
+        log.info(
+            "tune.all_sweeps.iss_search_space",
+            max_threshold_window=_ISS_MAX_THRESHOLD_WINDOW,
+        )
+
     def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
         """Convert run_hpo_sweep result to the on-disk tuned_configs entry."""
         return {
@@ -655,7 +687,10 @@ def run_all_sweeps(
             max_workers = min(settings.tune.max_parallel_subsystems, len(eligible))
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(run_hpo_sweep, sub, sub_channels, settings, mission): sub
+                    executor.submit(
+                        run_hpo_sweep, sub, sub_channels, settings, mission,
+                        search_space=_space,
+                    ): sub
                     for sub, sub_channels in eligible.items()
                 }
                 for future in concurrent.futures.as_completed(futures):
@@ -663,7 +698,9 @@ def run_all_sweeps(
                     sweep_results[subsystem] = _to_entry(future.result())
         else:
             for sub, sub_channels in eligible.items():
-                sweep_results[sub] = _to_entry(run_hpo_sweep(sub, sub_channels, settings, mission))
+                sweep_results[sub] = _to_entry(
+                    run_hpo_sweep(sub, sub_channels, settings, mission, search_space=_space)
+                )
 
     write_tuned_configs(sweep_results, output)
 

@@ -167,3 +167,59 @@ def test_prime_more_than_window_size_uses_last_w_values() -> None:
     assert e_long.prediction == pytest.approx(e_tail.prediction), (
         "prime with long history should behave like prime with just the tail"
     )
+
+
+# ---------------------------------------------------------------------------
+# prime_with_scoring() tests
+# ---------------------------------------------------------------------------
+
+
+def test_prime_with_scoring_warms_threshold() -> None:
+    """prime_with_scoring(W + TW values) produces a finite threshold on next step().
+
+    prime() leaves threshold=None (inf) for the first TW steps; prime_with_scoring()
+    should fill the ring buffer so the threshold is finite immediately.
+    """
+    history = [float(i % 7) for i in range(W + TW)]
+    engine = _make_engine()
+    engine.prime_with_scoring(history)
+    event = engine.step(0.0, _TS, False)
+    assert event.threshold is not None, (
+        "expected finite threshold after prime_with_scoring(W + TW values)"
+    )
+
+
+def test_prime_with_scoring_matches_cold_step_through() -> None:
+    """prime_with_scoring() + step(v) == cold engine.step through all values + v."""
+    history = [float(i % 5) for i in range(W + TW + 2)]
+    new_value = 1.5
+    ts = _TS + len(history) * _DT
+
+    cold = _make_engine()
+    _step_n(cold, history)
+    expected = cold.step(new_value, ts, False)
+
+    warmed = _make_engine()
+    warmed.prime_with_scoring(history)
+    actual = warmed.step(new_value, ts, False)
+
+    assert actual.prediction == pytest.approx(expected.prediction)
+    assert actual.smoothed_error == pytest.approx(expected.smoothed_error)
+    assert actual.threshold == pytest.approx(expected.threshold)
+    assert actual.is_anomaly_predicted == expected.is_anomaly_predicted
+
+
+def test_prime_with_scoring_short_history_partial_warmup() -> None:
+    """prime_with_scoring() with fewer than W + TW values warms partially.
+
+    Threshold should still be None (not enough history) but prediction should
+    be non-None (window is full after W steps).
+    """
+    history = [0.0] * (W + TW - 2)  # two short of a full threshold warmup
+    engine = _make_engine()
+    engine.prime_with_scoring(history)
+    event = engine.step(0.0, _TS, False)
+    assert event.prediction is not None, "expected prediction after W steps"
+    assert event.threshold is None, (
+        "expected no threshold yet — only W + TW - 2 + 1 = TW - 1 scoring steps"
+    )

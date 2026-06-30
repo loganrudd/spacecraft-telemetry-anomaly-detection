@@ -141,6 +141,11 @@ class ChannelInferenceEngine:
         self._smoothed_count = 0
         self._raw_flag_buf.clear()
 
+    @property
+    def params(self) -> ScoringParams:
+        """Scoring hyperparameters (read-only)."""
+        return self._params
+
     def prime(self, values: list[float]) -> None:
         """Pre-fill the window buffer from collected data without emitting events.
 
@@ -149,9 +154,10 @@ class ChannelInferenceEngine:
         ring buffer, anomaly flag buffer) so the first real ``step()`` call
         starts with a full window but no history bias.
 
-        Use at startup and after LOS recovery (replay resets the buffers; this
-        restores the pre-LOS window so the very first live tick after recovery
-        produces a valid prediction rather than re-entering model warmup).
+        Use after LOS recovery (``_recent_buckets`` holds at most
+        ``window_size`` values — not enough to also warm the threshold ring
+        buffer). For startup where more replay data is available, prefer
+        ``prime_with_scoring()`` to avoid the post-startup warmup delay.
 
         Args:
             values: Pre-normalized values in chronological order.  Only the
@@ -161,6 +167,39 @@ class ChannelInferenceEngine:
         seed = values[-self._window_size :]
         for v in seed:
             self._window_buf.append(v)
+
+    @torch.no_grad()
+    def prime_with_scoring(
+        self,
+        values: list[float],
+        dummy_ts: datetime | None = None,
+    ) -> None:
+        """Warm both the input window AND the scoring state from historical values.
+
+        Steps the engine through all of *values*, discarding the resulting
+        ``TelemetryEvent`` objects.  The first ``window_size`` steps fill the
+        input buffer (predictions are not yet possible); the next
+        ``threshold_window`` steps populate the EWMA state and threshold ring
+        buffer so the threshold arrives finite rather than ``inf``.
+
+        Pass at least ``window_size + threshold_window`` values for a fully
+        warm threshold.  Fewer values still advance the state — the threshold
+        will warm up proportionally faster once live ticks begin.
+
+        Use at server startup, where the replay slice provides enough history.
+        For LOS recovery use ``prime()`` — ``_recent_buckets`` holds only
+        ``window_size`` values, which is not enough to also warm the threshold.
+
+        Args:
+            values:    Historical normalised values, chronological order.
+            dummy_ts:  Timestamp attached to each priming step (display-only;
+                       the events are discarded, so any value is fine).
+        """
+        if dummy_ts is None:
+            dummy_ts = datetime(2000, 1, 1)
+        self.reset()
+        for v in values:
+            self.step(v, dummy_ts, False)
 
     @torch.no_grad()
     def step(

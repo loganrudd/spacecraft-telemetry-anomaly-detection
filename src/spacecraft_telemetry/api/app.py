@@ -351,19 +351,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 except (FileNotFoundError, OSError) as exc:
                     log.warning("api.lifespan.norm_params.missing", error=str(exc))
 
-            # In live mode, prime each engine from the tail of its replay slice
-            # so the first live tick produces a valid prediction immediately
-            # rather than waiting window_size ticks for the buffer to fill.
+            # In live mode, prime each engine from the tail of its replay slice.
+            # prime_with_scoring() steps through window_size + threshold_window
+            # rows so both the LSTM input buffer AND the EWMA/threshold ring
+            # buffer arrive warm — without this, the threshold stays inf for
+            # threshold_window × 30s after startup (up to ~2 hours at defaults).
             if settings.api.live:
                 for ch, engine in engines.items():
                     if ch in replay_slices:
                         values, _, _ = replay_slices[ch]
-                        seed = values[-engine.window_size :].tolist()
-                        engine.prime(seed)
+                        scoring_rows = engine.params.threshold_window
+                        total = engine.window_size + scoring_rows
+                        seed = values[-total:].tolist()
+                        engine.prime_with_scoring(seed)
                         log.info(
                             "api.lifespan.engine.primed",
                             channel=ch,
                             seed_len=len(seed),
+                            threshold_window=scoring_rows,
                         )
 
             broadcaster = EventBroadcaster()

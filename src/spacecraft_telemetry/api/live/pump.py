@@ -168,9 +168,21 @@ class LivePump:
         }
 
         # Recent grid-bucket values per channel for LOS-recovery re-prime.
-        # maxlen=engine.window_size so prime() always gets exactly one full window.
+        # maxlen = window_size + threshold_window so prime_with_scoring() can
+        # warm both the LSTM input buffer AND the EWMA/threshold ring buffer on
+        # LOS recovery — without enough history, threshold stays inf for
+        # threshold_window × grid_interval after each handover (up to ~2 h),
+        # and with 16 LOS/day the detector would never warm up during live ops.
+        # On the first few LOS events the deque may hold fewer than the full
+        # warmup depth; prime_with_scoring() handles partial history gracefully
+        # (threshold warms faster once live ticks resume).
         self._recent_buckets: dict[str, deque[float]] = {
-            ch: deque(maxlen=getattr(engines[ch], "window_size", 128))
+            ch: deque(
+                maxlen=(
+                    getattr(engines[ch], "window_size", 128)
+                    + getattr(getattr(engines[ch], "params", None), "threshold_window", 250)
+                )
+            )
             for ch in self._served_channels
         }
 
@@ -355,9 +367,12 @@ class LivePump:
             self._replay_task = None
 
         # Re-prime each engine from the last collected buckets.
+        # prime_with_scoring() warms both the input window and the EWMA/threshold
+        # ring buffer so detection resumes immediately after handover rather than
+        # waiting threshold_window × 30s for the threshold to go finite again.
         for ch, engine in self._engines.items():
             if self._recent_buckets[ch]:
-                engine.prime(list(self._recent_buckets[ch]))
+                engine.prime_with_scoring(list(self._recent_buckets[ch]))
 
         # Reset resamplers: their _current_bucket is frozen at the last
         # pre-LOS bucket (no ticks reached push() during LOS). Without this,
