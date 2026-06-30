@@ -29,7 +29,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import signal
 import threading
 import time
@@ -41,31 +40,18 @@ from spacecraft_telemetry.core.config import CollectorConfig
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.ingest.collector_io import flush_buffer
 from spacecraft_telemetry.ingest.iss_channels import subscription_items
+from spacecraft_telemetry.ingest.lightstreamer import (
+    MAX_BUFFERED_ROWS,
+    ISSClientListener,
+    ensure_ssl_cert_env,
+)
 
 log = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# TLS certificate bundle
-# ---------------------------------------------------------------------------
-
-def ensure_ssl_cert_env() -> None:
-    """Point SSL_CERT_FILE at certifi's bundle if it is not already set.
-
-    uv-managed CPython on macOS does not load the system keychain, so
-    ``ssl.create_default_context()`` (used by the Lightstreamer client's aiohttp
-    transport) fails verification against push.lightstreamer.com and the
-    connection silently retries forever. certifi is always present (httpx,
-    a core dependency, requires it). ``setdefault`` semantics mean an explicit
-    SSL_CERT_FILE — including the Debian system store inside the Docker image —
-    still wins.
-    """
-    if os.environ.get("SSL_CERT_FILE"):
-        return
-    import certifi
-
-    os.environ["SSL_CERT_FILE"] = certifi.where()
-    log.info("collector.ssl_cert_file_set", path=certifi.where())
-
+# Re-exported for backward compatibility: ensure_ssl_cert_env, ISSClientListener,
+# and MAX_BUFFERED_ROWS now live in ingest/lightstreamer.py (shared with the live
+# pump), but this module keeps importing/using them under their original names.
+_ISSClientListener = ISSClientListener
 
 # ---------------------------------------------------------------------------
 # AOS timestamp parsing
@@ -89,42 +75,6 @@ def parse_aos_timestamp(raw: str) -> float | None:
     except (ValueError, TypeError):
         log.debug("collector.aos_timestamp_parse_failed", raw=raw)
         return None
-
-
-# ---------------------------------------------------------------------------
-# Client listener — logs every connection state transition
-# ---------------------------------------------------------------------------
-
-class _ISSClientListener:
-    """Lightstreamer ClientListener that logs connection status changes.
-
-    Lightstreamer's connect() is non-blocking; all connection events arrive
-    here on a library thread. Without this listener the collector is silent
-    while connecting/retrying, making it impossible to distinguish "still
-    connecting" from "stuck".
-
-    Status strings emitted by the library:
-        CONNECTING, CONNECTED:WS-STREAMING, CONNECTED:HTTP-STREAMING,
-        STALLED, DISCONNECTED:WILL-RETRY, DISCONNECTED:TRYING-RECOVERY,
-        DISCONNECTED
-    """
-
-    def onStatusChange(self, status: str) -> None:
-        connected = status.startswith("CONNECTED")
-        level = "info" if connected else "warning"
-        getattr(log, level)("collector.connection_status", status=status)
-
-    def onServerError(self, code: int, message: str) -> None:
-        log.error("collector.server_error", code=code, message=message)
-
-    def onPropertyChange(self, prop: str) -> None:
-        pass
-
-    def onListenEnd(self) -> None:
-        pass
-
-    def onListenStart(self) -> None:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +205,10 @@ class _ISSSubscriptionListener:
 # ---------------------------------------------------------------------------
 
 
-# Maximum rows retained per channel when GCS is unavailable. At ~2 s median
-# cadence and 28 channels this caps memory at roughly 6 hours of ticks per
-# channel (< 50 MB total) before we start dropping-oldest and logging an
-# overflow warning. Prevents OOM on the 2 GB e2-small during a prolonged
-# GCS outage.
-_MAX_BUFFERED_ROWS = 10_800  # ~6 h at 2 s cadence
+# Maximum rows retained per channel when GCS is unavailable (shared with the
+# live pump's archive buffer cap — see ingest/lightstreamer.py). Prevents OOM
+# on the 2 GB e2-small during a prolonged GCS outage.
+_MAX_BUFFERED_ROWS = MAX_BUFFERED_ROWS
 
 
 class LightstreamerCollector:

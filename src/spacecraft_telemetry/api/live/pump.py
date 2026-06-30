@@ -42,12 +42,13 @@ from spacecraft_telemetry.api.live.resampler import OnlineGridResampler
 from spacecraft_telemetry.api.models import RawTelemetryEvent
 from spacecraft_telemetry.core.config import CollectorConfig
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.ingest.collector import (
-    _ISSClientListener,
-    ensure_ssl_cert_env,
-)
 from spacecraft_telemetry.ingest.collector_io import flush_buffer
 from spacecraft_telemetry.ingest.iss_channels import subscription_items
+from spacecraft_telemetry.ingest.lightstreamer import (
+    MAX_BUFFERED_ROWS,
+    ISSClientListener,
+    ensure_ssl_cert_env,
+)
 
 if TYPE_CHECKING:
     from spacecraft_telemetry.api.broadcast import EventBroadcaster
@@ -56,8 +57,9 @@ if TYPE_CHECKING:
 
 log = get_logger("api.live.pump")
 
-# Maximum rows buffered per channel between archive flushes.
-_MAX_ARCHIVE_ROWS = 10_800  # ~6 h at 2 s cadence
+# Maximum rows buffered per channel between archive flushes (shared cap with
+# the collector daemon — see ingest/lightstreamer.py).
+_MAX_ARCHIVE_ROWS = MAX_BUFFERED_ROWS
 
 
 class _PumpSubscriptionListener:
@@ -225,7 +227,7 @@ class LivePump:
             self._collect_config.lightstreamer_url,
             self._collect_config.adapter_set,
         )
-        self._ls_client.addListener(_ISSClientListener())
+        self._ls_client.addListener(ISSClientListener())
 
         listener = _PumpSubscriptionListener(loop=self._loop, on_tick=self._on_tick)
         self._ls_sub = Subscription("MERGE", items, self._collect_config.fields)
