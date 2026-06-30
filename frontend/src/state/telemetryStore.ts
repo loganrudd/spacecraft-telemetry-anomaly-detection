@@ -85,10 +85,17 @@ export class TelemetryStore {
   // event has scrolled off the chart window.
   recentAlerts: StoredAlert[] = [];
   private prevPredicted: Record<string, boolean> = {};
-  // Last event timestamp (epoch-ms) per channel. Timestamps within a replay
-  // pass are strictly ascending, so a backwards jump means the server's shared
-  // loop wrapped back to the start of the slice.
+  // Last *telemetry*-event timestamp (epoch-ms) per channel. Telemetry events
+  // are strictly ascending within a pass (replay ticks, or 30s grid buckets in
+  // live mode), so a backwards jump means the shared replay loop wrapped back to
+  // the slice start and the store should clear. Tracked SEPARATELY from raw
+  // ticks (lastRawTsMs): in live mode the two streams use different time bases —
+  // raw = wall-clock now, telemetry = bucket-start (~30s behind) — so a shared
+  // guard would false-fire a "wrap" on every bucket close and blank the chart.
   private lastTsMs: Record<string, number> = {};
+  // Last *raw*-event timestamp (epoch-ms) per channel. Independent monotonicity
+  // guard for the event: raw stream (live pump only). See lastTsMs note above.
+  private lastRawTsMs: Record<string, number> = {};
 
   push(event: TelemetryEvent): void {
     // Detect the shared replay loop wrapping. The SSE connection stays open
@@ -152,7 +159,12 @@ export class TelemetryStore {
    */
   pushRaw(event: RawTelemetryEvent): void {
     const tsMs = Date.parse(event.timestamp);
-    const prevTsMs = this.lastTsMs[event.channel];
+    // Guard the raw stream against its own wrap only (raw-to-raw). Must NOT
+    // compare against lastTsMs (telemetry): the live telemetry event for a
+    // closed 30s bucket is labeled with the bucket start, ~30s behind these
+    // wall-clock raw ticks, so a shared guard would clear the whole store on
+    // every bucket close — the "Waiting for data…" flapping.
+    const prevTsMs = this.lastRawTsMs[event.channel];
     if (prevTsMs !== undefined && tsMs < prevTsMs) {
       this.clear();
     }
@@ -180,7 +192,7 @@ export class TelemetryStore {
     this.lastTickAtMs[synthetic.channel] = nowMs;
     const count = (this._pushCount[synthetic.channel] ?? 0) + 1;
     this._pushCount[synthetic.channel] = count;
-    this.lastTsMs[synthetic.channel] = tsMs;
+    this.lastRawTsMs[synthetic.channel] = tsMs;
     this.dirty.add(synthetic.channel);
     this._scheduleFlush();
   }
@@ -223,6 +235,7 @@ export class TelemetryStore {
     this.recentAlerts = [];
     this.prevPredicted = {};
     this.lastTsMs = {};
+    this.lastRawTsMs = {};
     this.notify();
   }
 

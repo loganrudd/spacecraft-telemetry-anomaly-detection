@@ -10,15 +10,26 @@ const FAULT_LABELS: Record<FaultType, string> = {
   flatline: "Flatline",
 };
 
+// Per-fault defaults tuned for the Telemanom EWMA physics:
+// - spike: needs enough ticks for EWMA to climb AND K consecutive threshold crossings.
+//   Short spikes (≤10 ticks) are attenuated below the threshold by EWMA before K fires.
+// - drift: EWMA climbs during the ramp half, holds during the hold half — easiest to detect.
+// - flatline: no magnitude; duration just needs to exceed K so the prediction diverges.
+const DEFAULTS: Record<FaultType, { magnitude: number; durationTicks: number }> = {
+  drift:    { magnitude: 5, durationTicks: 60 },
+  spike:    { magnitude: 8, durationTicks: 30 },
+  flatline: { magnitude: 5, durationTicks: 40 },
+};
+
 /**
  * On-demand fault injection control for the ISS live demo.
  * Calls POST /api/inject which queues the fault on the shared replay loop
  * so every connected SSE subscriber sees the same anomaly simultaneously.
  */
 export default function InjectControl() {
-  const [faultType, setFaultType] = useState<FaultType>("spike");
-  const [magnitude, setMagnitude] = useState(3.0);
-  const [durationTicks, setDurationTicks] = useState(10);
+  const [faultType, setFaultType] = useState<FaultType>("drift");
+  const [magnitude, setMagnitude] = useState(DEFAULTS.drift.magnitude);
+  const [durationTicks, setDurationTicks] = useState(DEFAULTS.drift.durationTicks);
   const [status, setStatus] = useState<InjStatus>("idle");
 
   const isFlatline = faultType === "flatline";
@@ -69,7 +80,12 @@ export default function InjectControl() {
           <select
             className="inject-control__select"
             value={faultType}
-            onChange={(e) => setFaultType(e.target.value as FaultType)}
+            onChange={(e) => {
+              const ft = e.target.value as FaultType;
+              setFaultType(ft);
+              setMagnitude(DEFAULTS[ft].magnitude);
+              setDurationTicks(DEFAULTS[ft].durationTicks);
+            }}
           >
             {(["spike", "drift", "flatline"] as FaultType[]).map((ft) => (
               <option key={ft} value={ft}>
