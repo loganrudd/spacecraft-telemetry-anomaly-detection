@@ -242,6 +242,7 @@ export default function App() {
     <div className="app">
       <StatusBar
         connectionState={connState}
+        liveStatus={liveStatus}
         eventsPerSecond={evPerSec}
         mission={health?.mission ?? null}
         subsystem={subsystem}
