@@ -16,7 +16,7 @@ describe("InjectControl", () => {
 
   it("shows magnitude input for spike and hides it for flatline", () => {
     render(<InjectControl />);
-    // Spike is default — magnitude visible
+    // Drift is default — magnitude visible
     expect(screen.getByLabelText(/magnitude/i)).toBeInTheDocument();
 
     // Switch to flatline — magnitude hidden
@@ -41,7 +41,7 @@ describe("InjectControl", () => {
     const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/api/inject");
     const body = JSON.parse(opts.body as string);
-    expect(body.fault_type).toBe("spike");
+    expect(body.fault_type).toBe("drift");
     expect(body.magnitude_sigma).toBeGreaterThan(0);
     expect(body.duration_ticks).toBeGreaterThan(0);
   });
