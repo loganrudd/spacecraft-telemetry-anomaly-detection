@@ -32,7 +32,17 @@ done
 
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MISSION CHANNELS
+
+# Build the channel-selection argument for the RayJob entrypoint.
+# envsubst does not support ${VAR:+...} conditional expansion — resolve it here
+# on the host so the YAML receives a plain ${CHANNELS_ARG} substitution.
+if [[ -n "${CHANNELS:-}" ]]; then
+  CHANNELS_ARG="--channels ${CHANNELS}"
+else
+  CHANNELS_ARG=""
+fi
+
+export PROJECT_ID REGION MISSION CHANNELS_ARG
 
 echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${CHANNELS:+, channels=${CHANNELS}})"
 

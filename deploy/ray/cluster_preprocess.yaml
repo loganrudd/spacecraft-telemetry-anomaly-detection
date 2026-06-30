@@ -28,7 +28,7 @@ spec:
   entrypoint: >-
     spacecraft-telemetry --env cloud preprocess run
     --mission ${MISSION}
-    ${CHANNELS:+--channels ${CHANNELS}}
+    ${CHANNELS_ARG}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
