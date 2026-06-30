@@ -286,13 +286,19 @@ def resample_to_grid(
 def compute_los_mask(
     all_ticks_df: pd.DataFrame,
     grid_interval_seconds: int = 30,
+    expand: bool = True,
 ) -> pd.Series:
     """Derive a boolean Loss-of-Signal mask from a cross-channel tick archive.
 
     A 30-second grid bucket is marked as LOS when NO telemetry channel has any
-    tick in that bucket.  The mask is then expanded by one bucket on each side
-    to account for TDRS handover smear (a real LOS onset/recovery may straddle
-    a bucket boundary).
+    tick in that bucket.  When ``expand`` is True (default), the mask is then
+    expanded by one bucket on each side to account for TDRS handover smear (a
+    real LOS onset/recovery may straddle a bucket boundary).  The Phase 13
+    ``is_los`` column always wants the expanded mask (it feeds gap exclusion
+    in injection/HPO).  Callers measuring LOS *duration* (e.g.
+    ``api/live/los_stats.py``) should pass ``expand=False`` — expansion adds a
+    fixed +2*grid_interval_seconds to every measured run, biasing duration
+    statistics high.
 
     The caller is responsible for excluding context items (TIME_000001,
     USLAB000086) from ``all_ticks_df`` — they are not telemetry and their
@@ -307,6 +313,8 @@ def compute_los_mask(
                                [telemetry_timestamp, channel_id] covering
                                ALL subscribed telemetry channels.
         grid_interval_seconds: Grid step in seconds (must match resample_to_grid).
+        expand:                Expand the mask by one bucket on each side for
+                               TDRS handover smear. Default True.
 
     Returns:
         pd.Series of dtype bool, indexed by a DatetimeIndex of all 30-second
@@ -335,22 +343,26 @@ def compute_los_mask(
         name="is_los",
     )
 
-    # Expand by one bucket on each side (TDRS handover smear).
-    los_expanded = (
-        los_raw
-        | los_raw.shift(1, fill_value=False)
-        | los_raw.shift(-1, fill_value=False)
-    )
-    los_expanded.name = "is_los"
+    if expand:
+        # Expand by one bucket on each side (TDRS handover smear).
+        los_result = (
+            los_raw
+            | los_raw.shift(1, fill_value=False)
+            | los_raw.shift(-1, fill_value=False)
+        )
+        los_result.name = "is_los"
+    else:
+        los_result = los_raw
 
-    n_los = int(los_expanded.sum())
+    n_los = int(los_result.sum())
     log.info(
         "compute_los_mask",
         grid_interval_s=grid_interval_seconds,
+        expand=expand,
         total_buckets=len(grid_index),
         los_buckets=n_los,
     )
-    return los_expanded
+    return los_result
 
 
 def augment_with_los(

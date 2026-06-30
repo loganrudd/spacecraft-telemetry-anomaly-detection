@@ -107,7 +107,13 @@ def compute_los_stats(
         all_ticks["telemetry_timestamp"] = ts_col.dt.tz_localize("UTC")
 
     # compute_los_mask expects column "telemetry_timestamp" — satisfied above.
-    los_mask = compute_los_mask(all_ticks, grid_interval_seconds=grid_interval_seconds)
+    # expand=False: duration stats must measure the raw gap, not the +-1-bucket
+    # TDRS-smear-expanded mask Phase 13 uses for is_los — expansion would add a
+    # fixed 2*grid_interval_seconds to every measured run, biasing the
+    # user-facing expected_resume_in_s estimate high.
+    los_mask = compute_los_mask(
+        all_ticks, grid_interval_seconds=grid_interval_seconds, expand=False
+    )
 
     if los_mask.empty or not los_mask.any():
         log.info("los_stats.no_los_found")
