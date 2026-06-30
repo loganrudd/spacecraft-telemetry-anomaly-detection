@@ -353,6 +353,18 @@ class LivePump:
             if self._recent_buckets[ch]:
                 engine.prime(list(self._recent_buckets[ch]))
 
+        # Reset resamplers: their _current_bucket is frozen at the last
+        # pre-LOS bucket (no ticks reached push() during LOS). Without this,
+        # the first post-recovery tick lands far ahead of _current_bucket and
+        # push()'s ffill loop backfills one bucket per grid step across the
+        # entire outage — a flood of stale telemetry events that immediately
+        # overwrites the window just re-primed above.
+        self._resamplers = {
+            ch: OnlineGridResampler(self._collect_config.grid_interval_seconds)
+            for ch in self._served_channels
+        }
+        self._bucket_injected.clear()
+
         self._in_los = False
         log.info("pump.los_recovered")
         self._broadcaster.publish_status("resumed")
