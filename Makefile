@@ -404,12 +404,12 @@ cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-
 	# ISS 6-channel validation set:
 	# make cloud-inject MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [INJECTED=1 CHANNELS=ch1,ch2 for ISS HPO])
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 CHANNELS=…] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
