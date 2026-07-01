@@ -86,6 +86,10 @@ class EventBroadcaster:
         self._lock = asyncio.Lock()
         # Rolling per-channel backlog for new-subscriber catch-up.
         self._backlogs: dict[str, deque[bytes]] = {}
+        # Most recent "los" status payload; None when live.  Prepended to the
+        # backlog for new subscribers so a browser that opens mid-LOS immediately
+        # shows the LOS banner instead of inheriting "live" from replay events.
+        self._current_status_payload: bytes | None = None
         # Fault injection state — both set/read only from the asyncio event loop,
         # so no additional locking is required (asyncio is single-threaded).
         self._pending_injection: _ActiveInjection | None = None
@@ -116,6 +120,11 @@ class EventBroadcaster:
         is a flat list of pre-serialised SSE payloads covering the last
         ``_BACKLOG_SIZE`` ticks for each requested channel.
 
+        If the broadcaster is currently in LOS mode (``_current_status_payload``
+        is set), the "los" status event is prepended to the backlog so the
+        dashboard immediately shows the LOS banner rather than inheriting a
+        "live" interpretation from the replay telemetry events that follow it.
+
         Atomicity guarantee: subscriber registration and backlog snapshot both
         happen inside the same ``async with self._lock`` block with no
         ``await`` in between.  Because asyncio is single-threaded and
@@ -129,6 +138,10 @@ class EventBroadcaster:
         async with self._lock:
             self._subscribers[client_id] = (channels, q)
             backlog: list[bytes] = []
+            # Prepend current status so a browser opening mid-LOS gets the
+            # "los" event before the replay telemetry events in the backlog.
+            if self._current_status_payload is not None:
+                backlog.append(self._current_status_payload)
             for ch, b_deque in self._backlogs.items():
                 if not channels or ch in channels:
                     backlog.extend(b_deque)
@@ -182,6 +195,12 @@ class EventBroadcaster:
         Used for mission-wide status transitions (LOS onset/recovery) that every
         connected dashboard tab must receive regardless of which channels it watches.
 
+        Status events are force-pushed: if the subscriber queue is full (e.g.
+        the 100× replay is flooding it), one old telemetry event is discarded to
+        make room.  This prevents "resumed" from being silently dropped when the
+        queue is saturated by replay traffic, which would leave the dashboard
+        stuck in "LOS" state after the signal recovers.
+
         Args:
             event_type:           ``"los"`` or ``"resumed"``.
             mode:                 ``"replay"`` when the LOS fallback is active.
@@ -194,9 +213,22 @@ class EventBroadcaster:
         if expected_resume_in_s is not None:
             data["expected_resume_in_s"] = expected_resume_in_s
         payload = f"event: status\ndata: {json.dumps(data)}\n\n".encode()
+
+        # Track current status for new subscribers (see subscribe_with_backlog).
+        if event_type == "los":
+            self._current_status_payload = payload
+        elif event_type == "resumed":
+            self._current_status_payload = None
+
         for _cid, (_channels, q) in list(self._subscribers.items()):
-            with suppress(asyncio.QueueFull):
+            try:
                 q.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Force-push: drop one old replay event to guarantee delivery.
+                with suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+                with suppress(asyncio.QueueFull):
+                    q.put_nowait(payload)
 
     # ------------------------------------------------------------------
     # Fault injection — called by the shared replay loop and the endpoint

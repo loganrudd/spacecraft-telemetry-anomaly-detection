@@ -114,6 +114,72 @@ class TestEventBroadcasterInjection:
 
 
 # ---------------------------------------------------------------------------
+# EventBroadcaster status-event tests
+# ---------------------------------------------------------------------------
+
+
+class TestEventBroadcasterStatus:
+    @pytest.mark.asyncio
+    async def test_subscribe_with_backlog_includes_los_status(self) -> None:
+        """New subscriber gets the current 'los' status prepended to backlog."""
+        b = EventBroadcaster()
+        b.publish_status("los", mode="replay", expected_resume_in_s=240.0)
+
+        _cid, _q, backlog = await b.subscribe_with_backlog(frozenset())
+
+        status_payloads = [p for p in backlog if b"event: status" in p]
+        assert len(status_payloads) == 1
+        import json as _json
+        data = _json.loads(status_payloads[0].decode().split("data:", 1)[1].strip())
+        assert data["type"] == "los"
+        assert data["mode"] == "replay"
+        # Status event is first so the dashboard shows LOS before replay events.
+        assert backlog[0] == status_payloads[0]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_with_backlog_no_status_when_live(self) -> None:
+        """New subscriber gets no status event when the broadcaster is live."""
+        b = EventBroadcaster()
+        _cid, _q, backlog = await b.subscribe_with_backlog(frozenset())
+        assert not any(b"event: status" in p for p in backlog)
+
+    @pytest.mark.asyncio
+    async def test_resumed_clears_status_from_backlog(self) -> None:
+        """After 'resumed', new subscribers no longer get a status in their backlog."""
+        b = EventBroadcaster()
+        b.publish_status("los", mode="replay")
+        b.publish_status("resumed")
+        _cid, _q, backlog = await b.subscribe_with_backlog(frozenset())
+        assert not any(b"event: status" in p for p in backlog)
+
+    @pytest.mark.asyncio
+    async def test_publish_status_force_pushes_when_queue_full(self) -> None:
+        """Status events are delivered even when the subscriber queue is full."""
+        b = EventBroadcaster()
+        _cid, q, _backlog = await b.subscribe_with_backlog(frozenset())
+
+        # Fill the queue to capacity with dummy telemetry events.
+        filler = b"event: telemetry\ndata: {}\n\n"
+        from asyncio import QueueFull
+        filled = 0
+        while True:
+            try:
+                q.put_nowait(filler)
+                filled += 1
+            except QueueFull:
+                break
+
+        # Queue is full; status event must still be delivered.
+        b.publish_status("los", mode="replay")
+
+        payloads = [q.get_nowait() for _ in range(q.qsize())]
+        status_payloads = [p for p in payloads if b"event: status" in p]
+        assert len(status_payloads) == 1, (
+            "status event must be force-pushed even when queue is full"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Endpoint tests
 # ---------------------------------------------------------------------------
 
