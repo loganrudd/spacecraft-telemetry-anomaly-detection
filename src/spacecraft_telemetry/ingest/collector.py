@@ -144,6 +144,14 @@ class _ISSSubscriptionListener:
             self._in_los = False
             log.info("collector.los_recovered", recovered_at=now.isoformat())
 
+    def elapsed_since_last_arrival(self, now: datetime) -> float | None:
+        """Seconds since any subscribed item last updated. None if never seen."""
+        with self._lock:
+            last = self._last_any_arrival
+        if last is None:
+            return None
+        return (now - last).total_seconds()
+
     def check_staleness(self, now: datetime) -> None:
         """Check whether ANY subscribed item has stopped arriving.
 
@@ -154,7 +162,6 @@ class _ISSSubscriptionListener:
         """
         with self._lock:
             last = self._last_any_arrival
-
         if last is None:
             return
 
@@ -334,8 +341,25 @@ class LightstreamerCollector:
             self._stop_event.wait(timeout=sleep_time)
 
             self._flush_all(final=False)
+            self._log_heartbeat()
 
         staleness_thread.join(timeout=2.0)
+
+    def _log_heartbeat(self) -> None:
+        """Emit a periodic liveness signal for the GCS-freshness Cloud Monitoring alert.
+
+        Carries ``seconds_since_last_tick`` rather than being a bare marker so the
+        alert can catch a WEDGED Lightstreamer client (process alive, flush loop
+        still ticking, but no data arriving) — a plain "did this log line appear"
+        absence check would miss that case entirely, since the flush loop keeps
+        running independently of whether the Lightstreamer callback thread is
+        still delivering ticks. 0.0 before the first tick is ever received.
+        """
+        elapsed = self._listener.elapsed_since_last_arrival(datetime.now(UTC))
+        log.info(
+            "collector.heartbeat",
+            seconds_since_last_tick=round(elapsed, 1) if elapsed is not None else 0.0,
+        )
 
     def _staleness_loop(self, deadline: float | None) -> None:
         """Check LOS staleness on a short cadence independent of flush interval."""
@@ -344,7 +368,37 @@ class LightstreamerCollector:
             if deadline is not None and time.monotonic() >= deadline:
                 break
             self._stop_event.wait(timeout=cadence)
-            self._listener.check_staleness(datetime.now(UTC))
+            now = datetime.now(UTC)
+            self._listener.check_staleness(now)
+            self._check_fatal_staleness(now)
+
+    def _check_fatal_staleness(self, now: datetime) -> None:
+        """Self-heal a WEDGED Lightstreamer session by restarting the process.
+
+        A silent client wedge (connection alive, but no item updates ever
+        delivered) never triggers Docker's ``--restart unless-stopped`` policy,
+        because the process itself never exits. This caused an undetected
+        2026-06-25 -> 2026-06-30 (~5.5 day) collection outage: the VM stayed
+        RUNNING and the container stayed up the whole time, but archived
+        nothing.
+
+        ``self.stop()`` reuses the existing graceful-shutdown path (final
+        flush, Lightstreamer disconnect) so no buffered ticks are lost; once
+        ``run()`` returns, the process exits and Docker recycles the
+        container, opening a fresh Lightstreamer session.
+
+        ``fatal_staleness_seconds`` sits well above the largest observed real
+        LOS gap (see ``CollectorConfig`` docstring) so genuine TDRS handovers
+        never trigger this.
+        """
+        elapsed = self._listener.elapsed_since_last_arrival(now)
+        if elapsed is not None and elapsed > self._config.fatal_staleness_seconds:
+            log.error(
+                "collector.fatal_stale_restarting",
+                elapsed_seconds=round(elapsed, 1),
+                fatal_staleness_seconds=self._config.fatal_staleness_seconds,
+            )
+            self.stop()
 
     def _flush_all(self, *, final: bool) -> None:
         """Drain all non-empty buffers to Parquet shards.

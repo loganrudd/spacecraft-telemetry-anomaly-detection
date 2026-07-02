@@ -188,6 +188,80 @@ def test_any_channel_resets_los_clock() -> None:
     assert listener._last_any_arrival is not None
 
 
+def test_elapsed_since_last_arrival_none_before_first_tick() -> None:
+    listener = _make_listener(["S1000003", "TIME_000001"])
+    assert listener.elapsed_since_last_arrival(datetime.now(UTC)) is None
+
+
+def test_elapsed_since_last_arrival_reports_seconds() -> None:
+    listener = _make_listener(["S1000003", "TIME_000001"])
+    old_arrival = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
+    with listener._lock:
+        listener._last_any_arrival = old_arrival
+    now = datetime(2024, 6, 1, 11, 30, 0, tzinfo=UTC)
+    assert listener.elapsed_since_last_arrival(now) == pytest.approx(1800.0)
+
+
+# ---------------------------------------------------------------------------
+# Fatal-staleness self-restart (recovers a WEDGED Lightstreamer session that
+# never exits on its own, unlike a crash -- see CollectorConfig docstring)
+# ---------------------------------------------------------------------------
+
+
+def test_fatal_staleness_triggers_stop(tmp_path: Path) -> None:
+    config = CollectorConfig(
+        channel_set="validation",
+        raw_ticks_dir=str(tmp_path),
+        los_staleness_seconds=60.0,
+        fatal_staleness_seconds=120.0,
+    )
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+    old_arrival = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
+    with collector._listener._lock:
+        collector._listener._last_any_arrival = old_arrival
+
+    now = old_arrival + timedelta(seconds=121)  # just past fatal_staleness_seconds
+    assert not collector._stop_event.is_set()
+    collector._check_fatal_staleness(now)
+    assert collector._stop_event.is_set()
+
+
+def test_fatal_staleness_does_not_fire_within_threshold(tmp_path: Path) -> None:
+    config = CollectorConfig(
+        channel_set="validation",
+        raw_ticks_dir=str(tmp_path),
+        los_staleness_seconds=60.0,
+        fatal_staleness_seconds=120.0,
+    )
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+    old_arrival = datetime(2024, 6, 1, 11, 0, 0, tzinfo=UTC)
+    with collector._listener._lock:
+        collector._listener._last_any_arrival = old_arrival
+
+    # Past los_staleness_seconds (routine LOS) but within fatal_staleness_seconds.
+    now = old_arrival + timedelta(seconds=90)
+    collector._check_fatal_staleness(now)
+    assert not collector._stop_event.is_set()
+
+
+def test_fatal_staleness_no_op_before_first_tick(tmp_path: Path) -> None:
+    config = CollectorConfig(channel_set="validation", raw_ticks_dir=str(tmp_path))
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+    collector._check_fatal_staleness(datetime.now(UTC))
+    assert not collector._stop_event.is_set()
+
+
+def test_fatal_staleness_config_validates_above_los() -> None:
+    with pytest.raises(ValueError, match="must be greater than"):
+        CollectorConfig(los_staleness_seconds=60.0, fatal_staleness_seconds=60.0)
+
+
+def test_log_heartbeat_does_not_raise_before_first_tick(tmp_path: Path) -> None:
+    config = CollectorConfig(channel_set="validation", raw_ticks_dir=str(tmp_path))
+    collector = LightstreamerCollector(config, dest_dir=tmp_path)
+    collector._log_heartbeat()  # must not raise when nothing has arrived yet
+
+
 # ---------------------------------------------------------------------------
 # LightstreamerCollector flush integration
 # ---------------------------------------------------------------------------

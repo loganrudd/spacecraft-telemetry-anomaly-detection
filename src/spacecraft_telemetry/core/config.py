@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -504,15 +504,37 @@ class CollectorConfig(BaseModel):
     # If no item update arrives on ANY subscribed channel within this window,
     # log a structured los_onset event (LOS detection, operational only).
     los_staleness_seconds: float = 60.0
+    # If staleness persists beyond this window, the collector restarts itself
+    # (LightstreamerCollector._check_fatal_staleness -> self.stop()) rather than
+    # sitting silently wedged. Default 5400s (90 min) sits ~1.6x above the
+    # largest observed real LOS gap (~3289s / ~55 min — see the cadence table in
+    # .claude/rules/iss.md), so genuine TDRS handovers never trigger a restart.
+    # A prior undetected outage (2026-06-25 -> 2026-06-30, ~5.5 days) motivated
+    # this: the Lightstreamer client can wedge without exiting the process, so
+    # Docker's `--restart unless-stopped` alone never re-triggers a fresh
+    # session — only an explicit exit does.
+    fatal_staleness_seconds: float = 5400.0
     # 30 s grid confirmed by 1-hour dry-run: all validation channels update at
     # 1-10 s median cadence, well below the 30 s step.
     grid_interval_seconds: int = 30
 
-    @field_validator("flush_interval_seconds", "los_staleness_seconds")
+    @field_validator("flush_interval_seconds", "los_staleness_seconds", "fatal_staleness_seconds")
     @classmethod
     def positive_float(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("fatal_staleness_seconds")
+    @classmethod
+    def fatal_above_los(cls, v: float, info: ValidationInfo) -> float:
+        los = info.data.get("los_staleness_seconds")
+        if los is not None and v <= los:
+            raise ValueError(
+                f"fatal_staleness_seconds ({v}) must be greater than "
+                f"los_staleness_seconds ({los}) — a restart threshold at or "
+                "below the LOS-logging threshold would fire on every routine LOS."
+            )
         return v
 
     @field_validator("grid_interval_seconds")
