@@ -302,9 +302,13 @@ def preprocess_run(
         # Only preprocess channels belonging to subsystem_6
         spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
 
-        # Preprocess a specific set of channels (ISS 6-channel validation set)
+        # ISS with no --channels defaults to the curated model set (thermal + PV
+        # voltage — see ingest.iss_channels.VALIDATION_CHANNELS)
+        spacecraft-telemetry preprocess run --mission ISS
+
+        # Override to (re)train a different / fuller ISS channel set
         spacecraft-telemetry preprocess run --mission ISS \
-            --channels S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+            --channels S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
 
         # Only preprocess a single channel, no Ray
         spacecraft-telemetry preprocess run --mission ESA-Mission1 \
@@ -337,6 +341,16 @@ def preprocess_run(
         channel_dir = data_dir / mission / "channels"
         all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
         channel_list = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+
+    # ISS: with no explicit filter, default to the curated stationary model set
+    # (thermal + PV voltage) rather than every archived PUI. The non-stationary
+    # BGA angles and attitude quaternions are still collected and displayed, just
+    # not modeled by default (see ingest.iss_channels.VALIDATION_CHANNELS and
+    # iss.md "Demo tiering"). Pass --channels to override, e.g. the full 18-map.
+    if mission == "ISS" and channel_list is None:
+        from spacecraft_telemetry.ingest.iss_channels import VALIDATION_CHANNELS
+
+        channel_list = list(VALIDATION_CHANNELS)
 
     log.info(
         "preprocess.run.start",

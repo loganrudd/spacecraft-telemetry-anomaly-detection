@@ -552,14 +552,17 @@ def run_iss_preprocessing(
     output_dir = to_upath(cfg.processed_data_dir)
     raw_ticks_dir = settings.collect.raw_ticks_dir
 
-    if channels is None:
-        channel_list = discover_iss_channels(raw_ticks_dir)
-        if not channel_list:
-            raise FileNotFoundError(
-                f"No ISS tick shards found under {raw_ticks_dir}/ISS/ticks/"
-            )
-    else:
-        channel_list = channels
+    # Discover everything present in the archive (curated 18; context items and
+    # stale/dead PUIs already filtered by discover_iss_channels).
+    available = discover_iss_channels(raw_ticks_dir)
+    if not available:
+        raise FileNotFoundError(
+            f"No ISS tick shards found under {raw_ticks_dir}/ISS/ticks/"
+        )
+    # channels=None means "model every archived channel". Callers wanting the
+    # curated default set (VALIDATION_CHANNELS) pass it as an explicit list — see
+    # the ISS branch of the `preprocess run` CLI command.
+    channel_list = channels if channels is not None else available
 
     # Clear output dirs so re-runs are idempotent (no duplicate part files).
     train_out = output_dir / "ISS" / "train"
@@ -568,9 +571,12 @@ def run_iss_preprocessing(
         if out_dir.exists():
             out_dir.fs.rm(str(out_dir), recursive=True)
 
-    # Pre-fan-out: compute cross-channel LOS mask.
-    # Requires loading timestamps from all channels before splitting into tasks.
-    all_ticks = read_all_iss_ticks_for_los(raw_ticks_dir, channel_list)
+    # Pre-fan-out: compute the cross-channel LOS mask over ALL archived channels,
+    # not just the modeled subset. LOS is a mission-wide property (a 30s bucket is
+    # LOS only when NO channel has any tick); computing it over a subset would mark
+    # buckets where the modeled channels are merely sparse — while other channels
+    # were live — as false LOS. See iss.md "LOS Handling".
+    all_ticks = read_all_iss_ticks_for_los(raw_ticks_dir, available)
     los_mask = compute_los_mask(all_ticks, settings.collect.grid_interval_seconds)
     del all_ticks
 

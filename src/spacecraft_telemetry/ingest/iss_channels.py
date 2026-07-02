@@ -68,16 +68,26 @@ ISS_CHANNELS: dict[str, ChannelMeta] = {
 CONTEXT_ITEMS: list[str] = ["TIME_000001", "USLAB000086"]
 
 # ---------------------------------------------------------------------------
-# Validation set — first 6 channels to prove end-to-end (iss.md §Phase 12)
+# Default model/demo set — the stationary, in-distribution channels
 # ---------------------------------------------------------------------------
+# Originally the Phase-12 validation set. Narrowed 2026-07 to the channels that
+# stay in-distribution on the live feed: a July review found the solar_array BGA
+# angles had a regime change (now wrap 0-360°, breaking global z-score) and the
+# attitude quaternions have near-degenerate std (micro-drift gets amplified).
+# Those are demoted as MODEL channels — still collected + displayed (channel_set
+# "all"), just no trained champion. The 2 thermal loops + 4 PV voltages are
+# stationary and carry the eclipse charge/discharge physics story.
+# NOTE: this list only drives the collector's "validation" subscription. The
+# train/score/tune loop discovers channels from the raw archive / preprocessed
+# dirs, and serving defaults to the promoted @champion set — not this list.
 
 VALIDATION_CHANNELS: list[str] = [
-    "S1000003",    # thermal — cleanest signal
-    "P1000003",    # thermal — second loop
-    "P4000007",    # solar_array — smooth ramp, strongly orbital
-    "S4000007",    # solar_array — opposite-truss beta angle
-    "P4000001",    # power — voltage, surfaces eclipse-flatline handling early
-    "USLAB000018", # attitude — quaternion component, bounded
+    "S1000003",  # thermal — Loop A (Stbd) out temp, cleanest signal
+    "P1000003",  # thermal — Loop B (Port) out temp
+    "P4000001",  # power — SA 2A voltage (eclipse charge/discharge)
+    "S4000001",  # power — SA 1A voltage
+    "P6000001",  # power — SA 4B voltage
+    "S6000001",  # power — SA 3B voltage
 ]
 
 # ---------------------------------------------------------------------------
