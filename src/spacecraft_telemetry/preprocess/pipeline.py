@@ -571,12 +571,13 @@ def run_iss_preprocessing(
         if out_dir.exists():
             out_dir.fs.rm(str(out_dir), recursive=True)
 
-    # Pre-fan-out: compute the cross-channel LOS mask over ALL archived channels,
-    # not just the modeled subset. LOS is a mission-wide property (a 30s bucket is
-    # LOS only when NO channel has any tick); computing it over a subset would mark
-    # buckets where the modeled channels are merely sparse — while other channels
-    # were live — as false LOS. See iss.md "LOS Handling".
-    all_ticks = read_all_iss_ticks_for_los(raw_ticks_dir, available)
+    # Pre-fan-out: compute the cross-channel LOS mask over the MODELED channels.
+    # The default set includes the dense thermal loops (~2s cadence) that keep
+    # ticking through any non-LOS period, so they reliably anchor cross-channel
+    # silence detection — and scoping the scan to the modeled set avoids reading
+    # (and logging) the channels we're deliberately not training. See iss.md
+    # "LOS Handling".
+    all_ticks = read_all_iss_ticks_for_los(raw_ticks_dir, channel_list)
     los_mask = compute_los_mask(all_ticks, settings.collect.grid_interval_seconds)
     del all_ticks
 
