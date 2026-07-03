@@ -489,8 +489,8 @@ make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1   # tuned, fin
 
 # Promote only the curated set to @champion — the serving layer loads/streams
 # whatever carries the alias, so this is what decides what the live dashboard shows.
-# (ISS with no --channels/--subsystem defaults to this same curated set.)
-spacecraft-telemetry --env cloud mlflow promote --mission ISS
+# (ISS with no CHANNEL/SUBSYSTEM defaults to this same curated set.)
+make mlflow-promote MISSION=ISS ENV=cloud
 
 make cloud-down
 ```
