@@ -16,10 +16,6 @@ import type { HealthResponse, StatusEvent } from "./api/types";
 import type { StreamHandle } from "./api/telemetryStream";
 import type { DriftStreamHandle } from "./api/driftStream";
 
-// Set to true to skip drift monitoring (e.g. short demo windows where the
-// rolling window never fills). Flip back to false to re-enable.
-const DRIFT_DISABLED = true;
-
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 type LiveStreamStatus = "live" | "los" | "connecting" | "closed";
 type DensityTier = "comfortable" | "compact" | "dense";
@@ -302,7 +298,7 @@ export default function App() {
 
             <div className="app__right">
               <AnomalyAlerts channels={selected} mission={health?.mission} />
-              <DriftPanel channels={selected} disabled={DRIFT_DISABLED || driftDisabled} />
+              <DriftPanel channels={selected} disabled={driftDisabled} />
               <InjectControl />
             </div>
           </>
