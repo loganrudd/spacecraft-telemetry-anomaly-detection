@@ -1245,6 +1245,17 @@ def mlflow_promote(
         channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
+    elif mission == "ISS" and name is None and subsystem is None:
+        # ISS with no explicit filter → the curated stationary model set, matching
+        # preprocess/train/score (see cli preprocess + ingest.iss_channels).
+        # Without this, discovery would promote every archived PUI including the
+        # non-stationary BGA angles and attitude quaternions that are collected
+        # and displayed but intentionally NOT modeled (iss.md "Demo tiering").
+        # Pass --channels to override (e.g. the full 18-map after re-representing
+        # the angle channels).
+        from spacecraft_telemetry.ingest.iss_channels import VALIDATION_CHANNELS
+
+        channel_list = list(VALIDATION_CHANNELS)
     elif mission is not None and name is None:
         # Discover all registered models for this mission directly from the registry.
         # Imported lazily so the slim collector image (no mlflow) can run `collect`.
@@ -1311,6 +1322,132 @@ def mlflow_promote(
     click.echo(f"Model         : {name}")
     click.echo(f"Version       : {resolved_version}")
     click.echo(f"Alias         : @{CHAMPION_ALIAS}")
+    click.echo(f"Tracking URI  : {tracking_uri}")
+
+
+@mlflow_group.command("demote")
+@click.option(
+    "--name",
+    default=None,
+    help="Registered model name (e.g. telemanom-ISS-P4000007). "
+         "Mutually exclusive with --mission/--channels/--channels-from.",
+)
+@click.option(
+    "--mission",
+    default=None,
+    help="Mission name. Alone → removes @champion from EVERY registered model "
+         "for the mission (a full reset). Required with --channels/--channels-from/"
+         "--subsystem.",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to demote. Requires --mission.",
+)
+@click.option(
+    "--channels-from",
+    default=None,
+    help="Path to channels.txt (local or gs://). Requires --mission.",
+)
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Filter to channels belonging to this subsystem. Requires --mission.",
+)
+@click.pass_context
+def mlflow_demote(
+    ctx: click.Context,
+    name: str | None,
+    mission: str | None,
+    channels: str | None,
+    channels_from: str | None,
+    subsystem: str | None,
+) -> None:
+    """Remove the @champion alias, taking a model out of service (inverse of promote).
+
+    The serving layer discovers servable channels by scanning for @champion, so
+    demoting a channel stops it being loaded and served — without deleting the
+    model version. Demoting a channel that isn't a champion is a harmless no-op.
+
+    Reset a mission's champions, then re-promote only the good set:
+
+        spacecraft-telemetry --env cloud mlflow demote --mission ISS
+        spacecraft-telemetry --env cloud mlflow promote --mission ISS   # curated set
+
+    Demote specific channels or a subsystem:
+
+        spacecraft-telemetry --env cloud mlflow demote --mission ISS --subsystem attitude
+        spacecraft-telemetry --env cloud mlflow demote --name telemanom-ISS-P4000007
+    """
+    from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, demote
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    settings: Settings = ctx.obj["settings"]
+    configure_mlflow(settings)  # installs GCP ID-token auth before any registry call
+    tracking_uri = settings.mlflow.tracking_uri
+
+    if channels is not None and channels_from is not None:
+        raise click.ClickException("--channels and --channels-from are mutually exclusive.")
+
+    channel_list: list[str] | None = None
+    if channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+    elif channels_from is not None:
+        channel_list = _read_channels_from_file(channels_from)
+    elif mission is not None and name is None:
+        # No explicit filter → discover EVERY registered model for the mission and
+        # clear its alias (the full-reset inverse of `promote --mission`). Unlike
+        # promote, no curated default: "demote the good set" is never the intent.
+        from mlflow.tracking.client import MlflowClient
+
+        prefix = f"telemanom-{mission}-"
+        client = MlflowClient()
+        all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
+        channel_list = sorted({v.name[len(prefix):] for v in all_versions})
+        if not channel_list:
+            raise click.ClickException(
+                f"No registered models found matching '{prefix}*'."
+            )
+
+    if channel_list is not None:
+        if mission is None:
+            raise click.ClickException(
+                "--mission is required when using --channels/--channels-from."
+            )
+        if name is not None:
+            raise click.ClickException(
+                "--name is mutually exclusive with --channels/--channels-from."
+            )
+        if subsystem is not None:
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
+
+        removed, absent = 0, 0
+        for channel in channel_list:
+            if demote(name=f"telemanom-{mission}-{channel}"):
+                removed += 1
+            else:
+                absent += 1
+
+        click.echo(f"Mission       : {mission}")
+        if subsystem:
+            click.echo(f"Subsystem     : {subsystem}")
+        click.echo(f"Demoted       : {removed}/{len(channel_list)} "
+                   f"({absent} were not champions)")
+        click.echo(f"Alias removed : @{CHAMPION_ALIAS}")
+        click.echo(f"Tracking URI  : {tracking_uri}")
+        return
+
+    if name is None:
+        raise click.ClickException(
+            "Provide --name, --mission, or --mission with --channels/--channels-from."
+        )
+
+    was_champion = demote(name=name)
+    click.echo(f"Model         : {name}")
+    click.echo(f"Alias removed : @{CHAMPION_ALIAS} "
+               f"({'removed' if was_champion else 'was not set'})")
     click.echo(f"Tracking URI  : {tracking_uri}")
 
 

@@ -2,6 +2,7 @@
 
 register_pytorch_model: log a PyTorch model artifact and create a ModelVersion.
 promote:                set the @champion alias on a version (MLflow 3.x pattern).
+demote:                 remove the @champion alias (inverse of promote).
 latest_uri:             return the models:/{name}@champion URI for loading.
 
 MLflow 3.x removed stage-based transitions (Staging/Production/Archived) in
@@ -102,6 +103,57 @@ def promote(
 
     client.set_registered_model_alias(name, CHAMPION_ALIAS, str(version))
     log.info("mlflow.registry.promoted", name=name, version=version, alias=CHAMPION_ALIAS)
+
+
+def demote(*, name: str) -> bool:
+    """Remove the @champion alias from a registered model, if it is set.
+
+    The inverse of promote(): the serving layer discovers servable channels by
+    scanning for the @champion alias (api/app.py `_resolve_champion_channels`),
+    so deleting the alias is what actually takes a channel out of service.  The
+    model version itself is left untouched and can be re-promoted later.
+
+    Args:
+        name: Registered model name.
+
+    Returns:
+        True if the alias was present and removed; False if it was not set
+        (or the model does not exist) — a no-op, not an error, so callers can
+        demote a whole mission without knowing which channels were champions.
+
+    Raises:
+        MlflowException: For failures other than a missing alias/model
+            (auth, network, etc.), so real problems still surface.
+    """
+    from mlflow.exceptions import MlflowException
+
+    client = MlflowClient()
+    # Check presence first: delete_registered_model_alias is silently idempotent
+    # (deleting an unset alias succeeds), so it can't tell us whether anything
+    # was removed. Inspect the model's alias set directly instead (same shape
+    # handling as api/app.py `_has_champion_alias`). Only a missing *model*
+    # relies on an error code; any other code (auth, network) re-raises.
+    try:
+        model = client.get_registered_model(name)
+    except MlflowException as exc:
+        if getattr(exc, "error_code", "") == "RESOURCE_DOES_NOT_EXIST":
+            log.info("mlflow.registry.demote_noop", name=name, alias=CHAMPION_ALIAS)
+            return False
+        raise
+
+    aliases = getattr(model, "aliases", None) or {}
+    is_champion = (
+        CHAMPION_ALIAS in aliases
+        if isinstance(aliases, dict)
+        else any(getattr(a, "alias", None) == CHAMPION_ALIAS for a in aliases)
+    )
+    if not is_champion:
+        log.info("mlflow.registry.demote_noop", name=name, alias=CHAMPION_ALIAS)
+        return False
+
+    client.delete_registered_model_alias(name, CHAMPION_ALIAS)
+    log.info("mlflow.registry.demoted", name=name, alias=CHAMPION_ALIAS)
+    return True
 
 
 def latest_uri(name: str) -> str:

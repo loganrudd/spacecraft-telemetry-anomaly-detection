@@ -18,7 +18,7 @@ RUN := $(UV) run
         profile preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-server mlflow-ui mlflow-promote mlflow-promote-all cloud-deploy \
+        mlflow-server mlflow-ui mlflow-promote mlflow-promote-all mlflow-demote cloud-deploy \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
@@ -176,6 +176,18 @@ mlflow-promote:   ## Set @champion alias (MISSION=…, [CHANNEL=…, SUBSYSTEM=�
 	  SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://$(PROJECT_ID)-processed-data \
 	  SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://$(PROJECT_ID)-sample-data,) \
 	$(RUN) spacecraft-telemetry --env $(ENV) mlflow promote \
+		--mission $(MISSION) \
+		$(if $(CHANNEL),--channels $(CHANNEL),) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
+
+mlflow-demote:    ## Remove @champion alias (MISSION=… alone resets all; [CHANNEL=…, SUBSYSTEM=…, ENV=cloud])
+	$(if $(filter cloud,$(ENV)), \
+	  SSL_CERT_FILE=$(SSL_CERT_FILE) \
+	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)') \
+	  MLFLOW_TRACKING_TOKEN=$$(gcloud auth print-identity-token) \
+	  SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://$(PROJECT_ID)-processed-data \
+	  SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://$(PROJECT_ID)-sample-data,) \
+	$(RUN) spacecraft-telemetry --env $(ENV) mlflow demote \
 		--mission $(MISSION) \
 		$(if $(CHANNEL),--channels $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
