@@ -445,6 +445,50 @@ def _scoring_trial(
 # Single subsystem sweep
 # ---------------------------------------------------------------------------
 
+def _resilient_mlflow_callback(**kwargs: Any) -> Any:
+    """Build an MLflowLoggerCallback that can't crash the sweep on a transient
+    MLflow failure.
+
+    The per-trial MLflow runs this callback creates are observability only: the
+    sweep's outcome comes from each trial's returned ``objective`` (recorded by
+    Ray, not MLflow), and ``run_hpo_sweep`` re-queries MLflow for the best
+    trial's run_id afterwards, tolerating ``None``. Upstream Ray's callback
+    (``ray.air.integrations.mlflow``) does an unguarded ``self._trial_runs[trial]``
+    in ``log_trial_end``; when ``start_run()`` failed at trial start — a token
+    refresh or network blip against a remote (Cloud Run) tracking server —
+    the trial is never registered, so a single blip raises ``KeyError`` inside
+    the trial-error handler and kills the whole RayJob. Swallow-and-log each
+    hook so one flaky trial can't take down a 50-trial sweep.
+
+    Lazy import keeps ``ray.air`` off the module-import path (matching the other
+    Ray imports, which live inside ``run_hpo_sweep``).
+    """
+    from ray.air.integrations.mlflow import MLflowLoggerCallback
+
+    class _ResilientMLflowLoggerCallback(MLflowLoggerCallback):
+        # Broad excepts are intentional: MLflow logging is observability only and
+        # must never propagate into Ray's trial-lifecycle handling.
+        def log_trial_start(self, trial: Any) -> None:
+            try:
+                super().log_trial_start(trial)
+            except Exception as exc:
+                log.warning("tune.mlflow_callback.start_failed", trial=str(trial), error=str(exc))
+
+        def log_trial_result(self, iteration: int, trial: Any, result: dict[str, Any]) -> None:
+            try:
+                super().log_trial_result(iteration, trial, result)
+            except Exception as exc:
+                log.warning("tune.mlflow_callback.result_failed", trial=str(trial), error=str(exc))
+
+        def log_trial_end(self, trial: Any, failed: bool = False) -> None:
+            try:
+                super().log_trial_end(trial, failed=failed)
+            except Exception as exc:
+                log.warning("tune.mlflow_callback.end_failed", trial=str(trial), error=str(exc))
+
+    return _ResilientMLflowLoggerCallback(**kwargs)
+
+
 def run_hpo_sweep(
     subsystem: str,
     channels: list[str],
@@ -483,7 +527,6 @@ def run_hpo_sweep(
           module docstring) — in that case ``"config"`` holds the defaults
           and no MLflow trial backs them.
     """
-    from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
 
@@ -541,7 +584,7 @@ def run_hpo_sweep(
             name=f"hpo-{subsystem}",
             verbose=0,
             callbacks=[
-                MLflowLoggerCallback(
+                _resilient_mlflow_callback(
                     experiment_name=_exp_name,
                     tracking_uri=settings.mlflow.tracking_uri,
                     tags={

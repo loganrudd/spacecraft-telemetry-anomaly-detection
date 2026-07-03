@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import typing
 from pathlib import Path
 
 import numpy as np
@@ -149,6 +150,35 @@ def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.Monkey
 
     assert result["nominal_fp_rate"] > 0.0
     assert result["objective"] < result["seg_f0_5"]
+
+
+def test_resilient_mlflow_callback_swallows_unregistered_trial() -> None:
+    """The resilient callback must not raise when a trial was never registered.
+
+    Reproduces the upstream Ray bug: log_trial_start's start_run() failed (so
+    the trial is absent from _trial_runs), then the trial errors and
+    on_trial_error -> log_trial_end does self._trial_runs[trial] -> KeyError,
+    which killed the whole RayJob. The subclass should log-and-continue instead.
+    """
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_fanout.tune import _resilient_mlflow_callback
+
+    cb = _resilient_mlflow_callback(experiment_name="telemanom-hpo-ISS", tags={})
+    # setup() would connect to MLflow; emulate a post-setup state where a trial
+    # failed at start_run() and so is absent from _trial_runs.
+    cb._trial_runs = {}
+    cb.should_save_artifact = False
+
+    class _FakeTrial:
+        config: typing.ClassVar[dict[str, object]] = {}
+
+        def __str__(self) -> str:
+            return "_scoring_trial_deadbeef"
+
+    # Both the error path (log_trial_end failed=True) and a stray result must
+    # not propagate — upstream these would KeyError.
+    cb.log_trial_end(_FakeTrial(), failed=True)
+    cb.log_trial_result(0, _FakeTrial(), {"training_iteration": 1, "objective": 0.1})
 
 
 def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch) -> None:
