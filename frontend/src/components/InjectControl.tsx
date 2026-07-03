@@ -10,14 +10,27 @@ const FAULT_LABELS: Record<FaultType, string> = {
   flatline: "Flatline",
 };
 
-// Per-fault defaults tuned for the Telemanom EWMA physics:
-// - spike: needs enough ticks for EWMA to climb AND K consecutive threshold crossings.
-//   Short spikes (≤10 ticks) are attenuated below the threshold by EWMA before K fires.
-// - drift: EWMA climbs during the ramp half, holds during the hold half — easiest to detect.
-// - flatline: no magnitude; duration just needs to exceed K so the prediction diverges.
+// Per-fault defaults, verified against the post-retune ISS scoring regime
+// (threshold_window=250, threshold_z=3, K<=4) on the stationary demo channels
+// (thermal loops + power voltage). Magnitudes sit at the top of the 3-5 sigma
+// range the injection profiles calibrate on, so the demo shows faults the
+// detector was actually tuned for rather than cartoonishly large ones.
+// - spike: a short sustained burst. 6 sigma / 8 ticks fires at the K-limited
+//   floor (~4th bucket) on every demo channel; higher magnitude or duration
+//   buys nothing. A single-sample spike is undetectable by design (K needs
+//   >=4 consecutive threshold crossings), so "spike" is a brief burst.
+// - drift: 5 sigma ramp over half the duration, then hold. 20 ticks (10 min)
+//   detects on all demo channels; slower on power voltage (higher eclipse-
+//   transition noise floor), but the ramp is visible on the chart throughout,
+//   so late detection still reads well.
+// - flatline: WEAK by design and duration cannot fix it. A forecaster tracks a
+//   frozen signal (flat window -> flat prediction -> ~0 residual), so flatline
+//   does not reliably fire on the stationary demo channels. Kept for
+//   completeness; detecting it needs a value-space variance rule (out of
+//   scope). Magnitude is unused for flatline.
 const DEFAULTS: Record<FaultType, { magnitude: number; durationTicks: number }> = {
-  drift:    { magnitude: 5, durationTicks: 60 },
-  spike:    { magnitude: 8, durationTicks: 30 },
+  drift:    { magnitude: 5, durationTicks: 20 },
+  spike:    { magnitude: 6, durationTicks: 8 },
   flatline: { magnitude: 5, durationTicks: 40 },
 };
 
