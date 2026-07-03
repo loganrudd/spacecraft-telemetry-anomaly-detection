@@ -295,9 +295,14 @@ resource "google_cloud_run_v2_service" "api" {
 
 # ---------------------------------------------------------------------------
 # ISS API service — second mission, shares the api container image.
-# Serves ISS telemanom-ISS-* models; baseline replay is nominal data;
-# anomalies are demonstrated via the on-demand Inject Fault button.
-# Phase 17 will bump iss_min_instances to 1 for the always-on live pump.
+# Live pump subscribes to and archives all 18 ISS PUIs (SPACECRAFT_COLLECT__
+# CHANNEL_SET=all below), but only the 6 curated power+thermal channels
+# (2 subsystems) carry a @champion telemanom-ISS-* model post the July drift
+# review (see .claude/rules/iss.md "Demo tiering") — the solar_array BGA
+# angles and attitude quaternions are demoted (non-stationary / degenerate
+# std) and so are archived but never reach the SSE stream (champion-gated,
+# see api/live/pump.py _served_channels). Anomalies are demonstrated via the
+# on-demand Inject Fault button.
 # ---------------------------------------------------------------------------
 
 resource "google_cloud_run_v2_service" "api_iss" {
@@ -326,8 +331,12 @@ resource "google_cloud_run_v2_service" "api_iss" {
 
       resources {
         limits = {
-          # 6 ISS channels (Phase 16) fit in 1 vCPU / 2 GiB; bump to 2/4
-          # if expanded to the full 18-channel set (same as ESA sizing).
+          # 6 champion models fit comfortably in 1 vCPU / 2 GiB — the pump's
+          # memory footprint scales with the 18 archived/subscribed channels
+          # (unaffected by the champion count), while inference load scales
+          # with the 6 modeled channels. Revisit only if the raw-tick/archive
+          # side (not inference) shows pressure (same measure-first discipline
+          # as ESA sizing in variables.tf).
           cpu    = "1"
           memory = "2Gi"
         }
