@@ -47,12 +47,12 @@ class _ZeroModel(torch.nn.Module):
         return torch.zeros(x.shape[0], 1)
 
 
-def _make_engine(window_size: int = 5) -> ChannelInferenceEngine:
+def _make_engine(window_size: int = 5, channel: str = _CH) -> ChannelInferenceEngine:
     m = _ZeroModel()
     m.eval()
     return ChannelInferenceEngine(
         mission="ISS",
-        channel=_CH,
+        channel=channel,
         model=m,  # type: ignore[arg-type]
         window_size=window_size,
         params=ScoringParams(
@@ -500,6 +500,64 @@ async def test_injected_bucket_sets_is_anomaly_flag() -> None:
     assert any(t["is_anomaly"] for t in telemetry_payloads), (
         "expected at least one telemetry event with is_anomaly=True"
     )
+
+
+@pytest.mark.asyncio
+async def test_injection_clock_not_divided_by_channel_count() -> None:
+    """The injection elapsed counter advances once per grid bucket, not once
+    per channel-bucket close.
+
+    Regression: end_tick() used to be called unconditionally inside the
+    per-channel bucket-close loop, so with N served channels a fault's
+    ``elapsed`` advanced N times per grid interval — a total_ticks=60 demo
+    fault lasted ~10 buckets with 6 channels.  With 3 channels and
+    total_ticks=4, the buggy behaviour yields only ~2 injected buckets on
+    the non-first channels; the fixed behaviour yields exactly 4.
+    """
+    spy = _SpyBroadcaster()
+    channels = ["CH_A", "CH_B", "CH_C"]
+    pump = LivePump(
+        loop=asyncio.get_event_loop(),
+        broadcaster=spy,
+        engines={ch: _make_engine(window_size=5, channel=ch) for ch in channels},
+        norm_params={ch: {"mean": _MEAN, "std": _STD} for ch in channels},
+        collect_config=_make_collect_config(),
+        state=None,
+    )
+
+    total_ticks = 4
+    spy.request_injection(
+        fault_type="spike",
+        channels=frozenset(),
+        magnitude_sigma=3.0,
+        total_ticks=total_ticks,
+    )
+
+    # 7 buckets; per bucket every channel sends one tick (1s apart, so
+    # CH_A always closes each bucket first).
+    for k in range(7):
+        for i, ch in enumerate(channels):
+            await pump._on_tick(
+                ch, _BASE_TS + timedelta(seconds=k * _INTERVAL + i), 20.5
+            )
+
+    # Count injected (is_anomaly=True) telemetry buckets per channel.
+    counts = dict.fromkeys(channels, 0)
+    for ch, p in spy.published:
+        lines = p.decode().splitlines()
+        if lines and lines[0].strip() == "event: telemetry":
+            data = json.loads(lines[1].split("data:", 1)[1])
+            if data["is_anomaly"]:
+                counts[ch] += 1
+
+    # CH_B / CH_C see exactly total_ticks injected buckets (0..3).  CH_A —
+    # the channel whose bucket close crosses the expiry boundary — gets one
+    # extra partial bucket (its bucket-4 raw tick lands before its bucket-3
+    # close advances elapsed to 4), which is inherent to fault-before-close
+    # ordering and acceptable.
+    assert counts["CH_B"] == total_ticks, counts
+    assert counts["CH_C"] == total_ticks, counts
+    assert counts["CH_A"] >= total_ticks, counts
 
 
 # ---------------------------------------------------------------------------

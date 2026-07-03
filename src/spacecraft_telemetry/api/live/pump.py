@@ -171,7 +171,7 @@ class LivePump:
         # maxlen = window_size + threshold_window so prime_with_scoring() can
         # warm both the LSTM input buffer AND the EWMA/threshold ring buffer on
         # LOS recovery — without enough history, threshold stays inf for
-        # threshold_window × grid_interval after each handover (up to ~2 h),
+        # threshold_window x grid_interval after each handover (up to ~2 h),
         # and with 16 LOS/day the detector would never warm up during live ops.
         # On the first few LOS events the deque may hold fewer than the full
         # warmup depth; prime_with_scoring() handles partial history gracefully
@@ -196,6 +196,16 @@ class LivePump:
 
         # Per-channel flag: any tick in the current bucket was injected.
         self._bucket_injected: dict[str, bool] = {}
+
+        # Newest grid bucket for which end_tick() has been called.  The
+        # injection elapsed counter must advance once per grid interval —
+        # NOT once per channel-bucket close: with N served channels an
+        # unconditional end_tick() in the bucket-close loop advances
+        # ``elapsed`` N times per interval, silently dividing every injected
+        # fault's duration by N (a "60-tick" demo fault lasted ~10 buckets
+        # with 6 channels) and detaching live faults from the 20-120-bucket
+        # population the HPO thresholds are calibrated on.
+        self._last_ended_bucket: datetime | None = None
 
         # Background asyncio tasks.
         self._los_watchdog_task: asyncio.Task[None] | None = None
@@ -318,10 +328,9 @@ class LivePump:
         #    the raw chart line rather than waiting for the next bucket close.
         self._broadcaster.begin_tick()
 
-        # 7. Apply fault injection.
+        # 7. Apply fault injection.  (The per-channel _bucket_injected flag is
+        #    recorded AFTER step 9's bucket-close loop — see comment there.)
         injected_normalized, is_injected = self._broadcaster.apply_fault(channel, normalized)
-        if is_injected:
-            self._bucket_injected[channel] = True
 
         # 8. Publish event: raw (immediate visual feedback on the chart line).
         raw_event = RawTelemetryEvent(
@@ -341,8 +350,24 @@ class LivePump:
                 f"event: telemetry\ndata: {event.model_dump_json()}\n\n".encode(),
             )
             self._recent_buckets[channel].append(bucket_mean)
-            # Advance the injection elapsed counter once per bucket close.
-            self._broadcaster.end_tick()
+            # Advance the injection elapsed counter once per grid bucket.
+            # Channels close the same 30s bucket at slightly different
+            # wall-times (each closes when its own next tick arrives), so
+            # only the FIRST closure of a new bucket advances the shared
+            # clock; later channels closing the same (or an older, laggier)
+            # bucket must not — see _last_ended_bucket in __init__.
+            if self._last_ended_bucket is None or bucket_ts > self._last_ended_bucket:
+                self._broadcaster.end_tick()
+                self._last_ended_bucket = bucket_ts
+
+        # Record the injected flag for THIS tick's (still-open) bucket only
+        # after the closes above: the pop in the loop consumes flags set by
+        # prior ticks.  Setting the flag before the push let a tick's flag be
+        # consumed by the close of the PREVIOUS bucket, shifting is_anomaly
+        # labels one bucket early and dropping the label on a fault's final
+        # bucket entirely.
+        if is_injected:
+            self._bucket_injected[channel] = True
 
     # ------------------------------------------------------------------
     # LOS state machine
@@ -369,7 +394,7 @@ class LivePump:
         # Re-prime each engine from the last collected buckets.
         # prime_with_scoring() warms both the input window and the EWMA/threshold
         # ring buffer so detection resumes immediately after handover rather than
-        # waiting threshold_window × 30s for the threshold to go finite again.
+        # waiting threshold_window x 30s for the threshold to go finite again.
         for ch, engine in self._engines.items():
             if self._recent_buckets[ch]:
                 engine.prime_with_scoring(list(self._recent_buckets[ch]))
