@@ -30,6 +30,21 @@ channel with no nominal-tagged run yet contributes no penalty (logged once
 as a warning) rather than failing the sweep — run `ray score --mission ISS`
 (no --injected) to backfill it.
 
+Baseline guard
+--------------
+A sweep can still land on a config that beats the objective on the HPO
+portion (first hpo_eval_fraction of test data) yet scores worse than the
+untuned Settings.model defaults on the held-out final_portion — e.g. ISS
+Phase 15 tuned runs landed on threshold_min_anomaly_len (K) of 7-10 to
+suppress nominal false positives, which also suppressed recall on injected
+faults that only sustain a few consecutive threshold exceedances (drift/
+flatline ramp+hold over 30-60 ticks). run_hpo_sweep() evaluates the untuned
+defaults (clamped into the sweep's own search-space bounds, e.g. the ISS
+threshold_window AOS cap) with the same _scoring_trial() objective and keeps
+the defaults whenever they are >= the sweep's best trial. When this happens
+the returned "run_id" is None (no MLflow trial backs a kept default) — read
+by score_channel() as "not tuned", which is the correct interpretation.
+
 Public API
 ----------
 SEARCH_SPACE         Ray Tune search space over the 4 scoring parameters.
@@ -113,10 +128,20 @@ SEARCH_SPACE: dict[str, Any] = {
 }
 
 # ISS-specific search space: threshold_window capped at _ISS_MAX_THRESHOLD_WINDOW
-# so warmup fits inside a single AOS pass. All other bounds unchanged.
+# so warmup fits inside a single AOS pass.
+#
+# threshold_min_anomaly_len (K) is also capped much lower than ESA's [1, 10]:
+# ISS injected faults (drift/flatline ramp+hold over 30-60 ticks; a one-step
+# forecaster only produces a large residual during the ramp, not the hold) can
+# rarely sustain K>=5 consecutive threshold exceedances. With the full ESA
+# range available, the optimizer's only lever to suppress nominal false
+# positives was pushing K to 7-10 — which also suppressed recall on the very
+# faults it was supposed to catch (see the module docstring's Baseline guard
+# section). Capping K at 4 keeps recall achievable.
 ISS_SEARCH_SPACE: dict[str, Any] = {
     **SEARCH_SPACE,
     "threshold_window": tune.randint(50, _ISS_MAX_THRESHOLD_WINDOW + 1),
+    "threshold_min_anomaly_len": tune.randint(1, 5),  # [1, 4], vs ESA's [1, 10]
 }
 
 
@@ -293,6 +318,32 @@ def _load_nominal_errors(
     return out
 
 
+def _clamp_to_search_space(
+    config: dict[str, Any], search_space: dict[str, Any]
+) -> dict[str, Any]:
+    """Clip each value in *config* into its search-space bounds.
+
+    Used to make the untuned Settings.model defaults a legal candidate in the
+    baseline guard (run_hpo_sweep) — e.g. the ESA default threshold_window=250
+    would otherwise exceed the ISS AOS cap (_ISS_MAX_THRESHOLD_WINDOW) and
+    could "win" the baseline comparison with a value invalid for live serving.
+
+    randint domains have an exclusive upper bound; uniform domains (only
+    threshold_z here) have an inclusive upper bound. Config values are float
+    only for threshold_z, so isinstance(value, float) is sufficient to select
+    the right bound without inspecting the Ray domain type.
+    """
+    clamped: dict[str, Any] = {}
+    for key, value in config.items():
+        domain = search_space[key]
+        lower, upper = domain.lower, domain.upper
+        if isinstance(value, float):
+            clamped[key] = min(max(value, lower), upper)
+        else:
+            clamped[key] = min(max(value, lower), upper - 1)
+    return clamped
+
+
 # ---------------------------------------------------------------------------
 # Trial function — pure numpy, no torch dependency
 # ---------------------------------------------------------------------------
@@ -419,7 +470,11 @@ def run_hpo_sweep(
           subsystem has a nominal-tagged baseline run yet).
         - ``"objective"``        — ``seg_f0_5 - fp_penalty_weight * nominal_fp_rate``,
           the actual quantity the sweep optimizes.
-        - ``"run_id"``           — MLflow run ID of the best trial (None if unavailable).
+        - ``"run_id"``           — MLflow run ID of the best trial. None if
+          unavailable, or if the baseline guard kept the untuned
+          Settings.model defaults instead of the sweep's best trial (see
+          module docstring) — in that case ``"config"`` holds the defaults
+          and no MLflow trial backs them.
     """
     from ray.air.integrations.mlflow import MLflowLoggerCallback
     from ray.tune.schedulers import FIFOScheduler
@@ -504,30 +559,73 @@ def run_hpo_sweep(
     best_nominal_fp_rate: float = best_metrics.get("nominal_fp_rate", 0.0)
     best_objective: float = best_metrics.get("objective", best_seg_f0_5)
 
+    # Baseline guard (see module docstring): the sweep optimizes hpo_portion,
+    # but a winning trial there can still score worse than the untuned
+    # Settings.model defaults on the objective (ISS Phase 15: tuned K landed
+    # at 7-10, killing recall on injected faults). Evaluate the defaults —
+    # clamped into this sweep's search-space bounds, e.g. the ISS
+    # threshold_window AOS cap — with the same objective, and keep them
+    # whenever they are >= the sweep's best trial, so a sweep can never make
+    # detection worse than doing nothing.
+    baseline_config = _clamp_to_search_space(
+        {
+            "error_smoothing_window": cfg.error_smoothing_window,
+            "threshold_window": cfg.threshold_window,
+            "threshold_z": cfg.threshold_z,
+            "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
+        },
+        _search_space,
+    )
+    baseline_metrics = _scoring_trial(
+        baseline_config,
+        channel_data=channel_data,
+        nominal_errors=nominal_errors,
+        fp_penalty_weight=settings.tune.fp_penalty_weight,
+    )
+    used_baseline = baseline_metrics["objective"] >= best_objective
+    if used_baseline:
+        log.info(
+            "tune.sweep.baseline_kept",
+            subsystem=subsystem,
+            baseline_objective=round(baseline_metrics["objective"], 4),
+            tuned_objective=round(best_objective, 4),
+            note="untuned defaults matched or beat the HPO sweep on the held-out "
+            "objective — keeping defaults for this subsystem instead of the "
+            "sweep's best trial.",
+        )
+        best_config = baseline_config
+        best_seg_f0_5 = baseline_metrics["seg_f0_5"]
+        best_nominal_fp_rate = baseline_metrics["nominal_fp_rate"]
+        best_objective = baseline_metrics["objective"]
+
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
     # Scoped to runs from this sweep only (start_time >= _sweep_start_ms) so
     # that re-runs don't pick up the all-time best from a previous sweep.
+    # Skipped when the baseline guard kept the untuned defaults — no MLflow
+    # trial backs them, and a None run_id is the correct "not tuned" signal
+    # for score_channel, not a lookup failure worth warning about.
     best_run_id: str | None = None
-    with suppress(Exception):
-        import mlflow as _mlflow
-        _client = _mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-        _exp = _client.get_experiment_by_name(_exp_name)
-        if _exp:
-            _runs = _client.search_runs(
-                [_exp.experiment_id],
-                filter_string=(
-                    f"tags.subsystem = '{subsystem}'"
-                    f" and attributes.start_time >= {_sweep_start_ms}"
-                ),
-                order_by=["metrics.objective DESC"],
-                max_results=1,
-            )
-            if _runs:
-                best_run_id = _runs[0].info.run_id
-    if best_run_id is None:
-        log.warning("tune.sweep.best_run_id_missing", subsystem=subsystem,
-                    note="lineage tag tuned_from_run will be absent on scoring runs")
+    if not used_baseline:
+        with suppress(Exception):
+            import mlflow as _mlflow
+            _client = _mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+            _exp = _client.get_experiment_by_name(_exp_name)
+            if _exp:
+                _runs = _client.search_runs(
+                    [_exp.experiment_id],
+                    filter_string=(
+                        f"tags.subsystem = '{subsystem}'"
+                        f" and attributes.start_time >= {_sweep_start_ms}"
+                    ),
+                    order_by=["metrics.objective DESC"],
+                    max_results=1,
+                )
+                if _runs:
+                    best_run_id = _runs[0].info.run_id
+        if best_run_id is None:
+            log.warning("tune.sweep.best_run_id_missing", subsystem=subsystem,
+                        note="lineage tag tuned_from_run will be absent on scoring runs")
 
     # Log the channel manifest (which channels and their scoring run IDs fed
     # this sweep) as an artifact on the best HPO run.  Makes the input lineage
@@ -555,9 +653,11 @@ def run_hpo_sweep(
     # threshold_z pegged near the search-space floor is the signature of an
     # optimizer chasing undetectable faults at the expense of nominal-data
     # precision (see module docstring) — worth a loud signal even though the
-    # penalty above should now make this rare.
+    # penalty above should now make this rare. Not applicable when the
+    # baseline guard kept the untuned defaults — there's no optimizer trial
+    # to diagnose.
     _z_floor = _search_space["threshold_z"].lower
-    if best_config.get("threshold_z", _z_floor) <= _z_floor + 0.1:
+    if not used_baseline and best_config.get("threshold_z", _z_floor) <= _z_floor + 0.1:
         log.warning(
             "tune.sweep.z_pegged_to_floor",
             subsystem=subsystem,
@@ -575,6 +675,7 @@ def run_hpo_sweep(
         best_nominal_fp_rate=round(best_nominal_fp_rate, 4),
         best_config=best_config,
         best_run_id=best_run_id,
+        used_baseline=used_baseline,
     )
     return {
         "config": best_config,
