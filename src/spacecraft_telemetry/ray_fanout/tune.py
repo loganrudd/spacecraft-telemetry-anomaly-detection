@@ -105,16 +105,22 @@ log = get_logger(__name__)
 # serving engine produces. Pruning stays a fixed offline-report knob.
 # ---------------------------------------------------------------------------
 
-# ISS AOS (Acquisition of Signal) window constraint for threshold_window.
-# ISS has a 90-min orbital period; TDRS coverage gives ~70 min AOS per orbit
-# (~16 LOS events/day). At the 30s grid, 70 min = 140 buckets. The threshold
-# ring buffer must fill (threshold_window ticks) PLUS leave time for actual
-# detection. Capping at half the AOS window (70 buckets = 35 min) ensures the
-# threshold goes finite in the first half of each pass and detection is
-# possible in the second half. Without this cap, HPO can choose
-# threshold_window up to 500 (250 min warmup), which exceeds the AOS window
-# entirely — the detector never warms up during live operation.
-_ISS_MAX_THRESHOLD_WINDOW = 70  # buckets at 30s grid ≈ 35 min
+# ISS threshold_window cap.
+# Originally 70 (half the ~140-bucket TDRS AOS window at the 30s grid) so a
+# COLD detector's threshold ring buffer could fill and still leave detection
+# time within a single pass. That cold-start rationale is obsolete: serving
+# warm-starts the threshold via ChannelInferenceEngine.prime_with_scoring()
+# at startup and on every LOS recovery (api/app.py, api/live/pump.py), so the
+# threshold never waits for a live fill. The old tight cap actively hurt
+# detection of sustained faults: a 20-120-bucket drift/flatline (the HPO
+# injection population) is a large fraction of a 70-bucket rolling window, so
+# the threshold inflated mid-event and absorbed the fault. Raised to 250
+# (== the ModelConfig default threshold_window): a fault inflates a
+# 250-bucket window far less, and priming needs window_size + 250 grid
+# buckets ≈ 3.2 h of history — well within the replay slice serving primes
+# from. Kept as a cap (rather than ESA's 500) to bound that priming
+# requirement and the live re-prime deque (_recent_buckets in the pump).
+_ISS_MAX_THRESHOLD_WINDOW = 250  # buckets at 30s grid ≈ 2.1 h
 
 SEARCH_SPACE: dict[str, Any] = {
     "error_smoothing_window":    tune.randint(5, 101),   # EWMA span: [5, 100]
@@ -128,7 +134,7 @@ SEARCH_SPACE: dict[str, Any] = {
 }
 
 # ISS-specific search space: threshold_window capped at _ISS_MAX_THRESHOLD_WINDOW
-# so warmup fits inside a single AOS pass.
+# (bounds the warm-start priming requirement — see the cap's comment above).
 #
 # threshold_min_anomaly_len (K) is also capped much lower than ESA's [1, 10]:
 # ISS injected faults (drift/flatline ramp+hold over 30-60 ticks; a one-step
@@ -324,9 +330,10 @@ def _clamp_to_search_space(
     """Clip each value in *config* into its search-space bounds.
 
     Used to make the untuned Settings.model defaults a legal candidate in the
-    baseline guard (run_hpo_sweep) — e.g. the ESA default threshold_window=250
-    would otherwise exceed the ISS AOS cap (_ISS_MAX_THRESHOLD_WINDOW) and
-    could "win" the baseline comparison with a value invalid for live serving.
+    baseline guard (run_hpo_sweep) — a default outside the sweep's bounds
+    (e.g. threshold_min_anomaly_len above the ISS K cap, or threshold_window
+    above _ISS_MAX_THRESHOLD_WINDOW) could otherwise "win" the baseline
+    comparison with a value the search space deems invalid for live serving.
 
     randint domains have an exclusive upper bound; uniform domains (only
     threshold_z here) have an inclusive upper bound. Config values are float
@@ -753,9 +760,11 @@ def run_all_sweeps(
         write_tuned_configs({}, output)
         return output
 
-    # ISS threshold_window is capped so warmup fits inside a single AOS pass
-    # (70-min window at 30s grid = 140 buckets; cap = half that so detection
-    # starts in the second half of each orbit).  ESA uses the default space.
+    # ISS uses a narrowed space: threshold_window capped (bounds the serving
+    # warm-start priming requirement) and threshold_min_anomaly_len capped
+    # (short injected faults cannot sustain long consecutive-exceedance runs).
+    # See the comments on _ISS_MAX_THRESHOLD_WINDOW / ISS_SEARCH_SPACE.
+    # ESA uses the default space.
     _space = ISS_SEARCH_SPACE if mission.startswith("ISS") else SEARCH_SPACE
     if mission.startswith("ISS"):
         log.info(
