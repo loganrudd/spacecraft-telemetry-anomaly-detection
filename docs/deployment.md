@@ -228,11 +228,18 @@ gcloud run jobs execute mlflow-db-upgrade \
   --region $REGION --project $PROJECT_ID --wait
 ```
 
-## ISS Collector (Phase 12; retired Phase 17)
+## ISS Collector — emergency backstop (retired as the primary path in Phase 17)
 
-The ISS Live telemetry collector runs as a long-lived Docker container on an always-on,
-non-preemptible `e2-small` GCE VM. It must be running for ~9–10 days before Phase 13
-(preprocessing + training) can start.
+Phase 12 originally banked ISS telemetry on a standalone, always-on, non-preemptible
+`e2-small` GCE VM running the collector as a long-lived Docker container, ~9–10 days before
+preprocessing/training could start. Phase 17 folded collection into the `api-iss` live pump
+(same Lightstreamer session, same tick archival, zero marginal cost) and retired the VM as the
+normal path — see [ISS Live Pump + VM Teardown](#iss-live-pump--vm-teardown-phase-17) below.
+
+This section is kept as a **manual emergency backstop**: the `sa-collector` service account
+and IAM bindings are preserved specifically so this VM can be stood back up without any
+Terraform changes if the pump ever needs to be bypassed. Do not use this as the default
+onboarding path for a fresh deployment — start with the pump.
 
 ### Build and push the collector image
 
@@ -341,9 +348,11 @@ make cloud-up
 # Preprocess all 18 ISS channels (reads gs://{project}-raw-data/ISS/ticks/)
 make cloud-preprocess MISSION=ISS
 
-# Or just the 6 Phase-12 validation channels (one+ per subsystem) for the demo:
+# Or just the 6 curated demo channels (power + thermal — the two subsystems that
+# stayed stationary through the July drift review; see .claude/rules/iss.md
+# "Demo tiering") for a faster end-to-end run:
 make cloud-preprocess MISSION=ISS \
-  CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+  CHANNELS=S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
 
 make cloud-down
 ```
@@ -372,14 +381,14 @@ gsutil cat "gs://${PROJECT_ID}-processed-data/ISS/normalization_params.json" \
 
 ISS has no labeled anomalies, so detection is evaluated by **fault injection**: inject known
 faults into the nominal test split to manufacture `is_anomaly` ground truth, then run the same
-Ray Tune F0.5 HPO against them. The demo uses the 6 Phase-12 validation channels (drop
-`CHANNELS` to run all 18).
+Ray Tune F0.5 HPO against them. The demo uses the 6 curated power + thermal channels (drop
+`CHANNELS` to run all 18 — but only the 6 below are ever promoted to `@champion`).
 
 ```bash
 export PROJECT_ID=spacecraft-telemetry-ads
 export REGION=us-central1
 export MLFLOW_URL=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)')
-CH=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+CH=S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
 
 make cloud-up
 
@@ -406,11 +415,16 @@ make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
 
 make cloud-down
 
-# 6. Promote champions (the 6 channels span 3 subsystems)
-make mlflow-promote MISSION=ISS SUBSYSTEM=thermal     ENV=cloud
-make mlflow-promote MISSION=ISS SUBSYSTEM=solar_array ENV=cloud
-make mlflow-promote MISSION=ISS SUBSYSTEM=power       ENV=cloud
-make mlflow-promote MISSION=ISS SUBSYSTEM=attitude    ENV=cloud
+# 6. Promote champions. ISS with no CHANNEL/SUBSYSTEM defaults to the curated
+#    6-channel set (power + thermal) — the non-stationary solar_array/attitude
+#    channels are deliberately excluded (see .claude/rules/iss.md "Demo tiering").
+#    Serving is champion-gated end to end: only promoted channels load at
+#    startup and reach the SSE stream, so this is what decides what's live.
+make mlflow-promote MISSION=ISS ENV=cloud
+
+# To reset and re-promote (e.g. after retraining or re-tiering):
+#   make mlflow-demote  MISSION=ISS ENV=cloud   # clears every ISS champion alias
+#   make mlflow-promote MISSION=ISS ENV=cloud   # back to the curated set
 ```
 
 `INJECTED=1` points `cloud-score`/`cloud-tune` at `gs://{project}-processed-data/_injected` and
@@ -430,7 +444,7 @@ local step rather than a RayJob.
 
 The serving layer is mission-parameterized: `settings.api.mission` drives model loading
 (`telemanom-ISS-{channel}@champion`), the replay path, and the dashboard. ESA and ISS run as
-separate processes (and, in Phase 18, separate Cloud Run services from one image). The
+separate processes — separate Cloud Run services (`api`, `api-iss`) from one shared image. The
 dashboard mission switcher (`available_missions` on `/health`) navigates between them, and the
 **Inject Fault** button (`POST /api/inject`) drives a live spike/drift/flatline on the shared
 replay loop so every viewer sees the same anomaly — the primary way to surface anomalies for
@@ -460,8 +474,14 @@ cycle as the former collector.
 ### Deploy the live pump
 
 ```bash
-# Build and push the api image (CI does this automatically on push to main):
-./scripts/cloud_build_api.sh
+# Build and push the api image (CI does this automatically on push to main via
+# .github/workflows/deploy.yml, using the same command below). If you are deploying
+# from a feature branch instead of main, CI won't build it for you — build manually:
+AR=${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry
+SHA=$(git rev-parse --short HEAD)
+docker build --platform linux/amd64 -f deploy/api/Dockerfile \
+  -t $AR/api:$SHA -t $AR/api:latest .
+docker push $AR/api:$SHA && docker push $AR/api:latest
 
 # Deploy api-iss with the live pump config (min=1, max=1, LIVE=true):
 gcloud run deploy api-iss \

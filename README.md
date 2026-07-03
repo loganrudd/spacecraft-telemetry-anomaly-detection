@@ -1,30 +1,49 @@
 # Spacecraft Telemetry Anomaly Detection System
 
-End-to-end MLOps platform for detecting anomalies in real spacecraft telemetry, built on
-the [ESA Anomaly Dataset](https://zenodo.org/records/12528696) — 31 GB of sensor data
-from 3 ESA missions, ~225 telemetry channels.
+End-to-end MLOps platform for anomaly detection on real spacecraft telemetry, spanning
+**two missions** through one mission-parameterized codebase:
+
+- **ESA Anomaly Dataset** ([Zenodo](https://zenodo.org/records/12528696)) — 31 GB of batch
+  telemetry from 3 ESA missions, ~225 channels, with **real labeled anomalies**. This is the
+  interactive, quantitatively-evaluated demo.
+- **NASA ISSLive** — a **live Lightstreamer feed** from the International Space Station. No
+  labels exist, so detection is evaluated by **fault injection**. This showcases the platform's
+  real-time path: always-on ingestion, an online inference pump, Loss-of-Signal handling, and
+  live drift monitoring.
 
 The model ([Telemanom LSTM, Hundman et al. 2018](https://arxiv.org/abs/1802.04431)) is
 intentionally off-the-shelf: one small LSTM per channel trains on nominal data and flags
 when sensor readings diverge from its predictions. The engineering emphasis is the platform
 wrapping it — pandas + PyArrow preprocessing with Ray Core fan-out across hundreds of
 channels, Ray Tune for per-subsystem HPO, MLflow for experiment tracking and model registry,
-Evidently for drift monitoring, FastAPI with SSE for real-time stream replay, and Cloud Run
-for serving.
+Evidently for drift monitoring, FastAPI with SSE for real-time serving, Cloud Run for
+deployment, and — for ISS — a real-time Lightstreamer → asyncio pump feeding live inference.
 
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
-**Results:** on the held-out final 40% of ESA-Mission1, anomalies are flagged in **30 of 31**
-labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation) for the
-leakage-free protocol and honest framing).
+**Results (ESA):** on the held-out final 40% of ESA-Mission1, anomalies are flagged in
+**30 of 31** labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation)
+for the leakage-free protocol and honest framing).
 
-**Live demo:** https://api-pb5fb25noa-uc.a.run.app  
+**ESA live demo (interactive):** https://api-pb5fb25noa-uc.a.run.app  
 *(Cloud Run scales to zero — first load may take ~2.5m if the instance has been idle: image pull + model load fan-out from GCS.)*
+
+**ISS live pump (recorded):** the GIF below is a live capture of real ISS telemetry streaming
+through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
+session) is fully defined in Terraform and deployable on demand, but is kept **torn down
+between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
+for a 24/7 endpoint. ESA stays live because it scales to zero (≈$0 idle).
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
 
 <p align="center">
-  <img src="docs/assets/dashboard.gif" alt="Live dashboard: spacecraft telemetry streaming with anomaly bands and a subsystem overview" width="900">
+  <img src="docs/assets/dashboard.gif" alt="ESA dashboard: telemetry replay with predicted/labeled anomaly bands and a subsystem overview" width="900">
+  <br><em>ESA — interactive replay with real labeled anomalies (live at the URL above)</em>
+</p>
+
+<p align="center">
+  <img src="docs/assets/iss-live.gif" alt="ISS live pump: real-time NASA ISSLive telemetry streaming through the inference pump with the LIVE indicator" width="900">
+  <br><em>ISS — real-time NASA ISSLive feed through the live Lightstreamer pump (recorded capture)</em>
 </p>
 
 
@@ -222,6 +241,31 @@ ground truth:
 
 The live demo serves 8 validated subsystem_6 channels.
 
+### ISS: evaluation by fault injection (no real labels)
+
+ISS telemetry has no pre-labeled anomalies, so detection is measured by injecting known
+faults — **spike / drift / flatline** — into held-out nominal data to manufacture `is_anomaly`
+ground truth, then running the *same* per-subsystem Ray Tune F0.5 HPO against them. The scope
+is stated plainly: this measures detection of *injected* faults, not unseen on-orbit events.
+
+The honest finding — consistent with the ESA conclusion that Telemanom is a deliberate
+baseline — is that a one-step-ahead forecaster catches **abrupt** faults (spikes / step
+changes) reliably and near-instantly, but is **structurally weak on slow drift and flatlines**:
+it tracks a gradual ramp and bakes a sustained offset into its input window, so the forecast
+residual barely moves. A verified detection-latency model puts a 5σ, 10-minute injected drift
+at ~4 min to flag on clean stationary channels (EWMA climb + K-consecutive confirmation), and
+flatlines are effectively invisible to a forecaster by construction (flat input → flat
+prediction → ~0 residual). This is surfaced, not hidden — catching cross-channel and slow-onset
+anomalies needs a different model class (DC-VAE, see [Future Work](#future-work)), which is a
+model-module swap the platform is built to absorb.
+
+So the ISS value proposition is deliberately **the live platform, not the detector**: real-time
+Lightstreamer ingestion, an online 30s-grid inference pump, honest Loss-of-Signal fallback, and
+drift monitoring — end-to-end, on a genuinely live feed. The demo channels are the **stationary**
+subsystems (power-bus voltage, thermal loops); the solar-array and attitude channels are
+collected and displayed but demoted as model channels because they are non-stationary (see the
+drift-monitoring engineering note below).
+
 
 ## Engineering Notes
 
@@ -269,6 +313,33 @@ the driver before dispatching any tasks, so workers always attach to one that ex
 also quietly calls `set_tracking_uri()`, so call ordering matters — that lesson is codified in
 the repo's MLflow rules.) *In distributed tracking, never rely on per-worker default
 resolution.*
+
+**Bridging a live push feed into an async serving loop (ISS).** NASA's ISSLive Lightstreamer
+feed pushes updates on library-managed threads, but the event broadcaster, per-channel inference
+engines, and fault-injection state all live lock-free on a single asyncio event loop. The live
+pump hands every tick across that boundary with `run_coroutine_threadsafe`, resamples the
+heterogeneous per-channel cadences (1–10 s) onto a fixed 30 s grid with an online resampler that
+is byte-identical to the batch preprocessing transform — train/serve parity is non-negotiable
+here, since any divergence silently degrades detection — normalizes with the exact training
+params, and emits two SSE layers: a fast `event: raw` line at native cadence and a slower
+`event: telemetry` prediction overlay per closed grid bucket. On Loss-of-Signal (TDRS handover,
+~16×/day) it switches the producer to replaying recent collected telemetry so the chart never
+freezes, and the dashboard banner labels that state explicitly ("showing recent recorded data")
+rather than passing replay off as live. *A push source and an async serving loop are two
+concurrency worlds; bridge them at one well-defined seam, and never let a fallback lie about
+what the viewer is seeing.*
+
+**Drift monitoring caught a real regime change (ISS).** The champions were trained on one week
+of banked ISS data; weeks later, on the live feed, distribution drift surfaced on the
+solar-array and attitude channels. The Beta Gimbal Assembly angles had undergone a genuine
+regime change — a narrow slow ramp during training (daily σ ≈ 3°) became a full 0–360° sweep
+(daily σ ≈ 175°) as the orbital beta angle precessed — which a global z-score normalization
+fit on the training window cannot represent. This is exactly the retraining-trigger condition
+the drift monitor exists to detect; the right response was a channel-selection and
+representation decision (demote the non-stationary angle channels, demo on the stationary
+power/thermal set), not a threshold hack. *On a live feed, distribution drift is not
+hypothetical — the monitoring you built will catch it, and it will hand you a modeling decision,
+which is the loop working as designed.*
 
 
 ## Quick Start / Demo Workflow
@@ -377,18 +448,26 @@ ground truth, then the same per-subsystem Ray Tune F0.5 HPO runs against them. R
 training (ISS-only override; ESA stays 250) needs ~1 week of GCS-banked ticks; local dev uses
 synthetic test-suite data.
 
-**Phase 17 — live pump:** `api-iss` is now always-on (min=1/max=1) and streams **real-time**
-ISS telemetry directly from Lightstreamer. On Loss-of-Signal (TDRS handover, ~16×/day) the
-pump falls back to replaying recent collected telemetry so the chart stays alive, and the
+**Phase 17 — live pump:** `api-iss` runs an always-on (min=1/max=1) pump that streams
+**real-time** ISS telemetry directly from Lightstreamer, feeding the same broadcaster → engine
+→ SSE path the ESA replay uses. On Loss-of-Signal (TDRS handover, ~16×/day) the pump switches
+the producer to replaying recent collected telemetry so the chart stays alive, and the
 dashboard banner is explicit about it: "Signal lost (TDRS handover) — showing recent recorded
 data, typically restored within ~N min." The pump also archives all 18 channels to GCS,
-replacing the standalone collector VM.
+replacing the standalone collector VM. The service is defined in Terraform and deployable on
+demand, but — because `min=1` cannot scale to zero — it is kept **torn down between demos** to
+avoid the ~$60/mo always-on cost; the recorded capture at the top of this README is the live
+demonstration. Run it locally against the live feed any time with
+`spacecraft-telemetry --env cloud api serve --mission ISS --live`.
 
-The cloud workflow below demos the 6 Phase-12 validation channels (at least one per subsystem);
-omit `CHANNELS` to run all 18.
+The cloud workflow below demos the 6 curated channels that are actually served — the power
+(charge/discharge voltage) and thermal (coolant loop) subsystems, the two that stayed
+stationary through the July drift review (see the drift-monitoring engineering note above).
+Omit `CHANNELS` to preprocess/train/score all 18; only the 6 below are ever promoted to
+`@champion` and reach the live dashboard.
 
 ```bash
-CH=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+CH=S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
 make cloud-up
 
 # Preprocess banked ticks → 30 s-grid Parquet (CHANNELS selects a subset)
@@ -408,11 +487,19 @@ make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH   # baseline, final_po
 make cloud-tune       MISSION=ISS INJECTED=1 CHANNELS=$CH
 make cloud-score      MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1   # tuned, final_portion
 
+# Promote only the curated set to @champion — the serving layer loads/streams
+# whatever carries the alias, so this is what decides what the live dashboard shows.
+# (ISS with no --channels/--subsystem defaults to this same curated set.)
+spacecraft-telemetry --env cloud mlflow promote --mission ISS
+
 make cloud-down
 ```
 
 Models register as `telemanom-ISS-{channel}` with subsystem tags (`thermal`, `power`,
-`solar_array`, `attitude`). `cloud-inject` writes the injected copy to
+`solar_array`, `attitude`) regardless of channel selection, but only channels carrying the
+`@champion` alias are loaded at serving startup *and* reach the SSE stream — the solar_array
+and attitude channels are still archived to GCS for completeness but excluded from the live
+dashboard entirely. `cloud-inject` writes the injected copy to
 `gs://{project}-processed-data/_injected`; `INJECTED=1` points score/tune at it. The reported
 metrics measure detection of *injected* faults, not unseen on-orbit events — stated plainly by
 design. ESA provides real F0.5 on real anomalies; the contrast is the portfolio narrative.
@@ -481,6 +568,21 @@ instructions.
 The serving container loads every channel with a `@champion` model alias at
 startup. Adding a newly trained channel to the live demo requires promoting the
 model and redeploying — there is no hot-reload path.
+
+**ISS live detection is strong on abrupt faults, weak on slow drift.**  
+A one-step-ahead forecaster reliably flags spikes and step changes but tracks
+gradual drifts and cannot see flatlines (flat input → flat prediction → ~0
+residual) — see [Evaluation → ISS](#iss-evaluation-by-fault-injection-no-real-labels).
+The ISS demo's value is the live *platform* (real-time ingestion, serving, drift
+monitoring), not headline detection numbers on injected slow-onset faults. A
+stronger, multivariate detector (DC-VAE) is the model-module swap tracked in
+[Future Work](#future-work).
+
+**ISS live service is not kept running.**  
+`api-iss` (`min=1`, always-on Lightstreamer pump) cannot scale to zero, so it is
+torn down between demos to control the ~$60/mo cost. It is reproducible from
+Terraform and runnable locally against the live feed; the recorded capture is the
+standing demonstration.
 
 ---
 
