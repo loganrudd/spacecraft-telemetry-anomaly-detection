@@ -379,6 +379,81 @@ class TestLifespanBranchCoverage:
             assert app.state.loading_state.channels_total == 2  # both attempted
 
 
+class TestDriftMonitorPriming:
+    """Lifespan must build drift_monitors from drift_references and prime them
+    from the replay-slice tail, so the rolling window is already full on the
+    first live/replay tick instead of taking window_size ticks to fill."""
+
+    def test_drift_monitors_built_and_primed(self, mocker, _lifespan_patches) -> None:
+        import numpy as np
+        import pandas as pd
+
+        from spacecraft_telemetry.evidently_monitoring.reference import (
+            MONITORING_FEATURE_COLS,
+        )
+
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value=_STUB_MAP,
+        )
+
+        ref = pd.DataFrame({col: np.zeros(50) for col in MONITORING_FEATURE_COLS})
+
+        async def _fake_drift_ref(ch, settings, sem, log):
+            return ch, ref
+
+        n = 200
+        values = np.arange(n, dtype=np.float64)
+        anom = np.zeros(n, dtype=bool)
+        timestamps = pd.date_range("2020-01-01", periods=n, freq="30s").to_numpy()
+
+        async def _fake_replay_slice(ch, settings, sem, log):
+            return ch, (values, anom, timestamps)
+
+        mocker.patch(
+            "spacecraft_telemetry.api.app._load_drift_ref", side_effect=_fake_drift_ref
+        )
+        mocker.patch(
+            "spacecraft_telemetry.api.app._load_replay_slice",
+            side_effect=_fake_replay_slice,
+        )
+
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={
+                "api": settings.api.model_copy(
+                    update={"channels": ["ch-a", "ch-b"], "subsystems": ["sub1"]}
+                ),
+                "drift": settings.drift.model_copy(update={"enabled": True}),
+            }
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            _wait_for_ready(app)
+            state = app.state.app_state
+            assert set(state.drift_monitors.keys()) == {"ch-a", "ch-b"}
+            for monitor in state.drift_monitors.values():
+                # Primed from the replay-slice tail -- window is already full,
+                # not empty as it would be starting cold.
+                assert len(monitor._window) == settings.drift.window_size
+
+    def test_drift_disabled_leaves_monitors_empty(self, mocker, _lifespan_patches) -> None:
+        mocker.patch(
+            "spacecraft_telemetry.api.app.load_channel_subsystem_map",
+            return_value=_STUB_MAP,
+        )
+        settings = load_settings("test")
+        settings = settings.model_copy(
+            update={"api": settings.api.model_copy(
+                update={"channels": ["ch-a"], "subsystems": None}
+            )}
+        )
+        app = create_app(settings)
+        with TestClient(app):
+            _wait_for_ready(app)
+            assert app.state.app_state.drift_monitors == {}
+
+
 class TestResolveChampionChannels:
     """Unit tests for the registry query that backs champion resolution."""
 

@@ -49,6 +49,7 @@ from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.api import endpoints
 from spacecraft_telemetry.api.broadcast import EventBroadcaster, run_shared_loop
+from spacecraft_telemetry.api.drift import RollingDriftMonitor
 from spacecraft_telemetry.api.inference import ChannelInferenceEngine
 from spacecraft_telemetry.api.live.los_stats import compute_los_stats
 from spacecraft_telemetry.api.live.normalization import load_normalization_params
@@ -336,6 +337,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 if data is not None:
                     replay_slices[ch] = data
 
+            # Build the shared per-channel drift monitors and prime each from the
+            # tail of its replay slice (same seed data used to prime engines below)
+            # so the rolling window is already full on the first live/replay tick --
+            # without this, a fresh window takes window_size ticks to fill (~2.1h at
+            # the ISS 30s grid). Both producers (broadcast.run_shared_loop, the ISS
+            # live pump) feed these monitors via drift_feed.step_drift; they are
+            # never rebuilt or reset after startup, including across ESA replay-loop
+            # pass restarts, so the rolling window stays continuous.
+            drift_monitors: dict[str, RollingDriftMonitor] = {}
+            for ch, ref in drift_references.items():
+                monitor = RollingDriftMonitor(
+                    channel=ch,
+                    reference=cast(Any, ref),
+                    window_size=settings.drift.window_size,
+                    tick_interval=settings.drift.tick_interval,
+                    feature_drift_threshold=settings.drift.feature_drift_threshold,
+                    channel_drift_threshold=settings.drift.drift_alert_threshold,
+                    rate_interval_seconds=settings.drift.realtime_rate_interval_seconds,
+                    confirm_windows=settings.drift.drift_confirm_windows,
+                )
+                if ch in replay_slices:
+                    values, _, _ = replay_slices[ch]
+                    seed = values[-settings.drift.window_size :].tolist()
+                    for v in seed:
+                        monitor.push({"value_normalized": float(v)})
+                    log.info(
+                        "api.lifespan.drift_monitor.primed", channel=ch, seed_len=len(seed)
+                    )
+                drift_monitors[ch] = monitor
+
             # Load normalization params for the live pump (no-op in replay mode).
             norm_params: dict[str, Any] = {}
             if settings.api.live:
@@ -383,6 +414,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 startup_monotonic_ns=time.monotonic_ns(),
                 mlflow_tracking_uri=settings.mlflow.tracking_uri,
                 drift_references=MappingProxyType(drift_references),
+                drift_monitors=MappingProxyType(drift_monitors),
                 resolved_channels=resolved,
                 normalization_params=MappingProxyType(norm_params),
                 broadcaster=broadcaster,
