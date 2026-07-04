@@ -412,9 +412,20 @@ class DriftConfig(BaseModel):
             raise ValueError(f"must be > 0, got {v}")
         return v
 
-    @field_validator("feature_drift_threshold", "drift_alert_threshold")
+    @field_validator("feature_drift_threshold")
     @classmethod
-    def threshold_in_range(cls, v: float) -> float:
+    def feature_threshold_positive(cls, v: float) -> float:
+        # A normed Wasserstein distance, not a fraction -- unbounded above.
+        # ISS calibrates this to ~1.0 (see cloud_run.tf), which a (0, 1)
+        # bound would incorrectly reject.
+        if v <= 0.0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("drift_alert_threshold")
+    @classmethod
+    def alert_threshold_in_range(cls, v: float) -> float:
+        # A fraction of features/channels drifted -- genuinely bounded to (0, 1).
         if not 0.0 < v < 1.0:
             raise ValueError(f"must be in (0, 1), got {v}")
         return v

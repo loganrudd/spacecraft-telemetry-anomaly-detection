@@ -516,11 +516,17 @@ class TestDriftConfig:
         with pytest.raises(ValueError, match="must be >= 1"):
             DriftConfig(drift_confirm_windows=0)
 
-    def test_feature_drift_threshold_bounds(self) -> None:
-        with pytest.raises(ValueError, match="must be in"):
+    def test_feature_drift_threshold_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be > 0"):
             DriftConfig(feature_drift_threshold=0.0)
-        with pytest.raises(ValueError, match="must be in"):
-            DriftConfig(feature_drift_threshold=1.0)
+        with pytest.raises(ValueError, match="must be > 0"):
+            DriftConfig(feature_drift_threshold=-0.1)
+
+    def test_feature_drift_threshold_allows_ge_one(self) -> None:
+        # Unlike drift_alert_threshold, this is a Wasserstein distance
+        # magnitude, not a fraction -- ISS calibrates it to ~1.0.
+        cfg = DriftConfig(feature_drift_threshold=1.0)
+        assert cfg.feature_drift_threshold == pytest.approx(1.0)
 
     def test_drift_alert_threshold_bounds(self) -> None:
         with pytest.raises(ValueError, match="must be in"):
