@@ -355,7 +355,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # prime_with_scoring() steps through window_size + threshold_window
             # rows so both the LSTM input buffer AND the EWMA/threshold ring
             # buffer arrive warm — without this, the threshold stays inf for
-            # threshold_window × 30s after startup (up to ~2 hours at defaults).
+            # threshold_window x 30s after startup (up to ~2 hours at defaults).
             if settings.api.live:
                 for ch, engine in engines.items():
                     if ch in replay_slices:

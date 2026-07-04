@@ -7,6 +7,10 @@ archives raw ticks for every channel to GCS, and publishes two SSE event types:
                       Drives the continuous live chart line at 1-10 s cadence.
   event: telemetry  — one per closed 30-second grid bucket, with prediction
                       and anomaly flags.  Drives the anomaly overlay.
+  event: drift      — via drift_feed.step_drift, fed the same fault-adjusted
+                      bucket value as event: telemetry.  One shared monitor
+                      per channel backs both this pump and the ESA replay
+                      loop, so drift tracking is unaffected by LOS fallback.
 
 On Loss-of-Signal (TDRS handover / zone-of-exclusion), the pump pauses live
 emission and optionally starts run_shared_loop() as a replay fallback so the
@@ -37,6 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from spacecraft_telemetry.api.drift_feed import step_drift
 from spacecraft_telemetry.api.live.normalization import NormalizationParams, normalize
 from spacecraft_telemetry.api.live.resampler import OnlineGridResampler
 from spacecraft_telemetry.api.models import RawTelemetryEvent
@@ -350,6 +355,8 @@ class LivePump:
                 f"event: telemetry\ndata: {event.model_dump_json()}\n\n".encode(),
             )
             self._recent_buckets[channel].append(bucket_mean)
+            if self._state is not None:
+                await step_drift(self._state, channel, bucket_mean)
             # Advance the injection elapsed counter once per grid bucket.
             # Channels close the same 30s bucket at slightly different
             # wall-times (each closes when its own next tick arrives), so

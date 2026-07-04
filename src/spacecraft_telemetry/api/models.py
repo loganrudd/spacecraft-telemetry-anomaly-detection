@@ -112,7 +112,7 @@ class InjectRequest(BaseModel):
     # Channel IDs to inject; empty list = all loaded channels.
     channels: list[str] = []
     # Additive offset in z-score units (ignored for flatline).
-    # 5σ default matches the drift fault-type default — large enough to climb
+    # 5-sigma default matches the drift fault-type default — large enough to climb
     # past the EWMA-attenuated threshold but physically plausible.
     magnitude_sigma: float = 5.0
     # Number of replay ticks the fault lasts. 60 ticks = 30 min at 30s grid —
