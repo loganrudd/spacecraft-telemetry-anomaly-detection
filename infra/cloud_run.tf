@@ -385,11 +385,15 @@ resource "google_cloud_run_v2_service" "api_iss" {
       # 30s grid) to reproduce the same units — otherwise rate_of_change is off by
       # 30x and reads as permanent drift. feature_drift_threshold is raised from the
       # generic Evidently default (0.10) because ISS's strongly periodic orbital
-      # signal makes short (256-tick / ~2.1h) live windows diverge from the
-      # multi-day reference far more than Evidently's default assumes; 0.80 was
-      # picked from a nominal vs. injected-fault sweep against real cloud data
-      # (nominal p99 ≈ 0.71, injected 5σ drift ramp p05 ≈ 0.83) — a first pass on
-      # a small sample, worth revisiting with more data.
+      # signal makes short (256-tick) live windows diverge from the multi-day
+      # reference far more than Evidently's default assumes. drift_confirm_windows
+      # requires 3 consecutive alerting runs before flagging, suppressing transient
+      # spikes so nominal windows stop flagging constantly. Both values are a first
+      # pass from a read-only sweep (scratchpad/week_sweep.py: value-drift median
+      # 0.13-0.27 for the first ~3 days with brief spikes to ~1.0; genuine sustained
+      # drift develops day ~5-11, medians 0.5-1.8) against the train-split reference
+      # (see `make seed-reference-profiles ... MISSION=ISS` with --split train) --
+      # worth re-tuning with more banked data.
       env {
         name  = "SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS"
         value = "30"
@@ -397,7 +401,12 @@ resource "google_cloud_run_v2_service" "api_iss" {
 
       env {
         name  = "SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD"
-        value = "0.80"
+        value = "1.0"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__DRIFT_CONFIRM_WINDOWS"
+        value = "3"
       }
 
       env {

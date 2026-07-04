@@ -75,6 +75,13 @@ class RollingDriftMonitor:
         tick_interval:           Number of ticks between drift runs.
         feature_drift_threshold: Normed Wasserstein distance threshold for per-feature drift.
         channel_drift_threshold: Fraction of features that must drift to flag the channel.
+        confirm_windows:         Number of consecutive alerting runs required before
+                                  ``drifted`` is set.  Default 1 reproduces legacy behavior
+                                  (fires on the first alerting run) — ESA-safe. ISS raises
+                                  this to suppress transient spikes in its periodic orbital
+                                  signal that would otherwise flag every few days.
+                                  ``percent_drifted`` is unaffected — it always reflects the
+                                  raw per-run signal so the UI keeps showing the true score.
     """
 
     def __init__(
@@ -87,6 +94,7 @@ class RollingDriftMonitor:
         feature_drift_threshold: float,
         channel_drift_threshold: float,
         rate_interval_seconds: float = 1.0,
+        confirm_windows: int = 1,
     ) -> None:
         self._channel = channel
         self._reference = reference[REALTIME_FEATURE_COLS].copy()
@@ -96,7 +104,15 @@ class RollingDriftMonitor:
         self._feature_drift_threshold = feature_drift_threshold
         self._channel_drift_threshold = channel_drift_threshold
         self._rate_interval_seconds = rate_interval_seconds
+        self._confirm_windows = confirm_windows
         self._tick_count: int = 0
+        self._consecutive_alerts: int = 0
+        # Latest snapshot from this monitor, for cross-channel subsystem
+        # aggregation by the shared drift-feed helper (drift_feed.py).
+        self.latest: DriftSnapshot | None = None
+        # Count of snapshots produced, for the shared drift-feed helper's
+        # periodic subsystem-summary cadence.
+        self.event_count: int = 0
 
     def push(self, row: dict[str, float]) -> None:
         """Append one tick's values to the rolling window.
@@ -156,6 +172,11 @@ class RollingDriftMonitor:
             score = wasserstein_distance(ref, cur) / max(std(ref), 0.001)
         so scores are directly comparable to batch drift reports.
         Empty columns (all-NaN flatlined channel) return score=0, drifted=False.
+
+        ``drifted`` requires ``confirm_windows`` consecutive alerting runs
+        (raw_alert = percent_drifted >= channel_drift_threshold); a single
+        non-alerting run resets the counter, suppressing transient spikes.
+        ``percent_drifted`` always reflects the raw per-run signal.
         """
         current = self._add_rolling_features(current)
         features: list[FeatureDrift] = []
@@ -179,10 +200,13 @@ class RollingDriftMonitor:
         n_drifted = sum(f.drifted for f in features)
         percent_drifted = n_drifted / len(features) if features else 0.0
 
+        raw_alert = percent_drifted >= self._channel_drift_threshold
+        self._consecutive_alerts = self._consecutive_alerts + 1 if raw_alert else 0
+
         return DriftSnapshot(
             timestamp=datetime.now(UTC),
             channel=self._channel,
             features=features,
             percent_drifted=percent_drifted,
-            drifted=percent_drifted >= self._channel_drift_threshold,
+            drifted=self._consecutive_alerts >= self._confirm_windows,
         )

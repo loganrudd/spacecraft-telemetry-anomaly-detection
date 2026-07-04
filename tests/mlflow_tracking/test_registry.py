@@ -181,7 +181,7 @@ class TestDemote:
         assert demote(name=name) is True
 
         # Alias is gone → resolving it now raises.
-        with pytest.raises(Exception):  # noqa: B017,PT011  (MlflowException on missing alias)
+        with pytest.raises(Exception):  # noqa: B017  (MlflowException on missing alias)
             client.get_model_version_by_alias(name, CHAMPION_ALIAS)
 
     def test_noop_when_not_champion(self, mlflow_uri: str) -> None:

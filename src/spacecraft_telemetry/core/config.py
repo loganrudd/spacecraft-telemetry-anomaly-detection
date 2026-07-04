@@ -353,9 +353,19 @@ class DriftConfig(BaseModel):
 
     enabled: bool = True
     window_size: int = 256
-    # Run Evidently every N telemetry ticks per channel.
-    # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
-    tick_interval: int = 60
+    # Run the drift monitor every N telemetry ticks per channel.
+    # Originally 60 (sized for a 58ms Evidently Report call per Step 0's
+    # benchmark). The real-time monitor now uses scipy directly (<1ms, see
+    # drift.py) instead of Evidently, so a much lower cadence is affordable
+    # without saturating the event loop -- lowered to reduce cold-start-to-
+    # first-score latency.
+    tick_interval: int = 10
+    # Number of consecutive alerting runs required before a channel is
+    # flagged as drifted (see RollingDriftMonitor.confirm_windows). Default 1
+    # reproduces legacy fire-on-first-alert behavior (ESA-safe). ISS raises
+    # this via SPACECRAFT_DRIFT__DRIFT_CONFIRM_WINDOWS to suppress transient
+    # spikes in its periodic orbital signal.
+    drift_confirm_windows: int = 1
     # Numerical stattest passed explicitly to Evidently DataDriftPreset (num_stattest).
     # Pinned to "wasserstein" so the test is deterministic regardless of reference size.
     # Evidently would otherwise auto-select KS (n <= 1000) or Wasserstein (n > 1000),
@@ -388,7 +398,7 @@ class DriftConfig(BaseModel):
     def coerce_path_to_str(cls, v: object) -> str:
         return str(v)
 
-    @field_validator("window_size", "tick_interval")
+    @field_validator("window_size", "tick_interval", "drift_confirm_windows")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:
@@ -402,9 +412,20 @@ class DriftConfig(BaseModel):
             raise ValueError(f"must be > 0, got {v}")
         return v
 
-    @field_validator("feature_drift_threshold", "drift_alert_threshold")
+    @field_validator("feature_drift_threshold")
     @classmethod
-    def threshold_in_range(cls, v: float) -> float:
+    def feature_threshold_positive(cls, v: float) -> float:
+        # A normed Wasserstein distance, not a fraction -- unbounded above.
+        # ISS calibrates this to ~1.0 (see cloud_run.tf), which a (0, 1)
+        # bound would incorrectly reject.
+        if v <= 0.0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("drift_alert_threshold")
+    @classmethod
+    def alert_threshold_in_range(cls, v: float) -> float:
+        # A fraction of features/channels drifted -- genuinely bounded to (0, 1).
         if not 0.0 < v < 1.0:
             raise ValueError(f"must be in (0, 1), got {v}")
         return v

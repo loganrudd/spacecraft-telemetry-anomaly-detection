@@ -41,6 +41,7 @@ def _make_monitor(
     window_size: int = _WINDOW_SIZE,
     tick_interval: int = _TICK_INTERVAL,
     rate_interval_seconds: float = 1.0,
+    confirm_windows: int = 1,
 ) -> RollingDriftMonitor:
     ref = reference if reference is not None else _make_reference()
     return RollingDriftMonitor(
@@ -51,6 +52,7 @@ def _make_monitor(
         feature_drift_threshold=0.10,
         channel_drift_threshold=0.30,
         rate_interval_seconds=rate_interval_seconds,
+        confirm_windows=confirm_windows,
     )
 
 
@@ -173,6 +175,93 @@ class TestShouldRun:
             monitor.push(_nominal_row(ref, rng))
         # Tick count is now window_size + 1; next boundary is window_size + (interval - 1).
         assert not monitor.should_run()
+
+
+class TestPriming:
+    def test_should_run_shortly_after_priming(self) -> None:
+        """Priming with window_size seed values must not require a full refill.
+
+        app.py primes each monitor from the tail of its replay slice before
+        any live tick arrives (mirrors engine priming). should_run() must
+        therefore fire within one tick_interval of the first live tick, not
+        after window_size + tick_interval more ticks as it would starting
+        from an empty window.
+        """
+        monitor = _make_monitor(window_size=_WINDOW_SIZE, tick_interval=_TICK_INTERVAL)
+        ref = _make_reference()
+        rng = np.random.default_rng(7)
+        for _ in range(_WINDOW_SIZE):
+            monitor.push(_nominal_row(ref, rng))
+        fired_within = None
+        for i in range(1, _TICK_INTERVAL + 1):
+            monitor.push(_nominal_row(ref, rng))
+            if monitor.should_run():
+                fired_within = i
+                break
+        assert fired_within is not None
+        assert fired_within <= _TICK_INTERVAL
+
+
+class TestConfirmWindows:
+    """K-consecutive confirmation on RollingDriftMonitor._compute_drift.
+
+    Drives ``_compute_drift`` directly with crafted ``current`` frames so the
+    alert sequence is deterministic, rather than depending on scipy noise
+    across successive ``run()`` calls.
+    """
+
+    def _current_df(self, values: list[float]) -> pd.DataFrame:
+        return pd.DataFrame({"value_normalized": values})
+
+    def test_k1_fires_immediately(self) -> None:
+        ref = _make_reference()
+        monitor = _make_monitor(reference=ref, confirm_windows=1)
+        drifted = [_drifted_row(ref)["value_normalized"] for _ in range(_WINDOW_SIZE)]
+        snapshot = monitor._compute_drift(self._current_df(drifted))
+        assert snapshot.drifted is True
+
+    def test_k3_requires_three_consecutive_alerts(self) -> None:
+        ref = _make_reference()
+        monitor = _make_monitor(reference=ref, confirm_windows=3)
+        drifted = [_drifted_row(ref)["value_normalized"] for _ in range(_WINDOW_SIZE)]
+        s1 = monitor._compute_drift(self._current_df(drifted))
+        assert s1.drifted is False
+        s2 = monitor._compute_drift(self._current_df(drifted))
+        assert s2.drifted is False
+        s3 = monitor._compute_drift(self._current_df(drifted))
+        assert s3.drifted is True
+
+    def test_non_alert_resets_counter(self) -> None:
+        # Reliably nominal Wasserstein estimates need a larger sample than
+        # _WINDOW_SIZE=64 (see test_run_returns_snapshot_when_nominal, which
+        # uses the same 1200/256 shapes) -- independently-drawn nominal rows
+        # at small N show enough sampling noise in rate_of_change to spuriously
+        # alert.
+        ref = _make_reference(n_rows=1200, seed=30)
+        monitor = _make_monitor(reference=ref, confirm_windows=3)
+        drifted = [_drifted_row(ref)["value_normalized"] for _ in range(256)]
+        rng = np.random.default_rng(99)
+        nominal = [_nominal_row(ref, rng)["value_normalized"] for _ in range(256)]
+
+        monitor._compute_drift(self._current_df(drifted))
+        monitor._compute_drift(self._current_df(drifted))
+        # A non-alerting run resets the counter to 0.
+        reset_snapshot = monitor._compute_drift(self._current_df(nominal))
+        assert reset_snapshot.drifted is False
+        # Counter restarts at 1, not 3 -- one more drifted run is not enough.
+        s = monitor._compute_drift(self._current_df(drifted))
+        assert s.drifted is False
+
+    def test_percent_drifted_unchanged_by_confirm_windows(self) -> None:
+        ref = _make_reference()
+        drifted = [_drifted_row(ref)["value_normalized"] for _ in range(_WINDOW_SIZE)]
+        m1 = _make_monitor(reference=ref, confirm_windows=1)
+        m3 = _make_monitor(reference=ref, confirm_windows=3)
+        s1 = m1._compute_drift(self._current_df(drifted))
+        s3 = m3._compute_drift(self._current_df(drifted))
+        assert s1.percent_drifted == pytest.approx(s3.percent_drifted)
+        assert s1.drifted is True
+        assert s3.drifted is False
 
 
 # ---------------------------------------------------------------------------
