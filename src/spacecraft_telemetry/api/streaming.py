@@ -20,11 +20,11 @@
 5. On any exit path (disconnect, exhaustion, exception) the pump tasks are
    cancelled and awaited so no coroutines are leaked.
 
-``drift_stream`` is fully self-contained: each connection creates its own
-per-request ``RollingDriftMonitor`` instances and drives its own
-``replay_channel`` iteration independently of any telemetry stream clients.
-Multiple concurrent drift clients each maintain isolated monitor state so
-tick counts are never doubled by a second connection.
+``drift_stream`` is a thin subscriber over the same ``EventBroadcaster``:
+``event: drift`` frames are published by whichever producer is active (ESA
+replay loop or ISS live pump) via ``drift_feed.step_drift``, one shared
+``RollingDriftMonitor`` per channel feeding every connected viewer -- see
+``subscriber_stream`` for the identical backlog-then-live pattern.
 """
 
 from __future__ import annotations
@@ -35,8 +35,6 @@ from collections.abc import AsyncGenerator
 import structlog.contextvars
 from starlette.requests import Request
 
-from spacecraft_telemetry.api.drift import DriftSnapshot, RollingDriftMonitor
-from spacecraft_telemetry.api.models import DriftEvent, DriftFeature
 from spacecraft_telemetry.api.replay import replay_channel
 from spacecraft_telemetry.api.state import AppState
 
@@ -49,9 +47,6 @@ _log = get_logger("api.streaming")
 # Minimum per-channel queue slots.  Prevents the floor from hitting zero when
 # stream_buffer_max_events / N rounds down to very small values.
 _MIN_PER_CHANNEL_SLOTS = 8
-
-# How often to attach subsystem-level aggregation to a drift event.
-_SUBSYSTEM_SUMMARY_EVERY_N_EVENTS = 10
 
 
 async def _merge_queues(
@@ -271,20 +266,17 @@ async def drift_stream(
     state: AppState,
     request: Request,
     selected_channels: list[str],
-    speed: float,
 ) -> AsyncGenerator[bytes, None]:
-    """Async generator yielding SSE-formatted bytes for the drift stream.
+    """Attach to the shared replay loop and yield ``event: drift`` frames.
 
-    Fully self-contained: each connection creates per-request
-    ``RollingDriftMonitor`` instances and drives its own ``replay_channel``
-    loop.  Multiple concurrent clients maintain independent monitor state so
-    tick counts are never doubled and the stream works without a telemetry
-    stream client being open.
-
-    When the monitor fires (every ``tick_interval`` ticks after the window is
-    full), the ``DriftSnapshot`` is converted to a ``DriftEvent`` SSE frame.
-    Every ``_SUBSYSTEM_SUMMARY_EVERY_N_EVENTS`` events the subsystem-level
-    aggregation fields are attached.
+    Thin subscriber over the shared ``EventBroadcaster`` -- identical
+    backlog-then-live pattern to ``subscriber_stream``, filtered to
+    ``event: drift`` frames.  Those frames are published by whichever
+    producer is active (ESA replay loop or ISS live pump) via
+    ``drift_feed.step_drift``, one shared ``RollingDriftMonitor`` per channel
+    feeding every connected viewer.  Requires ``state.broadcaster`` -- the
+    caller (``stream_drift`` in endpoints.py) returns 503 otherwise, since
+    drift has no self-contained per-connection fallback.
 
     SSE format per event::
 
@@ -293,99 +285,43 @@ async def drift_stream(
         \\n
 
     Args:
-        state:             Runtime application state (drift_references + settings).
+        state:             Runtime application state (broadcaster + drift_monitors).
         request:           Starlette request — used for disconnect detection.
         selected_channels: Ordered list of channel IDs to monitor.
-        speed:             Replay speed multiplier passed to ``replay_channel``.
     """
-    n = max(1, len(selected_channels))
-    per_ch_maxsize = max(
-        _MIN_PER_CHANNEL_SLOTS,
-        state.settings.api.stream_buffer_max_events // n,
+    broadcaster = state.broadcaster
+    assert broadcaster is not None  # caller checks this
+
+    client_id, q, backlog = await broadcaster.subscribe_with_backlog(
+        frozenset(selected_channels)
     )
-    queues: dict[str, asyncio.Queue[bytes]] = {
-        ch: asyncio.Queue(maxsize=per_ch_maxsize) for ch in selected_channels
-    }
 
-    # Shared dict — each pump task writes its latest snapshot so the
-    # subsystem aggregation can read across channels.
-    latest_snapshots: dict[str, object] = {}
+    disconnect = asyncio.Event()
 
-    async def pump(channel: str) -> None:
-        """Replay one channel, push ticks into a fresh monitor, emit drift events."""
-        structlog.contextvars.bind_contextvars(channel_id=channel)
-        monitor = RollingDriftMonitor(
-            channel=channel,
-            reference=state.drift_references[channel],
-            window_size=state.settings.drift.window_size,
-            tick_interval=state.settings.drift.tick_interval,
-            feature_drift_threshold=state.settings.drift.feature_drift_threshold,
-            channel_drift_threshold=state.settings.drift.drift_alert_threshold,
-            rate_interval_seconds=state.settings.drift.realtime_rate_interval_seconds,
-        )
-        drift_event_count = 0
+    async def _watch_disconnect() -> None:
+        while True:
+            msg = await request.receive()
+            if msg["type"] == "http.disconnect":
+                disconnect.set()
+                return
 
-        _replay_dir = state.settings.replay_dir
-        async for _ts, val, _anom in replay_channel(
-            _replay_dir,
-            state.mission,
-            channel,
-            speed=speed,
-            tick_interval_seconds=state.settings.api.replay_tick_interval_seconds,
-            cached_data=state.replay_data.get(channel),
-            warmup_rows=state.settings.api.replay_warmup_rows,
-            max_rows=state.settings.api.replay_max_rows,
-        ):
-            monitor.push({"value_normalized": float(val)})
-
-            if not monitor.should_run():
+    watcher = asyncio.create_task(_watch_disconnect())
+    try:
+        for payload in backlog:
+            if not payload.startswith(b"event: drift"):
                 continue
+            if disconnect.is_set():
+                return
+            yield payload
 
-            snapshot = await monitor.run()
-            if snapshot is None:
-                continue
-
-            latest_snapshots[channel] = snapshot
-            drift_event_count += 1
-
-            sub_pct: float | None = None
-            sub_alert: bool | None = None
-            if drift_event_count % _SUBSYSTEM_SUMMARY_EVERY_N_EVENTS == 0:
-                typed = {
-                    ch: s
-                    for ch, s in latest_snapshots.items()
-                    if isinstance(s, DriftSnapshot)
-                }
-                if typed:
-                    n_drifted = sum(1 for s in typed.values() if s.drifted)
-                    sub_pct = n_drifted / len(typed)
-                    sub_alert = sub_pct >= state.settings.drift.drift_alert_threshold
-
-            event = DriftEvent(
-                timestamp=snapshot.timestamp,
-                mission=state.mission,
-                channel=snapshot.channel,
-                features=[
-                    DriftFeature(
-                        feature=f.feature,
-                        score=f.score,
-                        drifted=f.drifted,
-                    )
-                    for f in snapshot.features
-                ],
-                percent_drifted=snapshot.percent_drifted,
-                drifted=snapshot.drifted,
-                subsystem_percent_drifted=sub_pct,
-                subsystem_alert=sub_alert,
-            )
-            payload = f"event: drift\ndata: {event.model_dump_json()}\n\n".encode()
-            await queues[channel].put(payload)
-
-    tasks: dict[str, asyncio.Task[None]] = {
-        ch: asyncio.create_task(pump(ch)) for ch in selected_channels
-    }
-
-    async for chunk in _merge_queues(
-        request, tasks, queues, selected_channels, "api.drift_pump.error"
-    ):
-        yield chunk
+        while not disconnect.is_set():
+            try:
+                payload = await asyncio.wait_for(q.get(), timeout=1.0)
+            except TimeoutError:
+                continue  # re-check disconnect flag
+            if payload.startswith(b"event: drift"):
+                yield payload
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        await broadcaster.unsubscribe(client_id)
