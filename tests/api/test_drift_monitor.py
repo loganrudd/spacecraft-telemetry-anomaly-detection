@@ -40,6 +40,7 @@ def _make_monitor(
     reference: pd.DataFrame | None = None,
     window_size: int = _WINDOW_SIZE,
     tick_interval: int = _TICK_INTERVAL,
+    rate_interval_seconds: float = 1.0,
 ) -> RollingDriftMonitor:
     ref = reference if reference is not None else _make_reference()
     return RollingDriftMonitor(
@@ -49,6 +50,7 @@ def _make_monitor(
         tick_interval=tick_interval,
         feature_drift_threshold=0.10,
         channel_drift_threshold=0.30,
+        rate_interval_seconds=rate_interval_seconds,
     )
 
 
@@ -96,6 +98,44 @@ class TestPushAndWindow:
         monitor = _make_monitor()
         monitor.push({})  # all keys missing → NaN row — must not raise
         assert len(monitor._window) == 1
+
+
+class TestRateIntervalScaling:
+    """rate_of_change must match the reference profile's Δvalue/Δt_seconds units.
+
+    evidently_monitoring/reference.py builds rate_of_change as a per-second rate.
+    The live monitor only receives value_normalized per tick with no timestamps,
+    so it must divide the per-tick diff by rate_interval_seconds to reproduce
+    the same units — otherwise the feature is off by a constant factor and
+    reads as permanent drift regardless of the actual data (see drift.py
+    _add_rolling_features).
+    """
+
+    def test_default_interval_is_legacy_per_tick(self) -> None:
+        monitor = _make_monitor(rate_interval_seconds=1.0)
+        df = pd.DataFrame({"value_normalized": [0.0, 2.0, 4.0, 6.0]})
+        out = monitor._add_rolling_features(df)
+        assert out["rate_of_change"].iloc[1:].tolist() == pytest.approx([2.0, 2.0, 2.0])
+
+    def test_interval_divides_per_tick_delta(self) -> None:
+        monitor = _make_monitor(rate_interval_seconds=30.0)
+        df = pd.DataFrame({"value_normalized": [0.0, 3.0, 6.0, 9.0]})
+        out = monitor._add_rolling_features(df)
+        # Per-tick delta is 3.0; divided by the 30s grid interval -> 0.1/s.
+        assert out["rate_of_change"].iloc[1:].tolist() == pytest.approx([0.1, 0.1, 0.1])
+
+    def test_mismatched_interval_would_inflate_score_by_constant_factor(self) -> None:
+        # Regression guard for the actual bug: pushing the SAME data through two
+        # monitors that differ only in rate_interval_seconds must produce rate
+        # values that differ by exactly that factor -- proving the fix is a pure
+        # unit correction, not a change in what's being measured.
+        legacy = _make_monitor(rate_interval_seconds=1.0)
+        grid = _make_monitor(rate_interval_seconds=30.0)
+        df = pd.DataFrame({"value_normalized": [1.0, 4.0, 2.0, 5.0, 3.0]})
+        legacy_roc = legacy._add_rolling_features(df.copy())["rate_of_change"]
+        grid_roc = grid._add_rolling_features(df.copy())["rate_of_change"]
+        ratio = (legacy_roc / grid_roc).dropna()
+        assert ratio.tolist() == pytest.approx([30.0] * len(ratio))
 
 
 class TestShouldRun:

@@ -370,6 +370,17 @@ class DriftConfig(BaseModel):
     #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.
     # One knob keeps both levels consistent; tune it to change overall sensitivity.
     drift_alert_threshold: float = 0.30
+    # Wall-clock seconds between consecutive ticks in the real-time drift window.
+    # The reference profile builds rate_of_change as Δvalue / Δt_seconds
+    # (per-second rate, see evidently_monitoring/reference.py), but the live
+    # monitor only receives value_normalized per tick with no timestamps. It
+    # therefore divides its per-tick Δvalue by this interval to reproduce the
+    # same per-second units — otherwise rate_of_change is off by a factor equal
+    # to the grid interval and drifts on every window (a train/serve skew).
+    # Default 1.0 = per-tick (unchanged legacy behavior for ESA, whose replay
+    # cadence is ~1 tick). ISS runs on a fixed 30 s grid → set this to 30 via
+    # SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS on the api-iss service.
+    realtime_rate_interval_seconds: float = 1.0
     reference_profiles_dir: str = "monitoring/reference_profiles"
 
     @field_validator("reference_profiles_dir", mode="before")
@@ -382,6 +393,13 @@ class DriftConfig(BaseModel):
     def positive_int(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+    @field_validator("realtime_rate_interval_seconds")
+    @classmethod
+    def positive_rate_interval(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"must be > 0, got {v}")
         return v
 
     @field_validator("feature_drift_threshold", "drift_alert_threshold")

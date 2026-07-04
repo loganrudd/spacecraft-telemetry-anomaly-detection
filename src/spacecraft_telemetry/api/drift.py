@@ -86,6 +86,7 @@ class RollingDriftMonitor:
         tick_interval: int,
         feature_drift_threshold: float,
         channel_drift_threshold: float,
+        rate_interval_seconds: float = 1.0,
     ) -> None:
         self._channel = channel
         self._reference = reference[REALTIME_FEATURE_COLS].copy()
@@ -94,6 +95,7 @@ class RollingDriftMonitor:
         self._tick_interval = tick_interval
         self._feature_drift_threshold = feature_drift_threshold
         self._channel_drift_threshold = channel_drift_threshold
+        self._rate_interval_seconds = rate_interval_seconds
         self._tick_count: int = 0
 
     def push(self, row: dict[str, float]) -> None:
@@ -128,11 +130,15 @@ class RollingDriftMonitor:
         current = pd.DataFrame(list(self._window))
         return await asyncio.to_thread(self._compute_drift, current)
 
-    @staticmethod
-    def _add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
+    def _add_rolling_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fill rate_of_change from value_normalized diffs.
 
         The tick bus only pushes value_normalized; rate_of_change is derived here.
+        Divided by ``rate_interval_seconds`` to match the reference profile's
+        units — evidently_monitoring/reference.py builds rate_of_change as
+        Δvalue / Δt_seconds (a per-second rate), so a raw per-tick diff() would
+        be off by a factor of the tick's wall-clock interval and read as
+        permanent drift regardless of the actual data.
         NaN is intentionally not filled: the first-row NaN from diff() and any
         all-NaN windows are handled by dropna() in _compute_drift, which returns
         score=0 for empty arrays rather than computing against spurious zeros.
@@ -140,7 +146,7 @@ class RollingDriftMonitor:
         real-time comparison — their distributions are only reliable when the
         buffer is much longer than the rolling window period.  See REALTIME_FEATURE_COLS.
         """
-        df["rate_of_change"] = df["value_normalized"].diff()
+        df["rate_of_change"] = df["value_normalized"].diff() / self._rate_interval_seconds
         return df
 
     def _compute_drift(self, current: pd.DataFrame) -> DriftSnapshot:

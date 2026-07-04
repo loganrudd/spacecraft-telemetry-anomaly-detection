@@ -379,6 +379,27 @@ resource "google_cloud_run_v2_service" "api_iss" {
         value = "gs://${var.project_id}-artifacts/reference_profiles"
       }
 
+      # ISS-only real-time drift calibration. The reference profile's rate_of_change
+      # is Δvalue/Δt_seconds; the live monitor only sees per-tick values with no
+      # timestamps, so it must be told the tick's wall-clock interval (ISS's fixed
+      # 30s grid) to reproduce the same units — otherwise rate_of_change is off by
+      # 30x and reads as permanent drift. feature_drift_threshold is raised from the
+      # generic Evidently default (0.10) because ISS's strongly periodic orbital
+      # signal makes short (256-tick / ~2.1h) live windows diverge from the
+      # multi-day reference far more than Evidently's default assumes; 0.80 was
+      # picked from a nominal vs. injected-fault sweep against real cloud data
+      # (nominal p99 ≈ 0.71, injected 5σ drift ramp p05 ≈ 0.83) — a first pass on
+      # a small sample, worth revisiting with more data.
+      env {
+        name  = "SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS"
+        value = "30"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD"
+        value = "0.80"
+      }
+
       env {
         name  = "MLFLOW_ARTIFACTS_DESTINATION"
         value = "gs://${var.project_id}-artifacts/mlflow"

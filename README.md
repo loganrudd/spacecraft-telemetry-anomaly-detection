@@ -341,6 +341,20 @@ power/thermal set), not a threshold hack. *On a live feed, distribution drift is
 hypothetical — the monitoring you built will catch it, and it will hand you a modeling decision,
 which is the loop working as designed.*
 
+**A units mismatch made the drift panel permanently "drifted."** The batch reference profile
+builds `rate_of_change` as `Δvalue / Δt_seconds` (a per-second rate), but the real-time monitor
+only receives `value_normalized` per tick with no timestamps, so it derived `rate_of_change` as
+a raw per-tick diff — off by a constant factor equal to the grid interval (30s for ISS), so the
+feature read as drifted on every nominal window regardless of the data. Fixed by dividing the
+live diff by a configured `rate_interval_seconds` (ISS-only Terraform override on `api-iss`,
+since ESA shares the same `cloud.yaml` and has irregular native cadence). Recalibrated
+`feature_drift_threshold` from Evidently's generic 0.10 default to 0.80 for ISS, derived from a
+nominal-vs-injected-fault sweep against real cloud data (nominal p99 ≈ 0.71, injected 5σ drift
+ramp p05 ≈ 0.83) — the periodic orbital signal makes short live windows diverge from a
+multi-day reference far more than the generic default assumes. *A feature computed two
+different ways on the reference side and the live side is a train/serve skew bug even when
+both sides look reasonable in isolation — verify the units, not just the code path.*
+
 
 ## Quick Start / Demo Workflow
 

@@ -321,6 +321,7 @@ async def drift_stream(
             tick_interval=state.settings.drift.tick_interval,
             feature_drift_threshold=state.settings.drift.feature_drift_threshold,
             channel_drift_threshold=state.settings.drift.drift_alert_threshold,
+            rate_interval_seconds=state.settings.drift.realtime_rate_interval_seconds,
         )
         drift_event_count = 0
 

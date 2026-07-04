@@ -464,6 +464,25 @@ make serve MISSION=ISS PORT=8001
 Run `make serve` (ESA, `:8000`) in another terminal so the mission switcher has both. The
 identity token expires after ~1h.
 
+**Drift panel locally.** `configs/cloud.yaml` doesn't carry the ISS-only drift overrides —
+those live in Terraform on `api-iss` only (`infra/cloud_run.tf`), since `cloud.yaml` is shared
+with the ESA `api` service. To see a calibrated (not permanently "drifted") drift panel when
+serving ISS locally, add the same two overrides by hand:
+
+```bash
+SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS=30 \
+SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD=0.80 \
+SPACECRAFT_MLFLOW__TRACKING_URI=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)') \
+MLFLOW_TRACKING_TOKEN=$(gcloud auth print-identity-token) \
+SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://${PROJECT_ID}-processed-data \
+SSL_CERT_FILE=$(uv run python -m certifi) \
+uv run spacecraft-telemetry --env cloud api serve --mission ISS --live
+```
+
+Reference profiles also need to exist first — see [`seed-reference-profiles`](#deploy-the-live-pump)
+above; it writes to the local `monitoring/reference_profiles/` directory unless
+`SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR` is overridden to a `gs://` path.
+
 ## ISS Live Pump + VM Teardown (Phase 17)
 
 Phase 17 folds collection into the `api-iss` Cloud Run service (live Lightstreamer
