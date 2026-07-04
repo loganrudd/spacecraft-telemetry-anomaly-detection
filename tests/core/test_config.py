@@ -498,7 +498,8 @@ class TestDriftConfig:
         cfg = DriftConfig()
         assert cfg.enabled is True
         assert cfg.window_size == 256
-        assert cfg.tick_interval == 60
+        assert cfg.tick_interval == 10
+        assert cfg.drift_confirm_windows == 1
         assert cfg.stattest == "wasserstein"
         assert cfg.feature_drift_threshold == pytest.approx(0.10)
         assert cfg.drift_alert_threshold == pytest.approx(0.30)
@@ -510,6 +511,10 @@ class TestDriftConfig:
     def test_tick_interval_must_be_positive(self) -> None:
         with pytest.raises(ValueError, match="must be >= 1"):
             DriftConfig(tick_interval=0)
+
+    def test_drift_confirm_windows_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            DriftConfig(drift_confirm_windows=0)
 
     def test_feature_drift_threshold_bounds(self) -> None:
         with pytest.raises(ValueError, match="must be in"):
@@ -534,7 +539,7 @@ class TestDriftConfig:
         monkeypatch.delenv("SPACECRAFT_DRIFT__ENABLED", raising=False)
         settings = load_settings("local")
         assert settings.drift.enabled is True
-        assert settings.drift.tick_interval == 60
+        assert settings.drift.tick_interval == 10
 
     def test_settings_has_drift_field(self) -> None:
         settings = Settings()
