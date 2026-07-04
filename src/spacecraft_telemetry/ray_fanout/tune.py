@@ -468,23 +468,39 @@ def _resilient_mlflow_callback(**kwargs: Any) -> Any:
     class _ResilientMLflowLoggerCallback(MLflowLoggerCallback):
         # Broad excepts are intentional: MLflow logging is observability only and
         # must never propagate into Ray's trial-lifecycle handling.
+        #
+        # NOTE: Use get_logger(__name__) lazily inside each method rather than
+        # closing over the module-level `log` variable.  When cloudpickle
+        # serialises this locally-defined class it captures globals referenced
+        # by the method bodies; the module-level structlog BoundLogger is not
+        # picklable under pytest (sys.stdout is replaced by the capture
+        # fixture, so PrintLogger.__reduce__ raises PicklingError).  Calling
+        # get_logger() at call-time avoids including a logger instance in the
+        # pickled state — only the importable get_logger function reference is
+        # captured instead.
         def log_trial_start(self, trial: Any) -> None:
             try:
                 super().log_trial_start(trial)
             except Exception as exc:
-                log.warning("tune.mlflow_callback.start_failed", trial=str(trial), error=str(exc))
+                get_logger(__name__).warning(
+                    "tune.mlflow_callback.start_failed", trial=str(trial), error=str(exc)
+                )
 
         def log_trial_result(self, iteration: int, trial: Any, result: dict[str, Any]) -> None:
             try:
                 super().log_trial_result(iteration, trial, result)
             except Exception as exc:
-                log.warning("tune.mlflow_callback.result_failed", trial=str(trial), error=str(exc))
+                get_logger(__name__).warning(
+                    "tune.mlflow_callback.result_failed", trial=str(trial), error=str(exc)
+                )
 
         def log_trial_end(self, trial: Any, failed: bool = False) -> None:
             try:
                 super().log_trial_end(trial, failed=failed)
             except Exception as exc:
-                log.warning("tune.mlflow_callback.end_failed", trial=str(trial), error=str(exc))
+                get_logger(__name__).warning(
+                    "tune.mlflow_callback.end_failed", trial=str(trial), error=str(exc)
+                )
 
     return _ResilientMLflowLoggerCallback(**kwargs)
 
