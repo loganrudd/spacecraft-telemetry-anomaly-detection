@@ -24,6 +24,8 @@ Transforms (all pure pandas, single-channel scope):
     resample_to_grid, compute_los_mask, augment_with_los
 """
 
+from typing import TYPE_CHECKING, Any
+
 from spacecraft_telemetry.preprocess.io import (
     discover_iss_channels,
     read_channel,
@@ -31,7 +33,6 @@ from spacecraft_telemetry.preprocess.io import (
     read_labels,
     write_series,
 )
-from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing, run_preprocessing
 from spacecraft_telemetry.preprocess.transforms import (
     augment_with_los,
     compute_los_mask,
@@ -42,6 +43,28 @@ from spacecraft_telemetry.preprocess.transforms import (
     resample_to_grid,
     temporal_train_test_split,
 )
+
+# `pipeline` imports ray at module top (the @ray.remote fan-out lives there), but
+# ray is deliberately absent from the slim serving image (deploy/api/Dockerfile
+# installs [serving,tracking,gcp,inference], not [ml]). Import it lazily via PEP
+# 562 so pulling in a pure-pandas sibling like `transforms` (e.g. the API's
+# los_stats needs compute_los_mask) does not drag ray into the serving process.
+# The two entrypoints below only run in the full [ml] image (CLI / RayJob).
+if TYPE_CHECKING:
+    from spacecraft_telemetry.preprocess.pipeline import (
+        run_iss_preprocessing,
+        run_preprocessing,
+    )
+
+_LAZY_PIPELINE_EXPORTS = frozenset({"run_preprocessing", "run_iss_preprocessing"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_PIPELINE_EXPORTS:
+        from spacecraft_telemetry.preprocess import pipeline
+
+        return getattr(pipeline, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "augment_with_los",
