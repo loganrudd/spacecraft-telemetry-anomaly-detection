@@ -8,9 +8,13 @@
 #     (same-origin lets us mount the bundle under FastAPI without CORS).
 #
 #   Stage 2 `runtime` — slim Python image with FastAPI + the dashboard.
-#     Installs the serving/tracking/gcp dependency extras only — `[ml]` (torch,
-#     ray, hyperopt) and `[spark]` are not needed at inference time and would
-#     bloat the image by ~2 GB.
+#     Installs the serving/tracking/gcp/inference/collect extras — `[ml]` (ray,
+#     hyperopt) and `[spark]` are not needed at inference time and would bloat
+#     the image by ~2 GB. `[collect]` carries lightstreamer-client-lib, which the
+#     ISS live pump (api-iss) needs to open its Lightstreamer session and archive
+#     ticks; without it the pump logs `pump.lightstreamer_not_installed` and
+#     silently produces no telemetry. ESA `api` ignores it (LIVE=false) but shares
+#     this image, and the lib is small pure-Python — cheap to include everywhere.
 #
 # No data is bundled. Replay Parquet + Evidently reference profiles are
 # fetched from GCS at startup (per cloud.yaml gs:// env overrides).
@@ -63,7 +67,7 @@ COPY src/ ./src/
 RUN pip install "mlflow==3.13.0"
 # Cloud Run is CPU-only. Pin the CPU-only torch wheel to avoid pulling ~2 GB
 # of unused CUDA libraries from the default PyPI index.
-RUN pip install ".[serving,tracking,gcp,inference]" \
+RUN pip install ".[serving,tracking,gcp,inference,collect]" \
     --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Application config + dashboard bundle.
