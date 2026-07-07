@@ -71,7 +71,7 @@ function ChannelDriftRow({ channel }: { channel: string }) {
             : fmtTs(event.timestamp)}
         </span>
       </div>
-      <DriftFeatureBar features={event.features} />
+      <DriftFeatureBar features={event.features} channelDrifted={event.drifted} />
     </div>
   );
 }

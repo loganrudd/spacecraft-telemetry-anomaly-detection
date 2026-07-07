@@ -295,9 +295,14 @@ resource "google_cloud_run_v2_service" "api" {
 
 # ---------------------------------------------------------------------------
 # ISS API service — second mission, shares the api container image.
-# Serves ISS telemanom-ISS-* models; baseline replay is nominal data;
-# anomalies are demonstrated via the on-demand Inject Fault button.
-# Phase 17 will bump iss_min_instances to 1 for the always-on live pump.
+# Live pump subscribes to and archives all 18 ISS PUIs (SPACECRAFT_COLLECT__
+# CHANNEL_SET=all below), but only the 6 curated power+thermal channels
+# (2 subsystems) carry a @champion telemanom-ISS-* model post the July drift
+# review (see .claude/rules/iss.md "Demo tiering") — the solar_array BGA
+# angles and attitude quaternions are demoted (non-stationary / degenerate
+# std) and so are archived but never reach the SSE stream (champion-gated,
+# see api/live/pump.py _served_channels). Anomalies are demonstrated via the
+# on-demand Inject Fault button.
 # ---------------------------------------------------------------------------
 
 resource "google_cloud_run_v2_service" "api_iss" {
@@ -326,8 +331,12 @@ resource "google_cloud_run_v2_service" "api_iss" {
 
       resources {
         limits = {
-          # 6 ISS channels (Phase 16) fit in 1 vCPU / 2 GiB; bump to 2/4
-          # if expanded to the full 18-channel set (same as ESA sizing).
+          # 6 champion models fit comfortably in 1 vCPU / 2 GiB — the pump's
+          # memory footprint scales with the 18 archived/subscribed channels
+          # (unaffected by the champion count), while inference load scales
+          # with the 6 modeled channels. Revisit only if the raw-tick/archive
+          # side (not inference) shows pressure (same measure-first discipline
+          # as ESA sizing in variables.tf).
           cpu    = "1"
           memory = "2Gi"
         }
@@ -368,6 +377,36 @@ resource "google_cloud_run_v2_service" "api_iss" {
       env {
         name  = "SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR"
         value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      # ISS-only real-time drift calibration. The reference profile's rate_of_change
+      # is Δvalue/Δt_seconds; the live monitor only sees per-tick values with no
+      # timestamps, so it must be told the tick's wall-clock interval (ISS's fixed
+      # 30s grid) to reproduce the same units — otherwise rate_of_change is off by
+      # 30x and reads as permanent drift. feature_drift_threshold is raised from the
+      # generic Evidently default (0.10) because ISS's strongly periodic orbital
+      # signal makes short (256-tick) live windows diverge from the multi-day
+      # reference far more than Evidently's default assumes. drift_confirm_windows
+      # requires 3 consecutive alerting runs before flagging, suppressing transient
+      # spikes so nominal windows stop flagging constantly. Both values are a first
+      # pass from a read-only sweep (scratchpad/week_sweep.py: value-drift median
+      # 0.13-0.27 for the first ~3 days with brief spikes to ~1.0; genuine sustained
+      # drift develops day ~5-11, medians 0.5-1.8) against the train-split reference
+      # (see `make seed-reference-profiles ... MISSION=ISS` with --split train) --
+      # worth re-tuning with more banked data.
+      env {
+        name  = "SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS"
+        value = "30"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD"
+        value = "1.0"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__DRIFT_CONFIRM_WINDOWS"
+        value = "3"
       }
 
       env {

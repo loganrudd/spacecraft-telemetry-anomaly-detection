@@ -526,6 +526,10 @@ button {
   border-radius: 1px;
 }
 
+.drift-feature-bar__segment--nominal {
+  background: var(--success);
+}
+
 .drift-feature-bar__segment--drifted {
   background: var(--danger);
 }

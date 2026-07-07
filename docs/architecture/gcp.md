@@ -167,3 +167,24 @@ collects, eliminating any collector/server version skew).
 The `sa-collector` SA and its IAM bindings are preserved as a zero-cost emergency
 backstop. If the pump needs to be bypassed, a GCE instance can be created manually
 and attached to `sa-collector` without any Terraform changes.
+
+## Phase 18: final two-service, two-mission topology
+
+`api` (ESA, scale-to-zero, `min=0/max=3`) and `api-iss` (ISS, always-on, `min=1/max=1`)
+are the final production topology — one shared container image, mission selected purely by
+`SPACECRAFT_API__MISSION` + Terraform env vars, no code fork between them. The dashboard
+mission switcher (`SPACECRAFT_API__AVAILABLE_MISSIONS`) navigates between the two origins;
+each gets a fresh SSE connection on the far side.
+
+`api-iss` stays at 1 vCPU / 2 GiB. The pump subscribes to and archives all 18 ISS PUIs
+regardless (`SPACECRAFT_COLLECT__CHANNEL_SET=all` — unchanged sizing driver), but a July
+drift review (see `.claude/rules/iss.md` "Demo tiering") found the solar_array BGA angles and
+attitude quaternions had drifted non-stationary on the live feed, so only the 6 power +
+thermal channels carry a `@champion` model. Since the serving loader and the SSE stream are
+both champion-gated (`api/app.py` `_resolve_champion_channels`, `api/live/pump.py`
+`_served_channels`), inference load — the thing the original 2/4 sizing contingency was
+worried about — dropped from 18 models to 6, so the 1/2 sizing that already existed for a
+different reason (the original Phase-16 validation set) turned out to still be right, for a
+new reason. The 12 non-champion channels are archived to GCS for completeness (and possible
+future re-modeling behind an angle-rate/unwrap representation) but are invisible to the live
+dashboard entirely, not just unscored.

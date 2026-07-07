@@ -80,7 +80,7 @@ monitoring:
 drift:
   enabled: true
   window_size: 256
-  tick_interval: 60
+  tick_interval: 10  # scipy direct (<1ms) replaced Evidently (58ms) -- see drift.py
   stattest: wasserstein
   feature_drift_threshold: 0.10
   drift_alert_threshold: 0.30

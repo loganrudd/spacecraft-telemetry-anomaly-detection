@@ -18,10 +18,14 @@ GET /api/stream/telemetry
         channels - comma-separated channel IDs (default: all loaded channels).
 
 GET /api/stream/drift
-    SSE drift-monitoring stream.  Requires drift.enabled=true and at least one
-    reference profile loaded.  Emits ``drift`` events at the configured cadence
-    (every N telemetry ticks per channel, after the window is full).
-    503 Service Unavailable → drift disabled or no reference profiles loaded.
+    SSE drift-monitoring stream.  Requires drift.enabled=true, at least one
+    reference profile loaded, and the shared producer running.  Subscribes
+    to ``event: drift`` frames published by the shared producer-side
+    RollingDriftMonitor per channel (see drift_feed.step_drift) at the
+    configured cadence (every N telemetry ticks per channel, after the
+    window is full).
+    503 Service Unavailable → drift disabled, no reference profiles loaded,
+    or no shared producer running.
     400 Bad Request → unknown channel name(s).
 
     Query params (all optional):
@@ -223,16 +227,19 @@ async def stream_drift(
 ) -> StreamingResponse:
     """SSE drift-monitoring stream.
 
-    Creates per-request ``RollingDriftMonitor`` instances from the reference
-    profiles loaded at startup and drives its own replay, so the stream works
-    independently of any telemetry stream clients.
+    A thin subscriber over the shared ``EventBroadcaster``: ``event: drift``
+    frames are published by whichever producer is active (ESA replay loop or
+    ISS live pump), one shared ``RollingDriftMonitor`` per channel feeding
+    every connected viewer -- see ``drift_stream`` in streaming.py.
 
-    Returns 503 when drift monitoring is disabled or no reference profiles were
-    loaded at startup.  Returns 400 for unknown channel names.
+    Returns 503 when drift monitoring is disabled, no reference profiles were
+    loaded at startup, or the shared producer isn't running (drift has no
+    self-contained per-connection fallback, unlike telemetry).  Returns 400
+    for unknown channel names.
     """
     state = _get_ready_state(request)
 
-    if not state.drift_references:
+    if not state.drift_references or state.broadcaster is None:
         raise HTTPException(
             status_code=503,
             detail="drift monitoring disabled or no reference profiles loaded",
@@ -251,10 +258,8 @@ async def stream_drift(
             detail=f"unknown channels: {unknown}",
         )
 
-    effective_speed = params.speed or state.settings.api.replay_speed_default
-
     return StreamingResponse(
-        drift_stream(state, request, selected_channels=selected, speed=effective_speed),
+        drift_stream(state, request, selected_channels=selected),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

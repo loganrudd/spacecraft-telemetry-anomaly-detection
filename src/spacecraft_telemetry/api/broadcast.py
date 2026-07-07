@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from spacecraft_telemetry.api.drift_feed import step_drift
 from spacecraft_telemetry.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -196,7 +197,7 @@ class EventBroadcaster:
         connected dashboard tab must receive regardless of which channels it watches.
 
         Status events are force-pushed: if the subscriber queue is full (e.g.
-        the 100× replay is flooding it), one old telemetry event is discarded to
+        the 100x replay is flooding it), one old telemetry event is discarded to
         make room.  This prevents "resumed" from being silently dropped when the
         queue is saturated by replay traffic, which would leave the dashboard
         stuck in "LOS" state after the signal recovers.
@@ -319,6 +320,10 @@ async def run_shared_loop(state: AppState) -> None:
     Runs forever as an asyncio background task:
       - Resets all channel engines at the start of each pass.
       - Steps every channel engine once per tick, advancing the shared clock.
+      - Feeds each channel's shared drift monitor via ``step_drift`` after
+        publishing its telemetry event, so drift tracks the exact same
+        fault-adjusted values (this is also the LOS-fallback replay path,
+        so drift monitors keep advancing during a live outage).
       - Sleeps ``tick_interval / speed`` between ticks.
       - Loops immediately when the slice is exhausted.
 
@@ -385,6 +390,7 @@ async def run_shared_loop(state: AppState) -> None:
                     .encode()
                 )
                 broadcaster.publish(ch, payload)
+                await step_drift(state, ch, event.value_normalized)
             broadcaster.end_tick()
             await asyncio.sleep(delay)
 

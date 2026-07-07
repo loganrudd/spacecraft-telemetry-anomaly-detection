@@ -73,9 +73,20 @@ class AppState:
     resolved_channels: list[str] = field(default_factory=list)  # all channels attempted
     # Reference profiles for drift monitoring — populated only when
     # drift.enabled is True.  Values are pd.DataFrame (typed Any to avoid
-    # importing pandas from state.py).  Each drift stream request creates its
-    # own per-request RollingDriftMonitor from these immutable profiles.
+    # importing pandas from state.py).  Used at startup to build
+    # ``drift_monitors``; not read directly on the serving hot path.
     drift_references: MappingProxyType[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    # Shared per-channel drift monitors (values: RollingDriftMonitor), built
+    # from drift_references at startup and primed from the replay-slice tail.
+    # Like ``engines``, the mapping itself is fixed at startup but its
+    # *values* are stateful — the active producer (ESA replay loop or ISS
+    # live pump) mutates each monitor in place once per closed tick via
+    # drift_feed.step_drift, and the drift SSE endpoint is a pure subscriber
+    # over the resulting ``event: drift`` broadcaster frames. Empty when
+    # drift.enabled is False or no reference profiles were loaded.
+    drift_monitors: MappingProxyType[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
     # Normalization parameters loaded from normalization_params.json at startup
