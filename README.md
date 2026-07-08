@@ -25,22 +25,19 @@ Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure 
 **30 of 31** labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation)
 for the leakage-free protocol and honest framing).
 
-**ESA live demo (interactive):** https://api-pb5fb25noa-uc.a.run.app  
-*(Cloud Run scales to zero — first load may take ~2.5m if the instance has been idle: image pull + model load fan-out from GCS.)*
-
-**ISS live pump (recorded):** the GIF below is a live capture of real ISS telemetry streaming
-through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
-session) is fully defined in Terraform and deployable on demand, but is kept **torn down
-between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
-for a 24/7 endpoint. ESA stays live because it scales to zero (≈$0 idle).
-
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
 
+**ESA replay (recorded):** 
 <p align="center">
   <img src="docs/assets/dashboard.gif" alt="ESA dashboard: telemetry replay with predicted/labeled anomaly bands and a subsystem overview" width="900">
   <br><em>ESA — interactive replay with real labeled anomalies (live at the URL above)</em>
 </p>
 
+**ISS live pump (recorded, *COMING SOON*):** the GIF below is a live capture of real ISS telemetry streaming
+through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
+session) is fully defined in Terraform and deployable on demand, but is kept **torn down
+between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
+for a 24/7 endpoint. ESA stays live because it scales to zero (≈$0 idle).
 <p align="center">
   <img src="docs/assets/iss-live.gif" alt="ISS live pump: real-time NASA ISSLive telemetry streaming through the inference pump with the LIVE indicator" width="900">
   <br><em>ISS — real-time NASA ISSLive feed through the live Lightstreamer pump (recorded capture)</em>
