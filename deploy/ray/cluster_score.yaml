@@ -10,6 +10,13 @@
 #   NUM_GPUS     GPU fraction per score task (cloud_score.sh defaults to 0.2).
 #   EVAL_SPLIT   Test slice the metrics cover (cloud_score.sh defaults to
 #                final_portion; set full_test for a coverage view).
+#   PROCESSED_DATA_DIR  Base dir for the test split. cloud_score.sh sets the
+#                nominal bucket by default, or the _injected dir when INJECTED=1.
+#   INJECTED_FLAG  "--injected" when INJECTED=1, else empty. Tags the scoring
+#                run data_source=injected so ray_fanout.tune's false-positive
+#                penalty can tell it apart from the nominal baseline run.
+#   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
+#                injected: --channels <list> (the injected dir has no channels.txt).
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_score.yaml | kubectl apply -f -
@@ -40,14 +47,14 @@ spec:
     python -c "import gcsfs; fs=gcsfs.GCSFileSystem(); src=\"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\"; fs.exists(src) or (print(\"ERROR: tuned_configs.json not found at \" + src) or __import__(\"sys\").exit(1)); fs.get(src, \"/tmp/tuned_configs.json\")";
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
-    --eval-split ${EVAL_SPLIT}
+    ${CHANNELS_ARG}
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG}
     --tuned-configs /tmp/tuned_configs.json;
     else
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
-    --eval-split ${EVAL_SPLIT};
+    ${CHANNELS_ARG}
+    --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG};
     fi'
 
   shutdownAfterJobFinishes: true
@@ -73,7 +80,7 @@ spec:
                 - name: SPACECRAFT_MLFLOW__TRACKING_URI
                   value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                  value: gs://${PROJECT_ID}-processed-data
+                  value: ${PROCESSED_DATA_DIR}
                 - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                   value: gs://${PROJECT_ID}-sample-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
@@ -84,6 +91,9 @@ spec:
                 # to set each task's GPU fraction, so the head needs the knob too.
                 - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                   value: "${NUM_GPUS}"
+                # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
+                - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                  value: "${WINDOW_SIZE_OVERRIDE}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
                 - name: TUNED
@@ -148,7 +158,7 @@ spec:
                   - name: SPACECRAFT_MLFLOW__TRACKING_URI
                     value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                    value: gs://${PROJECT_ID}-processed-data
+                    value: ${PROCESSED_DATA_DIR}
                   - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                     value: gs://${PROJECT_ID}-sample-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
@@ -162,6 +172,9 @@ spec:
                   # resolve_device("auto") flips to CUDA once a GPU fraction is set.
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                     value: "${NUM_GPUS}"
+                  # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
+                  - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                    value: "${WINDOW_SIZE_OVERRIDE}"
                   # Reduce CUDA allocator fragmentation under fractional GPU
                   # sharing to prevent OOM error.
                   - name: PYTORCH_CUDA_ALLOC_CONF

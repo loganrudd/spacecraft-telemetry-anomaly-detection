@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchHealth } from "../api/health";
+import MissionSwitcher from "./MissionSwitcher";
+import type { MissionLink } from "../api/types";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
+type LiveStreamStatus = "live" | "los" | "connecting" | "closed";
 
 type Props = {
   connectionState: ConnectionState;
+  liveStatus: LiveStreamStatus;
   eventsPerSecond: number;
   mission: string | null;
   subsystem: string | null;
+  availableMissions: MissionLink[];
   onBackToOverview: () => void;
 };
 
@@ -27,11 +32,19 @@ const STATE_COLORS: Record<ConnectionState, string> = {
 
 export default function StatusBar({
   connectionState,
+  liveStatus,
   eventsPerSecond,
   mission,
   subsystem,
+  availableMissions,
   onBackToOverview,
 }: Props) {
+  // During LOS the SSE transport stays open (replay keeps streaming), so the
+  // connection state alone would still read "Live". Surface the pump's actual
+  // live/LOS status so the header agrees with the LOS banner.
+  const inLos = liveStatus === "los";
+  const connLabel = inLos ? "Signal lost · replay" : STATE_LABELS[connectionState];
+  const connColor = inLos ? "var(--alert)" : STATE_COLORS[connectionState];
   const [uptime, setUptime] = useState<number | null>(null);
   const [apiOnline, setApiOnline] = useState(true);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -71,13 +84,16 @@ export default function StatusBar({
           "Spacecraft Telemetry Dashboard"
         )}
       </span>
-      <span
-        className="status-bar__conn"
-        style={{ color: STATE_COLORS[connectionState] }}
-      >
-        ● {STATE_LABELS[connectionState]}
+      <span className="status-bar__conn" style={{ color: connColor }}>
+        ● {connLabel}
       </span>
       <span className="status-bar__rate">{eventsPerSecond} ev/s</span>
+      {mission && (
+        <MissionSwitcher
+          availableMissions={availableMissions}
+          currentMissionId={mission}
+        />
+      )}
       {apiOnline ? (
         uptime !== null && (
           <span className="status-bar__uptime">

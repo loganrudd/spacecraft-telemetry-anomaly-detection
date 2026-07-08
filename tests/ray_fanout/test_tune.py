@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import typing
 from pathlib import Path
 
 import numpy as np
@@ -87,7 +88,7 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
 
 
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_scoring_trial returns a final metrics dict containing f0_5."""
+    """_scoring_trial returns a final metrics dict containing f0_5 and objective."""
     from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
 
     _ = monkeypatch
@@ -107,12 +108,77 @@ def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
             "threshold_min_anomaly_len": 1,
         },
         channel_data=channel_data,
+        nominal_errors={},
+        fp_penalty_weight=5.0,
     )
 
     assert "f0_5" in result
     assert isinstance(result["f0_5"], float)
     assert "seg_f0_5" in result
     assert isinstance(result["seg_f0_5"], float)
+    # No nominal_errors provided -> zero penalty -> objective == seg_f0_5.
+    assert result["nominal_fp_rate"] == 0.0
+    assert result["objective"] == result["seg_f0_5"]
+
+
+def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config that fires constantly on nominal data is penalized in objective."""
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    _ = monkeypatch
+
+    channel_data = {
+        "channel_1": (
+            np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64),
+            np.array([False, False, True, True], dtype=np.bool_),
+        )
+    }
+    # Monotonically increasing nominal errors -> smoothed value always exceeds
+    # the prior window's (mean + tiny z*std) -> near-1.0 fp_rate with z~0.
+    nominal_errors = {"channel_1": np.linspace(0.0, 5.0, 20, dtype=np.float64)}
+
+    config = {
+        "error_smoothing_window": 5,
+        "threshold_window": 3,
+        "threshold_z": 0.01,
+        "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config, channel_data=channel_data, nominal_errors=nominal_errors, fp_penalty_weight=5.0
+    )
+
+    assert result["nominal_fp_rate"] > 0.0
+    assert result["objective"] < result["seg_f0_5"]
+
+
+def test_resilient_mlflow_callback_swallows_unregistered_trial() -> None:
+    """The resilient callback must not raise when a trial was never registered.
+
+    Reproduces the upstream Ray bug: log_trial_start's start_run() failed (so
+    the trial is absent from _trial_runs), then the trial errors and
+    on_trial_error -> log_trial_end does self._trial_runs[trial] -> KeyError,
+    which killed the whole RayJob. The subclass should log-and-continue instead.
+    """
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_fanout.tune import _resilient_mlflow_callback
+
+    cb = _resilient_mlflow_callback(experiment_name="telemanom-hpo-ISS", tags={})
+    # setup() would connect to MLflow; emulate a post-setup state where a trial
+    # failed at start_run() and so is absent from _trial_runs.
+    cb._trial_runs = {}
+    cb.should_save_artifact = False
+
+    class _FakeTrial:
+        config: typing.ClassVar[dict[str, object]] = {}
+
+        def __str__(self) -> str:
+            return "_scoring_trial_deadbeef"
+
+    # Both the error path (log_trial_end failed=True) and a stray result must
+    # not propagate — upstream these would KeyError.
+    cb.log_trial_end(_FakeTrial(), failed=True)
+    cb.log_trial_result(0, _FakeTrial(), {"training_iteration": 1, "objective": 0.1})
 
 
 def test_run_hpo_sweep_requires_initialized_ray(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,7 +402,9 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     score_channel(settings, mission, channel)
 
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
-    assert set(best.keys()) == {"config", "seg_f0_5", "run_id"}
+    assert set(best.keys()) == {
+        "config", "seg_f0_5", "nominal_fp_rate", "objective", "run_id",
+    }
     config = best["config"]
     assert set(config.keys()) == {
         "error_smoothing_window",

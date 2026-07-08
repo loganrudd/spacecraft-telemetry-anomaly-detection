@@ -4,9 +4,12 @@ import { formatChannel } from "../utils/formatChannel";
 
 type Props = {
   channels: string[];
+  /** When provided, used to label the GT column header and suppress FP markers
+   *  when no injection is active (ISS live mode). */
+  mission?: string | null;
 };
 
-export default function AnomalyAlerts({ channels }: Props) {
+export default function AnomalyAlerts({ channels, mission }: Props) {
   const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
 
   useEffect(() => {
@@ -39,14 +42,18 @@ export default function AnomalyAlerts({ channels }: Props) {
               <th>Time</th>
               <th>Channel</th>
               <th>Score</th>
-              <th>GT</th>
+              <th>{mission?.startsWith("ISS") ? "GT: injection only" : "GT: labeled"}</th>
             </tr>
           </thead>
           <tbody>
             {alerts.map((a) => (
               <tr
                 key={a.id}
-                className={`anomaly-alerts__row${a.ground_truth_match ? " anomaly-alerts__row--tp" : " anomaly-alerts__row--fp"}`}
+                className={`anomaly-alerts__row${
+                  a.gt_available
+                    ? (a.ground_truth_match ? " anomaly-alerts__row--tp" : " anomaly-alerts__row--fp")
+                    : ""
+                }`}
               >
                 <td className="anomaly-alerts__ts">
                   {a.timestamp.replace("T", " ").replace("Z", "")}
@@ -57,7 +64,9 @@ export default function AnomalyAlerts({ channels }: Props) {
                     ? a.smoothed_error.toFixed(3)
                     : "—"}
                 </td>
-                <td>{a.ground_truth_match ? "✓" : "✗"}</td>
+                <td>
+                  {a.gt_available ? (a.ground_truth_match ? "✓" : "✗") : "—"}
+                </td>
               </tr>
             ))}
           </tbody>

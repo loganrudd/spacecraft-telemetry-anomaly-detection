@@ -7,6 +7,15 @@ pipeline.py handles cross-channel parallelism, so no per-channel grouping is nee
 
 Parity between the parallel (Ray) and sequential (pandas) code paths is verified
 by tests/preprocess/test_parity.py.
+
+ISS-specific transforms
+-----------------------
+resample_to_grid    — bin raw irregular ticks onto a regular time grid
+compute_los_mask    — cross-channel Loss-of-Signal detection
+augment_with_los    — merge is_los flag into a resampled channel DataFrame
+
+All three are pure pandas with no ISS-specific imports so the Phase 17 live pump
+can import them from this module without dragging in ingest or collector code.
 """
 
 from __future__ import annotations
@@ -210,5 +219,187 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
         channel_id=channel_id,
         n_labels=len(channel_labels),
         n_anomalous=int(is_anomaly.sum()),
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# ISS-specific transforms
+# ---------------------------------------------------------------------------
+
+
+def resample_to_grid(
+    ticks_df: pd.DataFrame,
+    channel_id: str,
+    mission_id: str,
+    grid_interval_seconds: int = 30,
+) -> pd.DataFrame:
+    """Resample raw irregular ISS ticks to a regular time grid.
+
+    Takes the raw tick DataFrame produced by ``read_iss_ticks`` (which has
+    event-driven, variable-cadence rows) and bins it onto a uniform grid by:
+      1. Setting ``telemetry_timestamp`` as a DatetimeIndex.
+      2. Resampling with mean aggregation per bucket.
+      3. Forward-filling sparse buckets (P4000001 power-voltage has p90=40s
+         between ticks, so occasional 30s buckets receive no ticks and are
+         filled from the previous value).
+
+    The output column contract is identical to ``read_channel()`` for ESA:
+        telemetry_timestamp  datetime64[us, UTC]
+        value                float32
+        channel_id           str
+        mission_id           str
+
+    This means all downstream transforms (handle_nulls, detect_gaps, normalize,
+    label_timesteps, temporal_train_test_split) accept the output unchanged.
+
+    Args:
+        ticks_df:              Raw tick DataFrame with columns
+                               [telemetry_timestamp, value, aos_timestamp].
+        channel_id:            ISS PUI string (e.g. "S1000003").
+        mission_id:            Mission name (always "ISS" in practice).
+        grid_interval_seconds: Grid step in seconds (default 30).
+
+    Returns:
+        DataFrame with columns [telemetry_timestamp, value, channel_id, mission_id].
+    """
+    df = ticks_df[["telemetry_timestamp", "value"]].copy()
+    df = df.set_index("telemetry_timestamp").sort_index()
+    rule = f"{grid_interval_seconds}s"
+    resampled = df["value"].resample(rule).mean().ffill()
+    result = resampled.reset_index()
+    result.columns = pd.Index(["telemetry_timestamp", "value"])
+    result["value"] = result["value"].astype("float32")
+    result["channel_id"] = channel_id
+    result["mission_id"] = mission_id
+
+    log.info(
+        "resample_to_grid",
+        channel_id=channel_id,
+        grid_interval_s=grid_interval_seconds,
+        raw_rows=len(ticks_df),
+        grid_rows=len(result),
+    )
+    return result[["telemetry_timestamp", "value", "channel_id", "mission_id"]]
+
+
+def compute_los_mask(
+    all_ticks_df: pd.DataFrame,
+    grid_interval_seconds: int = 30,
+    expand: bool = True,
+) -> pd.Series:
+    """Derive a boolean Loss-of-Signal mask from a cross-channel tick archive.
+
+    A 30-second grid bucket is marked as LOS when NO telemetry channel has any
+    tick in that bucket.  When ``expand`` is True (default), the mask is then
+    expanded by one bucket on each side to account for TDRS handover smear (a
+    real LOS onset/recovery may straddle a bucket boundary).  The Phase 13
+    ``is_los`` column always wants the expanded mask (it feeds gap exclusion
+    in injection/HPO).  Callers measuring LOS *duration* (e.g.
+    ``api/live/los_stats.py``) should pass ``expand=False`` — expansion adds a
+    fixed +2*grid_interval_seconds to every measured run, biasing duration
+    statistics high.
+
+    The caller is responsible for excluding context items (TIME_000001,
+    USLAB000086) from ``all_ticks_df`` — they are not telemetry and their
+    absence would incorrectly suppress LOS detection.
+
+    TIME_000001 is intentionally excluded as a sole LOS criterion because a
+    1-hour dry-run showed it can stall ~5 min while all other channels keep
+    updating (feed-side clock pause, not signal loss).
+
+    Args:
+        all_ticks_df:          DataFrame with columns
+                               [telemetry_timestamp, channel_id] covering
+                               ALL subscribed telemetry channels.
+        grid_interval_seconds: Grid step in seconds (must match resample_to_grid).
+        expand:                Expand the mask by one bucket on each side for
+                               TDRS handover smear. Default True.
+
+    Returns:
+        pd.Series of dtype bool, indexed by a DatetimeIndex of all 30-second
+        grid buckets spanning the archive's time range.  True = LOS.
+    """
+    if all_ticks_df.empty:
+        return pd.Series(dtype=bool, name="is_los")
+
+    ts = all_ticks_df["telemetry_timestamp"]
+    freq = f"{grid_interval_seconds}s"
+
+    grid_start = ts.min().floor(freq)
+    # floor(max_ts) gives the start of the last bucket that actually contains data.
+    # ceil would add an empty terminal bucket that is always marked as LOS.
+    grid_end = ts.max().floor(freq)
+    grid_index = pd.date_range(start=grid_start, end=grid_end, freq=freq, tz="UTC")
+
+    # Floor each tick timestamp to its bucket.
+    bucket_ts = ts.dt.floor(freq)
+    occupied = set(bucket_ts)
+
+    los_raw = pd.Series(
+        [t not in occupied for t in grid_index],
+        index=grid_index,
+        dtype=bool,
+        name="is_los",
+    )
+
+    if expand:
+        # Expand by one bucket on each side (TDRS handover smear).
+        los_result = (
+            los_raw
+            | los_raw.shift(1, fill_value=False)
+            | los_raw.shift(-1, fill_value=False)
+        )
+        los_result.name = "is_los"
+    else:
+        los_result = los_raw
+
+    n_los = int(los_result.sum())
+    log.info(
+        "compute_los_mask",
+        grid_interval_s=grid_interval_seconds,
+        expand=expand,
+        total_buckets=len(grid_index),
+        los_buckets=n_los,
+    )
+    return los_result
+
+
+def augment_with_los(
+    resampled_df: pd.DataFrame,
+    los_mask: pd.Series,
+) -> pd.DataFrame:
+    """Add an ``is_los`` boolean column to a resampled channel DataFrame.
+
+    Joins the pre-computed LOS mask onto the resampled data by timestamp.
+    Buckets that appear in the resampled DataFrame but not in the mask
+    (e.g. because the mask was computed from a different time range) default
+    to False — they are treated as nominal.
+
+    Args:
+        resampled_df: Output of ``resample_to_grid`` with column
+                      ``telemetry_timestamp``.
+        los_mask:     Boolean Series indexed by grid timestamps (output of
+                      ``compute_los_mask``).
+
+    Returns:
+        resampled_df with an additional ``is_los`` (bool) column.
+    """
+    df = resampled_df.copy()
+    los_df = los_mask.rename("is_los").reset_index()
+    los_df.columns = pd.Index(["telemetry_timestamp", "is_los"])
+    # Cast to match resampled_df dtype to avoid merge failures when the mask
+    # index has ns precision (pd.DatetimeIndex default) and the resampled
+    # DataFrame has us precision (from resample_to_grid).
+    los_df["telemetry_timestamp"] = los_df["telemetry_timestamp"].astype(
+        df["telemetry_timestamp"].dtype
+    )
+    df = df.merge(los_df, on="telemetry_timestamp", how="left")
+    df["is_los"] = df["is_los"].where(df["is_los"].notna(), other=False).astype(bool)
+
+    log.info(
+        "augment_with_los",
+        rows=len(df),
+        los_rows=int(df["is_los"].sum()),
     )
     return df

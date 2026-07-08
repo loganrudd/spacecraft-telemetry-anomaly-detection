@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-from mlflow.tracking.client import MlflowClient
 
 from spacecraft_telemetry.core.config import LoggingConfig, Settings, load_settings
 from spacecraft_telemetry.core.logging import get_logger, setup_logging
@@ -263,9 +262,15 @@ def preprocess() -> None:
     help="Optional subsystem name to preprocess only those channels (e.g. subsystem_6).",
 )
 @click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated list of channels to preprocess (e.g. S1000003,P1000003). "
+    "Overrides --subsystem; --channel overrides this.",
+)
+@click.option(
     "--channel",
     default=None,
-    help="Optional single channel to preprocess (overrides --subsystem).",
+    help="Optional single channel to preprocess (overrides --channels and --subsystem).",
 )
 @click.option(
     "--no-parallel",
@@ -279,6 +284,7 @@ def preprocess_run(
     mission: str,
     train_fraction: float | None,
     subsystem: str | None,
+    channels: str | None,
     channel: str | None,
     no_parallel: bool,
 ) -> None:
@@ -295,6 +301,14 @@ def preprocess_run(
 
         # Only preprocess channels belonging to subsystem_6
         spacecraft-telemetry preprocess run --mission ESA-Mission1 --subsystem subsystem_6
+
+        # ISS with no --channels defaults to the curated model set (thermal + PV
+        # voltage — see ingest.iss_channels.VALIDATION_CHANNELS)
+        spacecraft-telemetry preprocess run --mission ISS
+
+        # Override to (re)train a different / fuller ISS channel set
+        spacecraft-telemetry preprocess run --mission ISS \
+            --channels S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
 
         # Only preprocess a single channel, no Ray
         spacecraft-telemetry preprocess run --mission ESA-Mission1 \
@@ -316,15 +330,27 @@ def preprocess_run(
             update={"preprocess": settings.preprocess.model_copy(update=overrides)}
         )
 
-    # Resolve channel filter: explicit channel > subsystem > all.
-    channels: list[str] | None = None
+    # Resolve channel filter: --channel > --channels > --subsystem > all.
+    channel_list: list[str] | None = None
     if channel is not None:
-        channels = [channel]
+        channel_list = [channel]
+    elif channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif subsystem is not None:
         data_dir = Path(str(settings.data.sample_data_dir))
         channel_dir = data_dir / mission / "channels"
         all_channels = sorted(p.stem for p in channel_dir.glob("*.parquet"))
-        channels = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+        channel_list = _filter_channels_by_subsystem(settings, mission, all_channels, subsystem)
+
+    # ISS: with no explicit filter, default to the curated stationary model set
+    # (thermal + PV voltage) rather than every archived PUI. The non-stationary
+    # BGA angles and attitude quaternions are still collected and displayed, just
+    # not modeled by default (see ingest.iss_channels.VALIDATION_CHANNELS and
+    # iss.md "Demo tiering"). Pass --channels to override, e.g. the full 18-map.
+    if mission == "ISS" and channel_list is None:
+        from spacecraft_telemetry.ingest.iss_channels import VALIDATION_CHANNELS
+
+        channel_list = list(VALIDATION_CHANNELS)
 
     log.info(
         "preprocess.run.start",
@@ -332,19 +358,27 @@ def preprocess_run(
         train_fraction=settings.preprocess.train_fraction,
         channel=channel,
         subsystem=subsystem,
-        channels=channels,
+        channels=channel_list,
         parallel=not no_parallel,
     )
 
     parallel = not no_parallel
-    if parallel:
+    if mission == "ISS":
+        from spacecraft_telemetry.preprocess.pipeline import run_iss_preprocessing
+
+        if parallel:
+            with _ray_session(settings):
+                summary = run_iss_preprocessing(settings, channels=channel_list, parallel=True)
+        else:
+            summary = run_iss_preprocessing(settings, channels=channel_list, parallel=False)
+    elif parallel:
         with _ray_session(settings):
             summary = run_preprocessing(
-                settings, mission, channels=channels, parallel=True
+                settings, mission, channels=channel_list, parallel=True
             )
     else:
         summary = run_preprocessing(
-            settings, mission, channels=channels, parallel=False
+            settings, mission, channels=channel_list, parallel=False
         )
 
     click.echo(f"Mission           : {mission}")
@@ -817,6 +851,23 @@ def ray_train(
     "last 40% (leakage-free baseline-vs-tuned comparison); full_test = every "
     "window (coverage view, scores channels whose anomalies fall outside the held-out slice).",
 )
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir for this run. "
+    "Use with --mission ISS to point at an injected dataset (Phase 15).",
+)
+@click.option(
+    "--injected",
+    is_flag=True,
+    default=False,
+    help="Tag this run's data_source as 'injected' (Phase 15 manufactured-label "
+    "dataset) instead of 'nominal'. Pass alongside --processed-dir pointing at "
+    "the injected dataset. ray_fanout.tune uses this tag to find a channel's "
+    "nominal baseline run for the HPO false-positive-rate penalty — omit this "
+    "flag for the baseline/nominal scoring pass.",
+)
 @click.pass_context
 def ray_score(
     ctx: click.Context,
@@ -827,6 +878,8 @@ def ray_score(
     max_channels: int | None,
     tuned_configs: Path | None,
     eval_split: str,
+    processed_dir: str | None,
+    injected: bool,
 ) -> None:
     """Score channels in parallel using Ray Core.
 
@@ -842,6 +895,14 @@ def ray_score(
         # With Phase 5 HPO-tuned params
         spacecraft-telemetry ray score --mission ESA-Mission1 \\
             --tuned-configs outputs/tuned_configs.json
+
+        # ISS injection-driven HPO (Phase 15): score the manufactured-label
+        # dataset and tag the run so `ray tune` can find it for recall, and
+        # tag a separate nominal baseline run so `ray tune` can find it for
+        # the false-positive-rate penalty.
+        spacecraft-telemetry ray score --mission ISS \\
+            --processed-dir data/processed_injected --injected
+        spacecraft-telemetry ray score --mission ISS
     """
     import json
 
@@ -849,6 +910,14 @@ def ray_score(
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("ray.score.processed_dir_override", path=processed_dir)
 
     tuned: dict[str, Any] | None = None
     if tuned_configs is not None:
@@ -875,6 +944,7 @@ def ray_score(
             max_channels=max_channels,
             tuned_configs=tuned,
             eval_split=eval_split,
+            data_source="injected" if injected else "nominal",
         )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
@@ -938,6 +1008,13 @@ def ray_score(
     default=False,
     help="Overwrite existing tuned_configs.json when it contains invalid JSON.",
 )
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir for this run. "
+    "Use with --mission ISS to point at an injected dataset (Phase 15).",
+)
 @click.pass_context
 def ray_tune(
     ctx: click.Context,
@@ -947,6 +1024,7 @@ def ray_tune(
     subsystem: str | None,
     num_samples: int | None,
     overwrite_existing: bool,
+    processed_dir: str | None,
 ) -> None:
     """Run Ray Tune HPO for scoring parameters (Phase 5).
 
@@ -976,6 +1054,14 @@ def ray_tune(
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("ray.tune.processed_dir_override", path=processed_dir)
 
     # Install ID-token auth before any MLflow call reaches Cloud Run.
     # train/score go through _ensure_mlflow_experiments → configure_mlflow;
@@ -1104,7 +1190,10 @@ def mlflow_group() -> None:
     "model_version",
     type=int,
     default=None,
-    help="Model version number. Defaults to latest version. Ignored with --channels/--channels-from.",
+    help=(
+        "Model version number. Defaults to latest version. "
+        "Ignored with --channels/--channels-from."
+    ),
 )
 @click.pass_context
 def mlflow_promote(
@@ -1138,8 +1227,6 @@ def mlflow_promote(
         spacecraft-telemetry --env cloud mlflow promote \\
             --mission ESA-Mission2 --subsystem subsystem_1
     """
-    import mlflow
-
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 
@@ -1158,8 +1245,22 @@ def mlflow_promote(
         channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
+    elif mission == "ISS" and name is None and subsystem is None:
+        # ISS with no explicit filter → the curated stationary model set, matching
+        # preprocess/train/score (see cli preprocess + ingest.iss_channels).
+        # Without this, discovery would promote every archived PUI including the
+        # non-stationary BGA angles and attitude quaternions that are collected
+        # and displayed but intentionally NOT modeled (iss.md "Demo tiering").
+        # Pass --channels to override (e.g. the full 18-map after re-representing
+        # the angle channels).
+        from spacecraft_telemetry.ingest.iss_channels import VALIDATION_CHANNELS
+
+        channel_list = list(VALIDATION_CHANNELS)
     elif mission is not None and name is None:
         # Discover all registered models for this mission directly from the registry.
+        # Imported lazily so the slim collector image (no mlflow) can run `collect`.
+        from mlflow.tracking.client import MlflowClient
+
         prefix = f"telemanom-{mission}-"
         client = MlflowClient()
         all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
@@ -1173,11 +1274,17 @@ def mlflow_promote(
 
     if channel_list is not None:
         if mission is None:
-            raise click.ClickException("--mission is required when using --channels or --channels-from.")
+            raise click.ClickException(
+                "--mission is required when using --channels or --channels-from."
+            )
         if name is not None:
-            raise click.ClickException("--name is mutually exclusive with --channels/--channels-from.")
+            raise click.ClickException(
+                "--name is mutually exclusive with --channels/--channels-from."
+            )
         if subsystem is not None:
-            channel_list = _filter_channels_by_subsystem(settings, mission, channel_list, subsystem)
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
 
         ok, failed = 0, []
         for channel in channel_list:
@@ -1215,6 +1322,132 @@ def mlflow_promote(
     click.echo(f"Model         : {name}")
     click.echo(f"Version       : {resolved_version}")
     click.echo(f"Alias         : @{CHAMPION_ALIAS}")
+    click.echo(f"Tracking URI  : {tracking_uri}")
+
+
+@mlflow_group.command("demote")
+@click.option(
+    "--name",
+    default=None,
+    help="Registered model name (e.g. telemanom-ISS-P4000007). "
+         "Mutually exclusive with --mission/--channels/--channels-from.",
+)
+@click.option(
+    "--mission",
+    default=None,
+    help="Mission name. Alone → removes @champion from EVERY registered model "
+         "for the mission (a full reset). Required with --channels/--channels-from/"
+         "--subsystem.",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs to demote. Requires --mission.",
+)
+@click.option(
+    "--channels-from",
+    default=None,
+    help="Path to channels.txt (local or gs://). Requires --mission.",
+)
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Filter to channels belonging to this subsystem. Requires --mission.",
+)
+@click.pass_context
+def mlflow_demote(
+    ctx: click.Context,
+    name: str | None,
+    mission: str | None,
+    channels: str | None,
+    channels_from: str | None,
+    subsystem: str | None,
+) -> None:
+    """Remove the @champion alias, taking a model out of service (inverse of promote).
+
+    The serving layer discovers servable channels by scanning for @champion, so
+    demoting a channel stops it being loaded and served — without deleting the
+    model version. Demoting a channel that isn't a champion is a harmless no-op.
+
+    Reset a mission's champions, then re-promote only the good set:
+
+        spacecraft-telemetry --env cloud mlflow demote --mission ISS
+        spacecraft-telemetry --env cloud mlflow promote --mission ISS   # curated set
+
+    Demote specific channels or a subsystem:
+
+        spacecraft-telemetry --env cloud mlflow demote --mission ISS --subsystem attitude
+        spacecraft-telemetry --env cloud mlflow demote --name telemanom-ISS-P4000007
+    """
+    from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, demote
+    from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
+
+    settings: Settings = ctx.obj["settings"]
+    configure_mlflow(settings)  # installs GCP ID-token auth before any registry call
+    tracking_uri = settings.mlflow.tracking_uri
+
+    if channels is not None and channels_from is not None:
+        raise click.ClickException("--channels and --channels-from are mutually exclusive.")
+
+    channel_list: list[str] | None = None
+    if channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+    elif channels_from is not None:
+        channel_list = _read_channels_from_file(channels_from)
+    elif mission is not None and name is None:
+        # No explicit filter → discover EVERY registered model for the mission and
+        # clear its alias (the full-reset inverse of `promote --mission`). Unlike
+        # promote, no curated default: "demote the good set" is never the intent.
+        from mlflow.tracking.client import MlflowClient
+
+        prefix = f"telemanom-{mission}-"
+        client = MlflowClient()
+        all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
+        channel_list = sorted({v.name[len(prefix):] for v in all_versions})
+        if not channel_list:
+            raise click.ClickException(
+                f"No registered models found matching '{prefix}*'."
+            )
+
+    if channel_list is not None:
+        if mission is None:
+            raise click.ClickException(
+                "--mission is required when using --channels/--channels-from."
+            )
+        if name is not None:
+            raise click.ClickException(
+                "--name is mutually exclusive with --channels/--channels-from."
+            )
+        if subsystem is not None:
+            channel_list = _filter_channels_by_subsystem(
+                settings, mission, channel_list, subsystem
+            )
+
+        removed, absent = 0, 0
+        for channel in channel_list:
+            if demote(name=f"telemanom-{mission}-{channel}"):
+                removed += 1
+            else:
+                absent += 1
+
+        click.echo(f"Mission       : {mission}")
+        if subsystem:
+            click.echo(f"Subsystem     : {subsystem}")
+        click.echo(f"Demoted       : {removed}/{len(channel_list)} "
+                   f"({absent} were not champions)")
+        click.echo(f"Alias removed : @{CHAMPION_ALIAS}")
+        click.echo(f"Tracking URI  : {tracking_uri}")
+        return
+
+    if name is None:
+        raise click.ClickException(
+            "Provide --name, --mission, or --mission with --channels/--channels-from."
+        )
+
+    was_champion = demote(name=name)
+    click.echo(f"Model         : {name}")
+    click.echo(f"Alias removed : @{CHAMPION_ALIAS} "
+               f"({'removed' if was_champion else 'was not set'})")
     click.echo(f"Tracking URI  : {tracking_uri}")
 
 
@@ -1472,6 +1705,121 @@ main.add_command(drift_group, name="drift")
 
 
 # ---------------------------------------------------------------------------
+# inject group (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+@click.group("inject")
+def inject_group() -> None:
+    """Anomaly injection commands for ISS (Phase 15)."""
+
+
+@inject_group.command("run")
+@click.option(
+    "--mission",
+    default="ISS",
+    show_default=True,
+    help="Mission ID to inject into (reads from settings.preprocess.processed_data_dir).",
+)
+@click.option(
+    "--channels",
+    default=None,
+    help="Comma-separated channel IDs. Defaults to all channels discovered in the test split.",
+)
+@click.option(
+    "--processed-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.preprocess.processed_data_dir (source of nominal test split).",
+)
+@click.option(
+    "--output-dir",
+    default=None,
+    metavar="PATH",
+    help="Override settings.injection.output_dir (destination for injected data).",
+)
+@click.pass_context
+def inject_run(
+    ctx: click.Context,
+    mission: str,
+    channels: str | None,
+    processed_dir: str | None,
+    output_dir: str | None,
+) -> None:
+    """Inject synthetic faults into the nominal ISS test split.
+
+    Reads the nominal test split from processed_data_dir, injects faults
+    per-channel using ESA-grounded profiles from injection_profiles.json,
+    and writes an injected copy to injection.output_dir.
+
+    Also copies channel_subsystems.json so downstream `ray score` and
+    `ray tune` commands can group by subsystem without the original dir.
+
+    The run order for ISS HPO:
+
+        spacecraft-telemetry inject run --mission ISS
+        spacecraft-telemetry ray score --mission ISS --processed-dir data/processed_injected
+        spacecraft-telemetry ray tune  --mission ISS --processed-dir data/processed_injected
+
+    Examples:
+
+        # Inject all ISS channels with defaults
+        spacecraft-telemetry inject run --mission ISS
+
+        # Two channels only, custom dirs
+        spacecraft-telemetry inject run --mission ISS \\
+            --channels S1000003,P1000003 \\
+            --processed-dir data/processed \\
+            --output-dir data/processed_injected
+    """
+    from spacecraft_telemetry.injection import generate_injected_dataset
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    if processed_dir is not None:
+        settings = settings.model_copy(
+            update={"preprocess": settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            )}
+        )
+        log.info("inject.processed_dir_override", path=processed_dir)
+
+    if output_dir is not None:
+        settings = settings.model_copy(
+            update={"injection": settings.injection.model_copy(
+                update={"output_dir": output_dir}
+            )}
+        )
+        log.info("inject.output_dir_override", path=output_dir)
+
+    channel_list: list[str] | None = None
+    if channels is not None:
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+
+    log.info(
+        "inject.run.start",
+        mission=mission,
+        channels=channel_list,
+        source=settings.preprocess.processed_data_dir,
+        dest=settings.injection.output_dir,
+    )
+
+    manifest = generate_injected_dataset(settings, mission, channel_list)
+
+    n_channels = len(manifest)
+    n_faults = sum(len(v) for v in manifest.values())
+    click.echo(f"Mission    : {mission}")
+    click.echo(f"Channels   : {n_channels}")
+    click.echo(f"Faults     : {n_faults} total ({n_faults // max(n_channels, 1)} avg/channel)")
+    click.echo(f"Output dir : {settings.injection.output_dir}")
+    click.echo(f"Manifest   : {settings.injection.output_dir}/{mission}/injection_manifest.json")
+
+
+main.add_command(inject_group, name="inject")
+
+
+# ---------------------------------------------------------------------------
 # api group (Phase 8)
 # ---------------------------------------------------------------------------
 
@@ -1495,7 +1843,24 @@ def api_group() -> None:
     default=None,
     help="Comma-separated channel IDs to load (overrides subsystem).",
 )
+@click.option(
+    "--replay-data-dir",
+    default=None,
+    help=(
+        "Directory for replay Parquet (overrides preprocess.processed_data_dir). "
+        "Useful for pointing the ISS service at the fault-injected dataset."
+    ),
+)
 @click.option("--reload", is_flag=True, default=False, help="Enable uvicorn auto-reload.")
+@click.option(
+    "--live",
+    is_flag=True,
+    default=False,
+    help=(
+        "Live pump mode: subscribe Lightstreamer and feed the broadcaster directly "
+        "instead of replaying pre-collected Parquet (ISS only)."
+    ),
+)
 @click.pass_context
 def api_serve(
     ctx: click.Context,
@@ -1504,7 +1869,9 @@ def api_serve(
     mission: str | None,
     subsystem: str | None,
     channels: str | None,
+    replay_data_dir: str | None,
     reload: bool,
+    live: bool,
 ) -> None:
     """Start the FastAPI serving layer (SSE stream + /health)."""
     import uvicorn
@@ -1523,6 +1890,10 @@ def api_serve(
         api_overrides["subsystem"] = subsystem
     if channels is not None:
         api_overrides["channels"] = [c.strip() for c in channels.split(",") if c.strip()]
+    if replay_data_dir is not None:
+        api_overrides["replay_data_dir"] = replay_data_dir
+    if live:
+        api_overrides["live"] = True
 
     if api_overrides:
         settings = settings.model_copy(
@@ -1539,3 +1910,72 @@ def api_serve(
 
 
 main.add_command(api_group, name="api")
+
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option(
+    "--channel-set",
+    type=click.Choice(["validation", "all"]),
+    default=None,
+    help=(
+        "Channel set to subscribe: 'validation' (6 channels) or 'all' (18 channels). "
+        "Defaults to the value from config (collect.channel_set)."
+    ),
+)
+@click.option(
+    "--duration",
+    type=float,
+    default=None,
+    help=(
+        "Run for this many seconds then exit (for dry-runs). "
+        "Omit to run until interrupted."
+    ),
+)
+@click.pass_context
+def collect(
+    ctx: click.Context,
+    channel_set: str | None,
+    duration: float | None,
+) -> None:
+    """Collect ISS Live telemetry from the Lightstreamer feed.
+
+    Subscribes to ISSLive PUIs and context items, buffers ticks in memory,
+    and flushes raw Parquet shards to collect.raw_ticks_dir every
+    collect.flush_interval_seconds seconds.
+
+    Runs indefinitely until Ctrl-C or SIGTERM. Use --duration for a bounded
+    dry-run.
+
+    Examples:
+
+        # 1-hour dry-run on the 6-channel validation set
+        spacecraft-telemetry collect --duration 3600
+
+        # Production run on all 18 channels
+        spacecraft-telemetry collect --channel-set all
+    """
+    from spacecraft_telemetry.ingest.collector import LightstreamerCollector
+
+    settings = ctx.obj["settings"]
+    log = get_logger(__name__)
+
+    cfg = settings.collect
+    if channel_set is not None:
+        cfg = cfg.model_copy(update={"channel_set": channel_set})
+
+    dest_dir = cfg.raw_ticks_dir
+
+    log.info(
+        "collect.starting",
+        channel_set=cfg.channel_set,
+        dest_dir=str(dest_dir),
+        duration=duration,
+    )
+
+    collector = LightstreamerCollector(cfg, dest_dir=dest_dir)
+    collector.run(seconds=duration)

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { TelemetryEvent } from "../api/types";
+import type { RawTelemetryEvent, TelemetryEvent } from "../api/types";
 
 const BUFFER_SIZE = 600;
 
@@ -22,6 +22,9 @@ export type StoredAlert = {
   smoothed_error: number | null;
   threshold: number | null;
   ground_truth_match: boolean;
+  // False for ISS live events where is_anomaly=false (no injection active — GT
+  // unknown). True for ESA (all events are labeled) and ISS during injection.
+  gt_available: boolean;
 };
 // Stable empty reference — useSyncExternalStore requires getSnapshot to return
 // the same reference when nothing has changed. A `?? []` literal creates a new
@@ -82,10 +85,17 @@ export class TelemetryStore {
   // event has scrolled off the chart window.
   recentAlerts: StoredAlert[] = [];
   private prevPredicted: Record<string, boolean> = {};
-  // Last event timestamp (epoch-ms) per channel. Timestamps within a replay
-  // pass are strictly ascending, so a backwards jump means the server's shared
-  // loop wrapped back to the start of the slice.
+  // Last *telemetry*-event timestamp (epoch-ms) per channel. Telemetry events
+  // are strictly ascending within a pass (replay ticks, or 30s grid buckets in
+  // live mode), so a backwards jump means the shared replay loop wrapped back to
+  // the slice start and the store should clear. Tracked SEPARATELY from raw
+  // ticks (lastRawTsMs): in live mode the two streams use different time bases —
+  // raw = wall-clock now, telemetry = bucket-start (~30s behind) — so a shared
+  // guard would false-fire a "wrap" on every bucket close and blank the chart.
   private lastTsMs: Record<string, number> = {};
+  // Last *raw*-event timestamp (epoch-ms) per channel. Independent monotonicity
+  // guard for the event: raw stream (live pump only). See lastTsMs note above.
+  private lastRawTsMs: Record<string, number> = {};
 
   push(event: TelemetryEvent): void {
     // Detect the shared replay loop wrapping. The SSE connection stays open
@@ -117,6 +127,10 @@ export class TelemetryStore {
     // Rising-edge detection: false → true transition triggers a stored alert.
     const prevPred = this.prevPredicted[event.channel] ?? false;
     if (!prevPred && event.is_anomaly_predicted) {
+      // GT is available for ESA (always labeled) and for ISS during injection
+      // (is_anomaly=true). For ISS without injection is_anomaly=false means
+      // "label unknown" — not a confirmed FP — so gt_available=false.
+      const gt_available = event.is_anomaly || !event.mission.startsWith("ISS");
       const alert: StoredAlert = {
         id: ++_alertId,
         capturedAtCount: count,
@@ -125,13 +139,65 @@ export class TelemetryStore {
         smoothed_error: event.smoothed_error,
         threshold: event.threshold,
         ground_truth_match: event.is_anomaly,
+        gt_available,
       };
       this.recentAlerts = [alert, ...this.recentAlerts].slice(0, MAX_ALERTS);
     }
     this.prevPredicted[event.channel] = event.is_anomaly_predicted;
     this.lastTsMs[event.channel] = tsMs;
     this.dirty.add(event.channel);
+    this._scheduleFlush();
+  }
 
+  /**
+   * Push a raw tick from the live pump (event: raw) into the ring buffer.
+   *
+   * Raw events carry only value_normalized — no prediction or anomaly fields.
+   * They drive the continuous chart line at native Lightstreamer cadence (1-10s)
+   * while the slower TelemetryEvents (event: telemetry, 30s) carry predictions.
+   * Anomaly / alert state is NOT updated here.
+   */
+  pushRaw(event: RawTelemetryEvent): void {
+    const tsMs = Date.parse(event.timestamp);
+    // Guard the raw stream against its own wrap only (raw-to-raw). Must NOT
+    // compare against lastTsMs (telemetry): the live telemetry event for a
+    // closed 30s bucket is labeled with the bucket start, ~30s behind these
+    // wall-clock raw ticks, so a shared guard would clear the whole store on
+    // every bucket close — the "Waiting for data…" flapping.
+    const prevTsMs = this.lastRawTsMs[event.channel];
+    if (prevTsMs !== undefined && tsMs < prevTsMs) {
+      this.clear();
+    }
+    // Construct a synthetic TelemetryEvent with null prediction/anomaly fields
+    // so the existing chart pipeline can render the value_normalized point.
+    const synthetic: TelemetryEvent = {
+      timestamp: event.timestamp,
+      mission: "",
+      channel: event.channel,
+      value_normalized: event.value_normalized,
+      prediction: null,
+      residual: null,
+      smoothed_error: null,
+      threshold: null,
+      is_anomaly_predicted: false,
+      is_anomaly: false,
+    };
+    let ring = this.buffers.get(synthetic.channel);
+    if (!ring) {
+      ring = { items: new Array<TelemetryEvent>(BUFFER_SIZE), head: 0, size: 0 };
+      this.buffers.set(synthetic.channel, ring);
+    }
+    ringPush(ring, synthetic);
+    const nowMs = Date.now();
+    this.lastTickAtMs[synthetic.channel] = nowMs;
+    const count = (this._pushCount[synthetic.channel] ?? 0) + 1;
+    this._pushCount[synthetic.channel] = count;
+    this.lastRawTsMs[synthetic.channel] = tsMs;
+    this.dirty.add(synthetic.channel);
+    this._scheduleFlush();
+  }
+
+  private _scheduleFlush(): void {
     if (!this.rafScheduled) {
       this.rafScheduled = true;
       requestAnimationFrame(() => {
@@ -169,6 +235,7 @@ export class TelemetryStore {
     this.recentAlerts = [];
     this.prevPredicted = {};
     this.lastTsMs = {};
+    this.lastRawTsMs = {};
     this.notify();
   }
 

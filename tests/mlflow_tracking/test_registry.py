@@ -55,8 +55,10 @@ class TestRegisterPytorchModel:
         source_run_model_name = "channel_1"
         fake_run_id = "abc123"
 
-        with patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model") as mock_log, \
-             patch(_REGISTRY_CLIENT) as mock_client_cls:
+        with (
+            patch("spacecraft_telemetry.mlflow_tracking.registry.log_pytorch_model") as mock_log,
+            patch(_REGISTRY_CLIENT) as mock_client_cls,
+        ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
             mock_client.search_model_versions.return_value = [MagicMock()]
@@ -162,3 +164,34 @@ class TestPromote:
     def test_raises_when_no_versions(self, mlflow_uri: str) -> None:
         with pytest.raises(ValueError, match="No versions found"):
             promote(name="telemanom-ESA-Mission1-nonexistent")
+
+
+class TestDemote:
+    def test_removes_champion_alias(self, mlflow_uri: str) -> None:
+        from spacecraft_telemetry.mlflow_tracking.registry import demote
+
+        name = "telemanom-ISS-P4000007"
+        with open_run(experiment="exp", run_name="ch", tags={}) as run:
+            assert run is not None
+            _create_version(name, run.info.run_id)
+        promote(name=name)
+        client = mlflow.MlflowClient()
+        assert client.get_model_version_by_alias(name, CHAMPION_ALIAS) is not None
+
+        assert demote(name=name) is True
+
+        # Alias is gone → resolving it now raises.
+        with pytest.raises(Exception):  # noqa: B017  (MlflowException on missing alias)
+            client.get_model_version_by_alias(name, CHAMPION_ALIAS)
+
+    def test_noop_when_not_champion(self, mlflow_uri: str) -> None:
+        """Demoting a version that was never promoted is a harmless no-op."""
+        from spacecraft_telemetry.mlflow_tracking.registry import demote
+
+        name = "telemanom-ISS-S6000008"
+        with open_run(experiment="exp", run_name="ch", tags={}) as run:
+            assert run is not None
+            _create_version(name, run.info.run_id)
+
+        # Registered, but never promoted → no alias to remove.
+        assert demote(name=name) is False

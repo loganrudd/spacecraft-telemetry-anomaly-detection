@@ -92,7 +92,7 @@ class TestPartitionHash:
     def test_train_and_test_splits_produce_different_hashes(self, tmp_path: Path) -> None:
         # Same channel name but different split content → different hashes.
         train_part = _make_partition(tmp_path, _MISSION, _CHANNEL, split="train")
-        test_part = _make_partition(tmp_path, _MISSION, _CHANNEL, split="test")
+        _make_partition(tmp_path, _MISSION, _CHANNEL, split="test")
         (train_part / "extra.parquet").write_bytes(b"train-only-file")
         h_train = partition_hash(tmp_path, _MISSION, _CHANNEL, "train")
         h_test = partition_hash(tmp_path, _MISSION, _CHANNEL, "test")

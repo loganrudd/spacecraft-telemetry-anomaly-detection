@@ -1,25 +1,30 @@
 .DEFAULT_GOAL := help
 SHELL         := bash
-MISSION       ?= ESA-Mission1
-CHANNEL       ?=
-SUBSYSTEM     ?=
+MISSION          ?= ESA-Mission1
+CHANNEL          ?=
+CHANNELS         ?=
+SUBSYSTEM        ?=
+PORT             ?= 8000
+REPLAY_DATA_DIR  ?=
+INJECTED         ?=
+CPU              ?=
 
 # Detect the Python / uv binary so the Makefile works in CI and local dev.
 UV := uv
 RUN := $(UV) run
 
 .PHONY: help setup test test-all lint format typecheck \
-        download-sample explore \
+        download-sample explore collect \
         profile preprocess \
         model-train model-score model-evaluate model-test \
         ray-train ray-score ray-tune ray-train-smoke ray-tune-smoke ray-test \
-        mlflow-server mlflow-ui mlflow-promote mlflow-promote-all cloud-deploy \
+        mlflow-server mlflow-ui mlflow-promote mlflow-promote-all mlflow-demote cloud-deploy \
         serve \
         frontend-install frontend-dev frontend-build frontend-test \
         docker-build docker-build-ray docker-run-local \
         tf-init tf-plan tf-apply tf-destroy \
         cloud-up cloud-down cloud-db-start cloud-db-stop \
-        cloud-preprocess cloud-train cloud-tune cloud-score cloud-drift \
+        cloud-preprocess cloud-inject cloud-train cloud-tune cloud-score cloud-drift \
         seed-reference-profiles \
         smoke-cloud \
         clean clean-processed clean-models clean-data clean-all
@@ -32,8 +37,8 @@ help:          ## Show this help message
 # Environment
 # ---------------------------------------------------------------------------
 
-setup:         ## Install all dependency groups (dev + tracking + ml)
-	$(UV) sync --extra dev --extra tracking --extra ml
+setup:         ## Install all dependency groups (dev + tracking + ml + collect)
+	$(UV) sync --extra dev --extra tracking --extra ml --extra collect
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -75,16 +80,30 @@ explore:       ## Print dataset exploration report (MISSION=ESA-Mission1)
 		--mission $(MISSION)
 
 # ---------------------------------------------------------------------------
+# ISS Live collector (Phase 12)
+# ---------------------------------------------------------------------------
+# SSL_CERT_FILE points uv's Python at certifi so the Lightstreamer TLS
+# handshake to push.lightstreamer.com succeeds. The collector also sets this
+# defensively in-code, so a bare `spacecraft-telemetry collect` works too.
+
+collect:       ## Collect ISS Live telemetry (CHANNEL_SET=validation|all, DURATION=secs)
+	SSL_CERT_FILE=$(SSL_CERT_FILE) \
+	$(RUN) spacecraft-telemetry collect \
+		$(if $(CHANNEL_SET),--channel-set $(CHANNEL_SET),) \
+		$(if $(DURATION),--duration $(DURATION),)
+
+# ---------------------------------------------------------------------------
 # Preprocessing (Phase 10.5 — pandas + Ray)
 # ---------------------------------------------------------------------------
 
 profile:          ## Profile raw channel suitability, write channel_suitability.json (MISSION=…)
 	$(RUN) spacecraft-telemetry preprocess profile --mission $(MISSION)
 
-preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…)
+preprocess:       ## Run pandas + Ray preprocessing pipeline on sample data (MISSION=…, SUBSYSTEM=…, CHANNEL=…, CHANNELS=ch1,ch2,…)
 	$(RUN) spacecraft-telemetry preprocess run \
 		--mission $(MISSION) \
 		$(if $(filter command line,$(origin CHANNEL)),--channel $(CHANNEL),) \
+		$(if $(CHANNELS),--channels $(CHANNELS),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
 # ---------------------------------------------------------------------------
@@ -161,6 +180,18 @@ mlflow-promote:   ## Set @champion alias (MISSION=…, [CHANNEL=…, SUBSYSTEM=�
 		$(if $(CHANNEL),--channels $(CHANNEL),) \
 		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
 
+mlflow-demote:    ## Remove @champion alias (MISSION=… alone resets all; [CHANNEL=…, SUBSYSTEM=…, ENV=cloud])
+	$(if $(filter cloud,$(ENV)), \
+	  SSL_CERT_FILE=$(SSL_CERT_FILE) \
+	  SPACECRAFT_MLFLOW__TRACKING_URI=$$(gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)') \
+	  MLFLOW_TRACKING_TOKEN=$$(gcloud auth print-identity-token) \
+	  SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://$(PROJECT_ID)-processed-data \
+	  SPACECRAFT_DATA__SAMPLE_DATA_DIR=gs://$(PROJECT_ID)-sample-data,) \
+	$(RUN) spacecraft-telemetry --env $(ENV) mlflow demote \
+		--mission $(MISSION) \
+		$(if $(CHANNEL),--channels $(CHANNEL),) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
+
 cloud-deploy:     ## Redeploy Cloud Run API so it cold-starts and loads the newly promoted Production model
 	$(eval _API_IMAGE := $(shell gcloud run services describe api \
 		--region $(REGION) --project $(PROJECT_ID) \
@@ -196,9 +227,15 @@ clean-all:       ## Remove everything: caches + processed + models + downloaded 
 # FastAPI serving (Phase 8)
 # ---------------------------------------------------------------------------
 
-serve:            ## Start the FastAPI serving layer locally (SUBSYSTEM=subsystem_6)
+serve:            ## Start the FastAPI serving layer locally (MISSION=… PORT=… SUBSYSTEM=… REPLAY_DATA_DIR=…)
 	$(RUN) spacecraft-telemetry --env local api serve \
-		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),)
+		--port $(PORT) \
+		$(if $(MISSION),--mission $(MISSION),) \
+		$(if $(SUBSYSTEM),--subsystem $(SUBSYSTEM),) \
+		$(if $(REPLAY_DATA_DIR),--replay-data-dir $(REPLAY_DATA_DIR),)
+# Two-terminal ISS demo:
+#   make serve                                          # ESA on :8000
+#   make serve MISSION=ISS PORT=8001                   # ISS on :8001 (requires trained ISS models)
 
 # ---------------------------------------------------------------------------
 # React dashboard (Phase 9)
@@ -303,14 +340,15 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 		-target=kubernetes_namespace.ray \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_service_account.ray \
-		-refresh=false \
 		-auto-approve
 	terraform -chdir=infra apply \
 		-target=google_service_account_iam_member.ray_workload_identity \
 		-target=google_storage_bucket_iam_member.ray_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_raw_viewer \
 		-target=google_storage_bucket_iam_member.ray_processed_admin \
 		-target=google_storage_bucket_iam_member.ray_artifacts_admin \
 		-target=google_storage_bucket_iam_member.ray_wif_sample_viewer \
+		-target=google_storage_bucket_iam_member.ray_wif_raw_viewer \
 		-target=google_storage_bucket_iam_member.ray_wif_processed_admin \
 		-target=google_storage_bucket_iam_member.ray_wif_artifacts_admin \
 		-refresh=false \
@@ -318,17 +356,23 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 	gcloud container clusters get-credentials ray-cluster --region=$(REGION) --project=$(PROJECT_ID)
 
 cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQL up (see cloud-db-stop).
+	@# Strip KubeRay finalizers BEFORE removing the operator. RayJob/RayCluster
+	@# resources have finalizers processed by the KubeRay operator; if the operator
+	@# is removed first (via Helm uninstall) those finalizers can never be cleared
+	@# and the ray namespace gets permanently stuck in Terminating.
+	kubectl get rayjob -n ray -o name 2>/dev/null \
+		| xargs -I{} kubectl patch {} -n ray -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+	kubectl get raycluster -n ray -o name 2>/dev/null \
+		| xargs -I{} kubectl patch {} -n ray -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
 	terraform -chdir=infra destroy \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
 		-auto-approve
 	@# Block until the ray namespace has fully terminated before destroying the
-	@# cluster. Namespace deletion waits on KubeRay finalizers and can lag the
-	@# terraform destroy return; a later cloud-up then races a still-Terminating
-	@# namespace and fails with "being terminated". Must run while the cluster
-	@# still exists (kubectl is unreachable once the cluster is gone).
-	kubectl wait --for=delete namespace/ray --timeout=300s || true
+	@# cluster. Must run while the cluster still exists (kubectl is unreachable
+	@# once the cluster is gone).
+	kubectl wait --for=delete namespace/ray --timeout=300s
 	terraform -chdir=infra destroy \
 		-target=google_container_cluster.ray \
 		-auto-approve
@@ -348,21 +392,38 @@ cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQ
 # MLFLOW_URL is fetched live so the Makefile works without storing it.
 _mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
 
-cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
-	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) \
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2,…])
+	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_preprocess.sh
+	# ISS 6-channel validation set:
+	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1])
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
-		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) \
+		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) CPU=$(CPU) \
 		./scripts/cloud_train.sh
 
-cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=…)
+cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-processed-data/_injected (PROJECT_ID=… MISSION=ISS CHANNELS=…). Local single-process; reads/writes GCS.
+	# ISS uses W=128 (LOS segment constraint); fault placement must match the
+	# window_size that score/tune evaluate with, or candidate/segment cutoffs skew.
+	SSL_CERT_FILE=$$($(RUN) python -m certifi) \
+	$(if $(filter ISS,$(MISSION)),SPACECRAFT_MODEL__WINDOW_SIZE=128,) \
+	$(RUN) spacecraft-telemetry --env cloud inject run \
+		--mission $(MISSION) \
+		$(if $(CHANNELS),--channels $(CHANNELS),) \
+		--processed-dir gs://$(PROJECT_ID)-processed-data \
+		--output-dir gs://$(PROJECT_ID)-processed-data/_injected
+	# ISS 6-channel validation set:
+	# make cloud-inject MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
+
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune).
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
+		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
 
 cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [SUBSYSTEM=…] [CHANNEL=…])

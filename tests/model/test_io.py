@@ -24,10 +24,10 @@ torch = pytest.importorskip("torch")
 import mlflow  # noqa: E402
 
 from spacecraft_telemetry.model.io import (  # noqa: E402
+    ModelNotFoundError,
     ScoringParams,
     bytes_to_errors,
     download_artifact_bytes,
-    ModelNotFoundError,
     errors_to_bytes,
     find_latest_run_for_channel,
     load_model_for_scoring,
@@ -130,6 +130,30 @@ def test_find_latest_run_for_channel_returns_none_when_channel_absent(_mlflow_ur
 
     result = find_latest_run_for_channel("test-scoring-2", "channel_1", _mlflow_uri)
     assert result is None
+
+
+def test_find_latest_run_for_channel_extra_filter_disambiguates_data_source(
+    _mlflow_uri: str,
+) -> None:
+    """extra_filter isolates a nominal-tagged run from a later injected-tagged one.
+
+    Mirrors ray_fanout.tune._load_nominal_errors: without the filter, "latest"
+    would return the injected run even though the caller wants the nominal
+    baseline for the false-positive-rate penalty.
+    """
+    mlflow.set_tracking_uri(_mlflow_uri)
+    mlflow.set_experiment("test-scoring-3")
+    with mlflow.start_run(tags={"channel_id": "channel_1", "data_source": "nominal"}) as nom_run:
+        mlflow.log_metric("step", 1)
+    with mlflow.start_run(tags={"channel_id": "channel_1", "data_source": "injected"}):
+        mlflow.log_metric("step", 2)
+
+    found = find_latest_run_for_channel(
+        "test-scoring-3", "channel_1", _mlflow_uri,
+        extra_filter="tags.data_source = 'nominal'",
+    )
+    assert found is not None
+    assert found.info.run_id == nom_run.info.run_id
 
 
 def test_load_model_for_scoring_returns_model_and_window_size(_mlflow_uri: str) -> None:

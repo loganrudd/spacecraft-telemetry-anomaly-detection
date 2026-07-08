@@ -228,6 +228,320 @@ gcloud run jobs execute mlflow-db-upgrade \
   --region $REGION --project $PROJECT_ID --wait
 ```
 
+## ISS Collector — emergency backstop (retired as the primary path in Phase 17)
+
+Phase 12 originally banked ISS telemetry on a standalone, always-on, non-preemptible
+`e2-small` GCE VM running the collector as a long-lived Docker container, ~9–10 days before
+preprocessing/training could start. Phase 17 folded collection into the `api-iss` live pump
+(same Lightstreamer session, same tick archival, zero marginal cost) and retired the VM as the
+normal path — see [ISS Live Pump + VM Teardown](#iss-live-pump--vm-teardown-phase-17) below.
+
+This section is kept as a **manual emergency backstop**: the `sa-collector` service account
+and IAM bindings are preserved specifically so this VM can be stood back up without any
+Terraform changes if the pump ever needs to be bypassed. Do not use this as the default
+onboarding path for a fresh deployment — start with the pump.
+
+### Build and push the collector image
+
+CI builds and pushes `collector:latest` automatically when collector-related
+files change on `main` (`.github/workflows/build-collector-image.yml`). You can
+also trigger a manual build via `workflow_dispatch` before launching the VM.
+
+To build locally (e.g. for a quick test before merging), use `--platform
+linux/amd64` — the e2-small COS VM is amd64; an M1 build without this flag
+produces arm64 and crashes with "exec format error".
+
+```bash
+export PROJECT_ID=your-project-id
+export REGION=us-central1
+
+docker build --platform linux/amd64 \
+  -f deploy/collector/Dockerfile \
+  -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest .
+
+docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/collector:latest
+```
+
+**VM rollout is intentionally manual.** Restarting the VM mid-collection would
+punch a gap in the 9–10 day data window. After merging changes that affect the
+collector, wait for the CI build to finish, then restart the VM:
+```bash
+gcloud compute instances reset iss-collector \
+  --zone=${REGION}-a --project=${PROJECT_ID}
+```
+The startup-script pulls `:latest` and relaunches the container automatically.
+
+### Deploy the VM
+
+```bash
+# Provision the service account, IAM bindings, and GCE instance.
+# Run terraform apply in the infra/ directory (or target just the collector resources):
+terraform -chdir=infra apply \
+  -target=google_service_account.collector \
+  -target=google_storage_bucket_iam_member.collector_raw_writer \
+  -target=google_project_iam_member.collector_ar_reader \
+  -target=google_project_iam_member.collector_log_writer \
+  -target=google_compute_instance.collector \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+```
+
+The VM startup script automatically pulls and runs the collector container.
+
+### Verify collection is running
+
+```bash
+# SSH into the VM (may take 60s for startup-script to complete):
+gcloud compute ssh iss-collector --zone=${REGION}-a --project=${PROJECT_ID}
+
+# Inside the VM — check container logs:
+sudo docker logs collector -f
+# You should see: "collector.starting" and then "collector.subscribed" events.
+# Every 5 minutes: "collector_io.flushed" for each active channel.
+
+# Verify data is landing in GCS:
+gsutil ls gs://${PROJECT_ID}-raw-data/ISS/ticks/
+```
+
+### 1-hour local dry-run (before deploying)
+
+Validate the feed format and per-channel cadence locally before committing the VM:
+
+```bash
+spacecraft-telemetry collect --duration 3600
+# After 1 hour:
+python - <<'EOF'
+import pyarrow.parquet as pq, glob
+for p in glob.glob("data/raw/ISS/ticks/channel_id=S1000003/*.parquet"):
+    t = pq.read_table(p, partitioning=None)
+    print(f"{p}: {len(t)} rows, {t.schema}")
+EOF
+```
+
+Check the per-channel median tick interval in the logs. If most channels update faster
+than ~30 s, update `grid_interval_seconds: 30` and `window_size: 256` in
+`configs/local.yaml` and `configs/cloud.yaml` before starting Phase 13.
+
+### Teardown
+
+```bash
+terraform -chdir=infra destroy \
+  -target=google_compute_instance.collector \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+# The raw-data bucket and its contents are preserved — raw ticks are not auto-deleted.
+```
+
+**Cost:** e2-small ~$12/mo → ≈$4–5 for the 10-day collection window. Under the $50 alert
+threshold. Stop the VM once Phase 13 preprocessing is complete.
+
+## ISS Preprocessing (Phase 13)
+
+After ~9–10 days of collection, run the ISS preprocessing pipeline on the banked ticks:
+
+```bash
+export PROJECT_ID=spacecraft-telemetry-ads
+export REGION=us-central1
+
+make cloud-up
+
+# Preprocess all 18 ISS channels (reads gs://{project}-raw-data/ISS/ticks/)
+make cloud-preprocess MISSION=ISS
+
+# Or just the 6 curated demo channels (power + thermal — the two subsystems that
+# stayed stationary through the July drift review; see .claude/rules/iss.md
+# "Demo tiering") for a faster end-to-end run:
+make cloud-preprocess MISSION=ISS \
+  CHANNELS=S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
+
+make cloud-down
+```
+
+`SPACECRAFT_COLLECT__RAW_TICKS_DIR` is wired in `deploy/ray/cluster_preprocess.yaml` (same
+manifest used for ESA — the env var is ignored by the ESA path).  Output lands in
+`gs://{project}-processed-data/ISS/{train,test}/…/part.parquet` alongside
+`normalization_params.json`.
+
+> **ISS prerequisite — raw-data read for the Ray SA.** ESA preprocessing reads the *sample*
+> bucket, but ISS reads ticks from `gs://{project}-raw-data/ISS/ticks/`, so the Ray service
+> account needs `objectViewer` on the raw-data bucket (`ray_raw_viewer` / `ray_wif_raw_viewer`
+> in `infra/iam.tf`). Provisioned by `make cloud-up`. Without it the RayJob fails with
+> `storage.objects.list denied on …-raw-data`.
+
+Wall-clock: ~10 min (18 channels, each a 30 s-grid ~14k-row Parquet).
+
+Verify the output before starting Phase 14 training:
+```bash
+gsutil ls "gs://${PROJECT_ID}-processed-data/ISS/train/mission_id=ISS/"
+gsutil cat "gs://${PROJECT_ID}-processed-data/ISS/normalization_params.json" \
+  | python3 -m json.tool | head -20
+```
+
+## ISS Training + Injection-Driven HPO (Phases 14–16)
+
+ISS has no labeled anomalies, so detection is evaluated by **fault injection**: inject known
+faults into the nominal test split to manufacture `is_anomaly` ground truth, then run the same
+Ray Tune F0.5 HPO against them. The demo uses the 6 curated power + thermal channels (drop
+`CHANNELS` to run all 18 — but only the 6 below are ever promoted to `@champion`).
+
+```bash
+export PROJECT_ID=spacecraft-telemetry-ads
+export REGION=us-central1
+export MLFLOW_URL=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)')
+CH=S1000003,P1000003,P4000001,S4000001,P6000001,S6000001
+
+make cloud-up
+
+# 1. Train one telemanom-ISS-{channel} LSTM per channel
+make cloud-train  MISSION=ISS CHANNELS=$CH
+
+# 2. Inject faults into the nominal test split → gs://{project}-processed-data/_injected
+#    Runs locally (single-process, reads/writes GCS) — no GKE job, it never touches the models.
+make cloud-inject MISSION=ISS CHANNELS=$CH
+
+# 3. Baseline score on the injected data (errors.npy + Hundman-default metrics).
+#    Use the DEFAULT eval split (final_portion) so it is directly comparable to the
+#    tuned re-score in step 5. errors.npy is always saved from the full smoothed
+#    array regardless of eval split, so tune (step 4) still sees all windows.
+#    Do NOT pass EVAL_SPLIT=full_test here — that scores a different (larger) slice
+#    than the tuned run, making the baseline-vs-tuned comparison invalid.
+make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH
+
+# 4. Tune scoring params on the injected hpo_portion → artifacts/ISS/tuned_configs.json
+make cloud-tune   MISSION=ISS INJECTED=1 CHANNELS=$CH
+
+# 5. Tuned re-score on the same held-out final_portion (leakage-free comparison vs step 3)
+make cloud-score  MISSION=ISS INJECTED=1 CHANNELS=$CH TUNED=1
+
+make cloud-down
+
+# 6. Promote champions. ISS with no CHANNEL/SUBSYSTEM defaults to the curated
+#    6-channel set (power + thermal) — the non-stationary solar_array/attitude
+#    channels are deliberately excluded (see .claude/rules/iss.md "Demo tiering").
+#    Serving is champion-gated end to end: only promoted channels load at
+#    startup and reach the SSE stream, so this is what decides what's live.
+make mlflow-promote MISSION=ISS ENV=cloud
+
+# To reset and re-promote (e.g. after retraining or re-tiering):
+#   make mlflow-demote  MISSION=ISS ENV=cloud   # clears every ISS champion alias
+#   make mlflow-promote MISSION=ISS ENV=cloud   # back to the curated set
+```
+
+`INJECTED=1` points `cloud-score`/`cloud-tune` at `gs://{project}-processed-data/_injected` and
+selects channels explicitly (the injected dir has no `channels.txt`). The ESA path is
+unchanged — omit `INJECTED`/`CHANNELS` for the nominal flow. Injection is logically a
+*post-preprocessing* step (it depends on the test split, not the models), so it runs as a cheap
+local step rather than a RayJob.
+
+> **ISS prerequisite — mlflow pin.** The Ray and API images pin `mlflow==3.13.0`
+> (`deploy/ray/Dockerfile`, `deploy/api/Dockerfile`). mlflow 3.14 made `pt2` the default
+> pytorch serialization format, which requires an `input_example` and breaks model logging with
+> *"If `serialization_format` is set to 'pt2', then input_example is required"*; 3.13 keeps the
+> pickle default. The MLflow server image is pinned to the same version. The Ray image is built
+> by `.github/workflows/build-ray-image.yml`, which triggers on `main` **and** `iss_ext`.
+
+### Serving ISS as a selectable mission
+
+The serving layer is mission-parameterized: `settings.api.mission` drives model loading
+(`telemanom-ISS-{channel}@champion`), the replay path, and the dashboard. ESA and ISS run as
+separate processes — separate Cloud Run services (`api`, `api-iss`) from one shared image. The
+dashboard mission switcher (`available_missions` on `/health`) navigates between them, and the
+**Inject Fault** button (`POST /api/inject`) drives a live spike/drift/flatline on the shared
+replay loop so every viewer sees the same anomaly — the primary way to surface anomalies for
+ISS, which has no pre-labeled segments.
+
+To validate ISS serving locally against the cloud champions (before a dedicated Cloud Run
+service exists), point a local API at the cloud MLflow + processed bucket:
+
+```bash
+SPACECRAFT_MLFLOW__TRACKING_URI=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)') \
+MLFLOW_TRACKING_TOKEN=$(gcloud auth print-identity-token) \
+SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://${PROJECT_ID}-processed-data \
+SSL_CERT_FILE=$(uv run python -m certifi) \
+make serve MISSION=ISS PORT=8001
+```
+
+Run `make serve` (ESA, `:8000`) in another terminal so the mission switcher has both. The
+identity token expires after ~1h.
+
+**Drift panel locally.** `configs/cloud.yaml` doesn't carry the ISS-only drift overrides —
+those live in Terraform on `api-iss` only (`infra/cloud_run.tf`), since `cloud.yaml` is shared
+with the ESA `api` service. To see a calibrated (not permanently "drifted") drift panel when
+serving ISS locally, add the same two overrides by hand:
+
+```bash
+SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS=30 \
+SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD=0.80 \
+SPACECRAFT_MLFLOW__TRACKING_URI=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)') \
+MLFLOW_TRACKING_TOKEN=$(gcloud auth print-identity-token) \
+SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR=gs://${PROJECT_ID}-processed-data \
+SSL_CERT_FILE=$(uv run python -m certifi) \
+uv run spacecraft-telemetry --env cloud api serve --mission ISS --live
+```
+
+Reference profiles also need to exist first — see [`seed-reference-profiles`](#deploy-the-live-pump)
+above; it writes to the local `monitoring/reference_profiles/` directory unless
+`SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR` is overridden to a `gs://` path.
+
+## ISS Live Pump + VM Teardown (Phase 17)
+
+Phase 17 folds collection into the `api-iss` Cloud Run service (live Lightstreamer
+pump), making the standalone collector VM redundant. The pump is always-on
+(`min_instances=1`) and archives all 18 channels to GCS on the same 5-minute flush
+cycle as the former collector.
+
+### Deploy the live pump
+
+```bash
+# Build and push the api image (CI does this automatically on push to main via
+# .github/workflows/deploy.yml, using the same command below). If you are deploying
+# from a feature branch instead of main, CI won't build it for you — build manually:
+AR=${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry
+SHA=$(git rev-parse --short HEAD)
+docker build --platform linux/amd64 -f deploy/api/Dockerfile \
+  -t $AR/api:$SHA -t $AR/api:latest .
+docker push $AR/api:$SHA && docker push $AR/api:latest
+
+# Deploy api-iss with the live pump config (min=1, max=1, LIVE=true):
+gcloud run deploy api-iss \
+  --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/api:latest \
+  --region ${REGION} \
+  --project ${PROJECT_ID} \
+  --min-instances 1 \
+  --max-instances 1 \
+  --set-env-vars "SPACECRAFT_API__LIVE=true,SPACECRAFT_API__ARCHIVE_TO_GCS=true,SPACECRAFT_COLLECT__CHANNEL_SET=all,SPACECRAFT_COLLECT__RAW_TICKS_DIR=gs://${PROJECT_ID}-raw-data,SPACECRAFT_COLLECT__FLUSH_INTERVAL_SECONDS=300"
+```
+
+Or simply `terraform apply` — `infra/cloud_run.tf` now carries all the env vars.
+`terraform apply` will also grant `sa-api` write access to the raw-data bucket
+(`api_raw_data_creator` + `api_raw_data_viewer` IAM members).
+
+### Verify the pump is archiving
+
+```bash
+# Wait ~5 minutes after deploy, then check that fresh shards are arriving:
+gsutil ls -l gs://${PROJECT_ID}-raw-data/ISS/ticks/ | tail -5
+# Each active channel should have a shard timestamped within the last 5 minutes.
+```
+
+### Retire the collector VM
+
+Once the pump is confirmed archiving, destroy the VM:
+
+```bash
+# The google_compute_instance.collector resource was removed from Terraform in
+# Phase 17. Running terraform apply will destroy the instance.
+terraform -chdir=infra apply \
+  -var="project_id=${PROJECT_ID}" \
+  -var="billing_account=${BILLING_ACCOUNT}"
+# The raw-data bucket contents are preserved. sa-collector SA + IAM remain as
+# an emergency backstop — they cost nothing.
+```
+
+> **Note:** there will be a brief overlap between the pump archiving and the VM
+> archiving (both write to the same GCS paths). This is harmless — shard filenames
+> are second-unique and neither writer deletes existing shards.
+
 ## Cost Guardrails
 
 **Budget alerts** are configured in Terraform at $50, $100, and $150. Alerts email

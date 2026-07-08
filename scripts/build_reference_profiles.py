@@ -21,6 +21,12 @@ Usage:
         --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt \\
         --upload gs://my-project-artifacts/reference_profiles
 
+    # Real-time ISS drift reference (train-split -- "diverged from what the
+    # model learned", see --split help):
+    python scripts/build_reference_profiles.py \\
+        --env cloud --mission ISS --split train \\
+        --upload gs://my-project-artifacts/reference_profiles --upload-only
+
 Requires: .[tracking,gcp] installed (evidently, gcsfs, google-cloud-storage).
 """
 
@@ -94,6 +100,15 @@ def main() -> None:
         default=None,
         help="Cap at this many channels (useful for smoke tests).",
     )
+    parser.add_argument(
+        "--split",
+        choices=["test", "train"],
+        default="test",
+        help="Preprocessed split to build the reference from (default: test). "
+        "'test' aligns the live drift panel with the serving-era nominal baseline. "
+        "'train' treats drift as divergence from what the model learned -- use "
+        "this for real-time ISS drift, whose reference is rebuilt from train.",
+    )
     args = parser.parse_args()
 
     settings = load_settings(args.env)
@@ -119,7 +134,7 @@ def main() -> None:
     ok = err = 0
     for channel in channels:
         try:
-            df = build_reference_profile(settings, args.mission, channel)
+            df = build_reference_profile(settings, args.mission, channel, split=args.split)
 
             if not args.upload_only:
                 path = reference_profile_path(settings, args.mission, channel)
@@ -151,6 +166,7 @@ def main() -> None:
             err += 1
 
     print(f"Mission  : {args.mission}")
+    print(f"Split    : {args.split}")
     print(f"Channels : {len(channels)}")
     print(f"OK       : {ok}")
     print(f"Errors   : {err}")

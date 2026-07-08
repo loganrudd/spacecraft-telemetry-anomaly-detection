@@ -28,6 +28,7 @@ spec:
   entrypoint: >-
     spacecraft-telemetry --env cloud preprocess run
     --mission ${MISSION}
+    ${CHANNELS_ARG}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
@@ -53,6 +54,8 @@ spec:
                   value: gs://${PROJECT_ID}-processed-data
                 - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                   value: gs://${PROJECT_ID}-sample-data
+                - name: SPACECRAFT_COLLECT__RAW_TICKS_DIR
+                  value: gs://${PROJECT_ID}-raw-data
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
               resources:
@@ -112,6 +115,8 @@ spec:
                     value: gs://${PROJECT_ID}-processed-data
                   - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                     value: gs://${PROJECT_ID}-sample-data
+                  - name: SPACECRAFT_COLLECT__RAW_TICKS_DIR
+                    value: gs://${PROJECT_ID}-raw-data
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
                 resources:

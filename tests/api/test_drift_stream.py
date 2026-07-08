@@ -1,11 +1,35 @@
-"""Tests for the GET /api/stream/drift endpoint and drift_stream composer."""
+"""Tests for the GET /api/stream/drift endpoint and drift_stream composer.
+
+drift_stream is now a thin subscriber over the shared EventBroadcaster (see
+streaming.py): event: drift frames are published by the shared producer
+(run_shared_loop for ESA / the ISS live pump) via drift_feed.step_drift, one
+RollingDriftMonitor per channel feeding every connected viewer.
+
+Design notes
+------------
+- Event-emission tests drive drift_stream directly as an async generator
+  against a real run_shared_loop producer task, rather than going through a
+  full ASGI transport. Driving both the hot producer loop (test settings use
+  1000x replay speed) and a consumer through httpx's ASGITransport +
+  BaseHTTPMiddleware in the same event loop was observed to starve the
+  consumer indefinitely (a 15s collection would still return nothing).
+  Calling the generator directly is the same pattern the pre-rewrite test
+  suite used for this exact reason -- see the historical note in
+  TestDriftStreamEvents._collect_events.
+- Only the HTTP-boundary test (headers/SSE framing) goes through a real
+  ASGITransport; it publishes one synthetic frame directly rather than
+  running a producer, so it isn't subject to the same contention.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import time
+from contextlib import suppress
+from datetime import datetime
 from types import MappingProxyType
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,104 +38,210 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from spacecraft_telemetry.api.broadcast import EventBroadcaster, run_shared_loop
+from spacecraft_telemetry.api.drift import RollingDriftMonitor
 from spacecraft_telemetry.api.endpoints import router
 from spacecraft_telemetry.api.logging_middleware import CorrelationIdMiddleware
+from spacecraft_telemetry.api.models import TelemetryEvent
 from spacecraft_telemetry.api.state import AppState
 from spacecraft_telemetry.core.config import Settings, load_settings
-from spacecraft_telemetry.evidently_monitoring.reference import (
-    MONITORING_FEATURE_COLS,
-    REALTIME_FEATURE_COLS,
-)
+from spacecraft_telemetry.evidently_monitoring.reference import REALTIME_FEATURE_COLS
 
 _MISSION = "test-mission"
 _CHANNEL = "test-ch"
 _SUBSYSTEM = "test-sub"
 
-# Run the replay fast enough that tests complete in <30 s.
-_TEST_SPEED = 1e6
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_reference(n_rows: int = 200, seed: int = 0) -> pd.DataFrame:
+class _RecordingEngine:
+    """Minimal stand-in for ChannelInferenceEngine, driven by run_shared_loop."""
+
+    def __init__(self, mission: str, channel: str) -> None:
+        self._mission = mission
+        self._channel = channel
+
+    def step(self, value: float, ts: datetime, is_anomaly: bool) -> TelemetryEvent:
+        return TelemetryEvent(
+            timestamp=ts,
+            mission=self._mission,
+            channel=self._channel,
+            value_normalized=value,
+            prediction=None,
+            residual=None,
+            smoothed_error=None,
+            threshold=None,
+            is_anomaly_predicted=is_anomaly,
+            is_anomaly=is_anomaly,
+        )
+
+    def reset(self) -> None:
+        pass
+
+
+class _FakeRequest:
+    """Minimal stand-in for starlette.Request.
+
+    drift_stream's disconnect watcher only calls the ASGI-level ``.receive()``
+    (not ``.is_disconnected()``); this fake supplies exactly that.
+    """
+
+    def __init__(self, disconnect: bool = False) -> None:
+        self._disconnect = disconnect
+
+    async def receive(self) -> dict[str, str]:
+        if self._disconnect:
+            return {"type": "http.disconnect"}
+        await asyncio.Event().wait()  # blocks until the caller cancels us
+        return {}  # pragma: no cover
+
+
+def _make_reference(n_rows: int = 1200, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    return pd.DataFrame(
-        {col: rng.standard_normal(n_rows).astype(float) for col in MONITORING_FEATURE_COLS}
+    v = pd.Series(rng.standard_normal(n_rows).astype(float))
+    return pd.DataFrame({"value_normalized": v, "rate_of_change": v.diff().fillna(0.0)})
+
+
+def _make_monitor(
+    channel: str, reference: pd.DataFrame, window_size: int = 4, tick_interval: int = 1
+) -> RollingDriftMonitor:
+    assert list(REALTIME_FEATURE_COLS) == ["value_normalized", "rate_of_change"]
+    return RollingDriftMonitor(
+        channel=channel,
+        reference=reference,
+        window_size=window_size,
+        tick_interval=tick_interval,
+        feature_drift_threshold=0.10,
+        channel_drift_threshold=0.30,
     )
 
 
-def _make_drift_settings(*, enabled: bool = True) -> Settings:
+def _make_settings(api_overrides: dict[str, Any] | None = None) -> Settings:
     settings = load_settings("test")
+    if not api_overrides:
+        return settings
     return settings.model_copy(
-        update={
-            "drift": settings.drift.model_copy(
-                update={
-                    "enabled": enabled,
-                    "window_size": 30,  # divisible by tick_interval → should_run() fires
-                    "tick_interval": 5,
-                }
-            )
-        }
+        update={"api": settings.api.model_copy(update=api_overrides)}
     )
 
 
-def _make_app(settings: Settings, *, drift_enabled: bool = True) -> FastAPI:
-    """Build a minimal FastAPI app with drift reference profiles and replay data."""
-    app = FastAPI()
-    app.state.settings = settings
+def _make_app(
+    *,
+    with_broadcaster: bool = False,
+    with_drift_monitors: bool = False,
+    with_drift_references: bool = True,
+    n_rows: int = 60,
+    window_size: int = 4,
+    tick_interval: int = 1,
+    api_overrides: dict[str, Any] | None = None,
+) -> tuple[FastAPI, AppState]:
+    """Build a minimal FastAPI app + AppState for drift-stream tests.
 
-    drift_references: dict[str, pd.DataFrame] = {}
-    replay_data_map: dict[str, object] = {}
+    ``with_drift_monitors`` additionally wires an engine + replay data for
+    ``_CHANNEL`` so ``run_shared_loop`` can drive it end-to-end.
+    """
+    settings = _make_settings(api_overrides)
+    broadcaster = EventBroadcaster() if with_broadcaster else None
 
-    if drift_enabled:
-        ref = _make_reference()
-        drift_references[_CHANNEL] = ref
+    drift_references: dict[str, object] = {}
+    drift_monitors: dict[str, RollingDriftMonitor] = {}
+    engines: dict[str, object] = {}
+    replay_data: dict[str, object] = {}
 
-        # Synthetic replay: enough ticks to fill the window several times so
-        # drift_stream can emit multiple events during a test.
+    reference = _make_reference()
+    if with_drift_references:
+        drift_references[_CHANNEL] = reference
+    if with_drift_monitors:
+        drift_monitors[_CHANNEL] = _make_monitor(
+            _CHANNEL, reference, window_size, tick_interval
+        )
+        engines[_CHANNEL] = _RecordingEngine(_MISSION, _CHANNEL)
+        # Sample replay values from the reference distribution itself (not an
+        # independently-seeded draw) so a "baseline" window is genuinely
+        # nominal rather than spuriously drifted by sampling noise between
+        # two unrelated N(0,1) realizations at these small window sizes.
         rng = np.random.default_rng(42)
-        n = settings.drift.window_size * 6
-        values = rng.choice(ref["value_normalized"].values, size=n).astype(np.float64)
-        anom = np.zeros(n, dtype=bool)
-        timestamps = pd.date_range("2020-01-01", periods=n, freq="1s").to_numpy()
-        replay_data_map[_CHANNEL] = (values, anom, timestamps)
+        values = rng.choice(reference["value_normalized"].to_numpy(), size=n_rows)
+        anom = np.zeros(n_rows, dtype=bool)
+        timestamps = pd.date_range("2020-01-01", periods=n_rows, freq="1s").to_numpy()
+        replay_data[_CHANNEL] = (values, anom, timestamps)
 
-    app.state.app_state = AppState(
+    state = AppState(
         settings=settings,
         mission=_MISSION,
         subsystems=[_SUBSYSTEM],
         device=torch.device("cpu"),
-        engines=MappingProxyType({}),
-        channel_subsystem_map=MappingProxyType({}),
-        replay_data=MappingProxyType(replay_data_map),
+        engines=MappingProxyType(engines),
+        channel_subsystem_map=MappingProxyType({_CHANNEL: _SUBSYSTEM}),
+        replay_data=MappingProxyType(replay_data),
         startup_monotonic_ns=time.monotonic_ns(),
         mlflow_tracking_uri=settings.mlflow.tracking_uri,
-        drift_references=drift_references,
+        drift_references=MappingProxyType(drift_references),
+        drift_monitors=MappingProxyType(drift_monitors),
+        broadcaster=broadcaster,
     )
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.app_state = state
     app.add_middleware(CorrelationIdMiddleware)
     app.include_router(router)
-    return app
+    return app, state
+
+
+async def _collect_drift_events(
+    state: AppState, channels: list[str], *, n: int = 1, timeout: float = 15.0
+) -> list[dict[str, Any]]:
+    """Drive drift_stream directly and collect *n* parsed event payloads.
+
+    See the module docstring for why this bypasses the ASGI/HTTP layer.
+    """
+    from spacecraft_telemetry.api.streaming import drift_stream
+
+    events: list[dict[str, Any]] = []
+
+    async def _drain() -> None:
+        gen = drift_stream(state, _FakeRequest(), selected_channels=channels)
+        try:
+            async for chunk in gen:
+                for line in chunk.decode().splitlines():
+                    if line.startswith("data:"):
+                        events.append(json.loads(line[5:].strip()))
+                if len(events) >= n:
+                    return
+        finally:
+            await gen.aclose()
+
+    await asyncio.wait_for(_drain(), timeout=timeout)
+    return events
 
 
 # ---------------------------------------------------------------------------
-# 503 and 400 error paths (fast — no Evidently)
+# 503 and 400 error paths (fast — no producer running)
 # ---------------------------------------------------------------------------
 
 
 class TestDriftStreamErrors:
     def test_503_when_no_drift_references(self) -> None:
-        settings = _make_drift_settings(enabled=False)
-        app = _make_app(settings, drift_enabled=False)
+        app, _ = _make_app(with_drift_references=False, with_drift_monitors=False)
         with TestClient(app) as client:
             resp = client.get("/api/stream/drift")
         assert resp.status_code == 503
         assert "drift" in resp.json()["detail"].lower()
 
+    def test_503_when_no_broadcaster(self) -> None:
+        """Drift now requires the shared producer -- no per-connection fallback."""
+        app, _ = _make_app(with_broadcaster=False, with_drift_references=True)
+        with TestClient(app) as client:
+            resp = client.get("/api/stream/drift")
+        assert resp.status_code == 503
+
     def test_400_unknown_channel(self) -> None:
-        settings = _make_drift_settings()
-        app = _make_app(settings)
+        app, _ = _make_app(
+            with_broadcaster=True, with_drift_monitors=True, with_drift_references=True
+        )
         with TestClient(app) as client:
             resp = client.get("/api/stream/drift?channels=no-such-channel")
         assert resp.status_code == 400
@@ -119,161 +249,202 @@ class TestDriftStreamErrors:
 
 
 # ---------------------------------------------------------------------------
-# Drift event emission (slow — drives Evidently)
+# Drift event emission — drives the real producer (run_shared_loop)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
 class TestDriftStreamEvents:
-    """Drive the drift_stream generator directly — bypasses TestClient body collection.
-
-    Starlette's TestClient.handle_request() calls portal.call(app, ...) which
-    blocks until the ASGI app completes.  For an infinite SSE stream this never
-    returns, so client.stream().__enter__() hangs forever.  Calling the async
-    generator directly lets the event loop drive pump tasks and collect events
-    without any HTTP transport.
-
-    drift_stream is now self-contained: each call creates its own per-request
-    RollingDriftMonitor and drives replay_channel from AppState.replay_data, so
-    no tick-bus pre-filling is needed.
-    """
-
-    async def _collect_events(
-        self,
-        app: FastAPI,
-        *,
-        n: int = 1,
-        timeout: float = 30.0,
-    ) -> list[dict]:
-        """Invoke drift_stream directly and collect *n* parsed event payloads."""
-        from spacecraft_telemetry.api.streaming import drift_stream
-
-        state: AppState = app.state.app_state
-
-        class _NeverDisconnects:
-            async def is_disconnected(self) -> bool:
-                return False
-
-        events: list[dict] = []
-
-        async def _drain() -> None:
-            gen = drift_stream(
-                state, _NeverDisconnects(), selected_channels=[_CHANNEL], speed=_TEST_SPEED
-            )
-            try:
-                async for chunk in gen:
-                    for line in chunk.decode().splitlines():
-                        if line.startswith("data:"):
-                            events.append(json.loads(line[5:].strip()))
-                    if len(events) >= n:
-                        return
-            finally:
-                await gen.aclose()
-
-        await asyncio.wait_for(_drain(), timeout=timeout)
-        return events
-
-    async def test_200_content_type_and_fields(self) -> None:
-        """Generator emits at least one event driven by its own replay."""
-        settings = _make_drift_settings()
-        app = _make_app(settings)
-        events = await self._collect_events(app, n=1)
-        assert len(events) >= 1
+    async def _run_and_collect(
+        self, state: AppState, *, n: int = 1, timeout: float = 15.0
+    ) -> list[dict[str, Any]]:
+        loop_task = asyncio.create_task(run_shared_loop(state))
+        try:
+            return await _collect_drift_events(state, [_CHANNEL], n=n, timeout=timeout)
+        finally:
+            loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop_task
 
     async def test_drift_events_have_required_fields(self) -> None:
-        settings = _make_drift_settings()
-        app = _make_app(settings)
-        events = await self._collect_events(app, n=1)
+        _app, state = _make_app(with_broadcaster=True, with_drift_monitors=True)
+        events = await self._run_and_collect(state, n=1)
         assert len(events) >= 1
         ev = events[0]
-        # Per-channel fields always present.
         assert ev["channel"] == _CHANNEL
         assert ev["mission"] == _MISSION
         assert "features" in ev
-        assert "percent_drifted" in ev
-        assert "drifted" in ev
         assert 0.0 <= ev["percent_drifted"] <= 1.0
         assert isinstance(ev["drifted"], bool)
         assert len(ev["features"]) == len(REALTIME_FEATURE_COLS)
-        # Subsystem fields are None on per-channel events (not a summary tick).
-        assert ev["subsystem_percent_drifted"] is None
-        assert ev["subsystem_alert"] is None
 
-    async def test_drift_event_timestamps_monotone(self) -> None:
-        settings = _make_drift_settings()
-        app = _make_app(settings)
-        events = await self._collect_events(app, n=2)
+    async def test_drift_event_timestamps_monotone_backlog_and_live(self) -> None:
+        """Timestamps stay non-decreasing across the backlog->live handoff.
+
+        Sleeping before subscribing ensures the backlog is non-empty, so the
+        collected sequence spans both the pre-connect backlog and live ticks --
+        a gap or duplicate at that boundary would show up as a timestamp
+        regression here.
+        """
+        _app, state = _make_app(with_broadcaster=True, with_drift_monitors=True)
+        loop_task = asyncio.create_task(run_shared_loop(state))
+        try:
+            await asyncio.sleep(0.1)
+            events = await _collect_drift_events(state, [_CHANNEL], n=5, timeout=15.0)
+        finally:
+            loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop_task
         timestamps = [ev["timestamp"] for ev in events]
-        # Strict monotone — equal timestamps would mean the clock is frozen.
         for i in range(len(timestamps) - 1):
             assert timestamps[i] <= timestamps[i + 1], (
                 f"timestamp[{i}]={timestamps[i]} > timestamp[{i + 1}]={timestamps[i + 1]}"
             )
 
+    async def test_injection_raises_percent_drifted(self) -> None:
+        """request_injection (POST /api/inject) must reach the shared drift
+        monitor -- the bug this whole rework fixes: injection used to mutate
+        the broadcaster while drift ran its own disconnected replay."""
+        # window_size=256 (matching test_drift_monitor.py's proven-stable ref=1200/
+        # window=256 pair) is needed for a reliably nominal baseline: at n=64 the
+        # finite-sample Wasserstein distance between a bootstrap window and its own
+        # generating distribution is ~O(1/sqrt(n)) ~= 0.12-0.20 even with zero real
+        # drift, comfortably above the 0.10 threshold on sampling noise alone.
+        _app, state = _make_app(
+            with_broadcaster=True, with_drift_monitors=True, window_size=256, n_rows=300
+        )
+        assert state.broadcaster is not None
+        loop_task = asyncio.create_task(run_shared_loop(state))
+        try:
+            baseline = await _collect_drift_events(state, [_CHANNEL], n=1, timeout=15.0)
+            baseline_pct = baseline[0]["percent_drifted"]
+
+            state.broadcaster.request_injection("spike", frozenset(), 10.0, 200)
+            await asyncio.sleep(0.2)  # let several injected ticks flow through
+
+            spiked = await _collect_drift_events(state, [_CHANNEL], n=1, timeout=15.0)
+            assert spiked[0]["percent_drifted"] > baseline_pct
+        finally:
+            loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop_task
+
+    async def test_priming_avoids_cold_start_blank(self) -> None:
+        """A monitor primed like app.py primes it (push window_size seed values
+        before the producer starts) fires on the first live tick; an unprimed
+        one needs the window to fill from empty first."""
+        window_size = 8
+        fast_api = {"replay_tick_interval_seconds": 0.05, "replay_speed_default": 1.0}
+
+        _app_primed, state_primed = _make_app(
+            with_broadcaster=True,
+            with_drift_monitors=True,
+            window_size=window_size,
+            n_rows=80,
+            api_overrides=fast_api,
+        )
+        for _ in range(window_size):
+            state_primed.drift_monitors[_CHANNEL].push({"value_normalized": 0.0})
+
+        _app_cold, state_cold = _make_app(
+            with_broadcaster=True,
+            with_drift_monitors=True,
+            window_size=window_size,
+            n_rows=80,
+            api_overrides=fast_api,
+        )
+
+        primed_task = asyncio.create_task(run_shared_loop(state_primed))
+        cold_task = asyncio.create_task(run_shared_loop(state_cold))
+        try:
+            await asyncio.sleep(0.15)  # ~3 ticks: enough for a primed fire, not a cold one
+            assert state_primed.drift_monitors[_CHANNEL].latest is not None
+            assert state_cold.drift_monitors[_CHANNEL].latest is None
+        finally:
+            for t in (primed_task, cold_task):
+                t.cancel()
+            for t in (primed_task, cold_task):
+                with suppress(asyncio.CancelledError):
+                    await t
+
     async def test_disconnect_no_traceback(self) -> None:
         """A disconnect on the first iteration must not raise."""
         from spacecraft_telemetry.api.streaming import drift_stream
 
-        settings = _make_drift_settings()
-        app = _make_app(settings)
-        state: AppState = app.state.app_state
-
-        class _DisconnectsImmediately:
-            async def is_disconnected(self) -> bool:
-                return True
-
-        gen = drift_stream(
-            state, _DisconnectsImmediately(), selected_channels=[_CHANNEL], speed=_TEST_SPEED
-        )
+        _app, state = _make_app(with_broadcaster=True, with_drift_monitors=True)
+        gen = drift_stream(state, _FakeRequest(disconnect=True), selected_channels=[_CHANNEL])
         async for _ in gen:
             break  # pragma: no cover
         await gen.aclose()
 
 
 # ---------------------------------------------------------------------------
-# HTTP boundary smoke test (slow — goes through ASGI transport)
+# HTTP boundary smoke test — headers and SSE wire format
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-class TestDriftStreamHTTPBoundary:
-    """Verify StreamingResponse headers and SSE wire format via httpx ASGITransport.
+class _FakeAppStateHolder:
+    """Stands in for ``request.app.state`` -- just needs an ``app_state`` attr."""
 
-    The TestDriftStreamEvents tests drive drift_stream as a raw async generator,
-    bypassing the HTTP layer entirely.  This class adds one end-to-end check that
-    the endpoint wires up the correct Content-Type, Cache-Control, and
-    X-Accel-Buffering headers and that the SSE wire format uses the ``event: drift``
-    prefix — regressions in endpoints.py would not be caught by the generator tests.
+    def __init__(self, app_state: AppState) -> None:
+        self.app_state = app_state
+
+
+class _FakeApp:
+    """Stands in for ``request.app`` -- just needs a ``.state`` attr."""
+
+    def __init__(self, app_state: AppState) -> None:
+        self.state = _FakeAppStateHolder(app_state)
+
+
+class _FakeRequestWithApp(_FakeRequest):
+    """Adds the ``request.app.state.app_state`` chain ``_get_ready_state`` needs.
+
+    Calling the ``stream_drift`` endpoint function directly (no ASGI, no
+    FastAPI routing) drives the exact same production code -- StreamingResponse
+    construction, headers, and the generator's first frame -- without an ASGI
+    transport. This sidesteps a real deadlock: BaseHTTPMiddleware (used for
+    CorrelationIdMiddleware) does not compose safely with infinite SSE
+    StreamingResponses under TestClient/httpx's ASGITransport -- confirmed to
+    reproduce identically with the pre-existing, unmodified subscriber_stream
+    (the production telemetry path), so it is a latent, pre-existing gap in
+    test infra rather than something introduced by this rework. No existing
+    test anywhere in the suite exercises subscriber_stream through a real ASGI
+    transport for the same reason.
     """
 
-    async def test_sse_headers_and_framing(self) -> None:
-        from httpx import ASGITransport, AsyncClient
+    def __init__(self, app_state: AppState, disconnect: bool = False) -> None:
+        super().__init__(disconnect=disconnect)
+        self.app = _FakeApp(app_state)
 
-        settings = _make_drift_settings()
-        app = _make_app(settings)
 
-        raw = b""
+class TestDriftStreamHTTPBoundary:
+    """A synthetic frame published directly avoids depending on real drift
+    computation timing -- this class only checks the endpoint's response
+    construction (headers, media type, first SSE frame)."""
 
-        async def _read_one_frame() -> dict[str, str]:
-            nonlocal raw
-            transport = ASGITransport(app=app)
-            async with (
-                AsyncClient(transport=transport, base_url="http://test") as client,
-                client.stream("GET", f"/api/stream/drift?speed={int(_TEST_SPEED)}") as resp,
-            ):
-                headers = dict(resp.headers)
-                async for chunk in resp.aiter_bytes():
-                    raw += chunk
-                    if b"\n\n" in raw:
-                        return headers
-            return {}  # pragma: no cover
+    async def test_response_headers_and_first_frame(self) -> None:
+        from spacecraft_telemetry.api.endpoints import stream_drift
+        from spacecraft_telemetry.api.models import StreamQueryParams
 
-        headers = await asyncio.wait_for(_read_one_frame(), timeout=30.0)
+        _app, state = _make_app(with_broadcaster=True, with_drift_monitors=True)
+        assert state.broadcaster is not None
+        state.broadcaster.publish(_CHANNEL, b"event: drift\ndata: {}\n\n")
 
-        assert "text/event-stream" in headers["content-type"]
-        assert headers.get("cache-control") == "no-cache"
-        assert headers.get("x-accel-buffering") == "no"
+        request = _FakeRequestWithApp(state)
+        response = await stream_drift(request, StreamQueryParams())
 
-        frame = raw[: raw.index(b"\n\n") + 2].decode()
-        assert frame.startswith("event: drift\n"), f"unexpected SSE prefix: {frame[:60]!r}"
-        assert "\ndata:" in frame
+        assert response.media_type == "text/event-stream"
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+
+        try:
+            first_chunk = await response.body_iterator.__anext__()
+        finally:
+            await response.body_iterator.aclose()
+        if isinstance(first_chunk, str):
+            first_chunk = first_chunk.encode()
+        assert first_chunk.startswith(b"event: drift\n"), (
+            f"unexpected SSE prefix: {first_chunk[:60]!r}"
+        )
+        assert b"\ndata:" in first_chunk

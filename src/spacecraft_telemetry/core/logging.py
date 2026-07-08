@@ -40,21 +40,31 @@ def setup_logging(config: LoggingConfig) -> None:
     numeric_level: int = getattr(logging, config.level.upper(), logging.INFO)
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
 
+    processors: list[Any] = [
+        # Merge any context vars set via structlog.contextvars.bind_contextvars()
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        timestamper,
+    ]
+
     if config.format == "json":
-        renderer: Any = structlog.processors.JSONRenderer()
+        # dict_tracebacks MUST precede JSONRenderer: it expands exc_info into a
+        # structured "exception" field. Without it, JSONRenderer serializes
+        # exc_info=True as the literal boolean `true` and the traceback is lost
+        # entirely — exactly what blinded the Phase 12 collector flush errors.
+        # ConsoleRenderer (below) formats exc_info on its own, so this is only
+        # needed on the JSON path.
+        processors += [
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ]
     else:
-        renderer = structlog.dev.ConsoleRenderer()
+        processors.append(structlog.dev.ConsoleRenderer())
 
     structlog.configure(
-        processors=[
-            # Merge any context vars set via structlog.contextvars.bind_contextvars()
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer(),
-            structlog.dev.set_exc_info,
-            timestamper,
-            renderer,
-        ],
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -30,7 +30,7 @@ class DataConfig(BaseModel):
     raw_data_dir: str = "data/raw"
     sample_data_dir: str = "data/sample"
     zenodo_record_id: str = "12528696"
-    missions: list[str] = ["ESA-Mission1", "ESA-Mission2", "ESA-Mission3"]
+    missions: list[str] = ["ESA-Mission1", "ESA-Mission2", "ESA-Mission3", "ISS"]
     sample_fraction: float = 0.01  # fraction of rows to keep in local dev sample
     sample_channels: int = 5  # channels per mission in local dev sample
 
@@ -234,6 +234,13 @@ class TuneConfig(BaseModel):
     # the remaining (1 - fraction) are the held-out final-eval portion.
     # This prevents the HPO target and the reported metric from being the same data.
     hpo_eval_fraction: float = 0.6
+    # Weight on the nominal (un-injected) false-positive rate in the HPO
+    # objective: objective = seg_f0_5 - fp_penalty_weight * nominal_fp_rate.
+    # Without this, a config that fires on 100% of nominal windows can still
+    # win on injected-only F0.5 (see ISS Phase 15 floored-z incident). Weight
+    # of 5.0 means a 10% nominal-window false-positive rate costs 0.5 off the
+    # objective — enough to push the optimizer off a hair-trigger threshold.
+    fp_penalty_weight: float = 5.0
 
     @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
     @classmethod
@@ -247,6 +254,13 @@ class TuneConfig(BaseModel):
     def fraction_in_open_unit_interval(cls, v: float) -> float:
         if not 0.0 < v < 1.0:
             raise ValueError(f"hpo_eval_fraction must be in (0, 1), got {v}")
+        return v
+
+    @field_validator("fp_penalty_weight")
+    @classmethod
+    def non_negative_penalty(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError(f"fp_penalty_weight must be >= 0, got {v}")
         return v
 
 
@@ -339,9 +353,19 @@ class DriftConfig(BaseModel):
 
     enabled: bool = True
     window_size: int = 256
-    # Run Evidently every N telemetry ticks per channel.
-    # Tier 2 from Step 0 benchmark (p95=61.9ms): use 60 ticks + asyncio.to_thread.
-    tick_interval: int = 60
+    # Run the drift monitor every N telemetry ticks per channel.
+    # Originally 60 (sized for a 58ms Evidently Report call per Step 0's
+    # benchmark). The real-time monitor now uses scipy directly (<1ms, see
+    # drift.py) instead of Evidently, so a much lower cadence is affordable
+    # without saturating the event loop -- lowered to reduce cold-start-to-
+    # first-score latency.
+    tick_interval: int = 10
+    # Number of consecutive alerting runs required before a channel is
+    # flagged as drifted (see RollingDriftMonitor.confirm_windows). Default 1
+    # reproduces legacy fire-on-first-alert behavior (ESA-safe). ISS raises
+    # this via SPACECRAFT_DRIFT__DRIFT_CONFIRM_WINDOWS to suppress transient
+    # spikes in its periodic orbital signal.
+    drift_confirm_windows: int = 1
     # Numerical stattest passed explicitly to Evidently DataDriftPreset (num_stattest).
     # Pinned to "wasserstein" so the test is deterministic regardless of reference size.
     # Evidently would otherwise auto-select KS (n <= 1000) or Wasserstein (n > 1000),
@@ -356,6 +380,17 @@ class DriftConfig(BaseModel):
     #   2. Subsystem level: fraction of drifted channels → subsystem alert fires.
     # One knob keeps both levels consistent; tune it to change overall sensitivity.
     drift_alert_threshold: float = 0.30
+    # Wall-clock seconds between consecutive ticks in the real-time drift window.
+    # The reference profile builds rate_of_change as Δvalue / Δt_seconds
+    # (per-second rate, see evidently_monitoring/reference.py), but the live
+    # monitor only receives value_normalized per tick with no timestamps. It
+    # therefore divides its per-tick Δvalue by this interval to reproduce the
+    # same per-second units — otherwise rate_of_change is off by a factor equal
+    # to the grid interval and drifts on every window (a train/serve skew).
+    # Default 1.0 = per-tick (unchanged legacy behavior for ESA, whose replay
+    # cadence is ~1 tick). ISS runs on a fixed 30 s grid → set this to 30 via
+    # SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS on the api-iss service.
+    realtime_rate_interval_seconds: float = 1.0
     reference_profiles_dir: str = "monitoring/reference_profiles"
 
     @field_validator("reference_profiles_dir", mode="before")
@@ -363,19 +398,50 @@ class DriftConfig(BaseModel):
     def coerce_path_to_str(cls, v: object) -> str:
         return str(v)
 
-    @field_validator("window_size", "tick_interval")
+    @field_validator("window_size", "tick_interval", "drift_confirm_windows")
     @classmethod
     def positive_int(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"must be >= 1, got {v}")
         return v
 
-    @field_validator("feature_drift_threshold", "drift_alert_threshold")
+    @field_validator("realtime_rate_interval_seconds")
     @classmethod
-    def threshold_in_range(cls, v: float) -> float:
+    def positive_rate_interval(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("feature_drift_threshold")
+    @classmethod
+    def feature_threshold_positive(cls, v: float) -> float:
+        # A normed Wasserstein distance, not a fraction -- unbounded above.
+        # ISS calibrates this to ~1.0 (see cloud_run.tf), which a (0, 1)
+        # bound would incorrectly reject.
+        if v <= 0.0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("drift_alert_threshold")
+    @classmethod
+    def alert_threshold_in_range(cls, v: float) -> float:
+        # A fraction of features/channels drifted -- genuinely bounded to (0, 1).
         if not 0.0 < v < 1.0:
             raise ValueError(f"must be in (0, 1), got {v}")
         return v
+
+
+class MissionLink(BaseModel):
+    """A sibling-mission entry for the dashboard mission selector.
+
+    Each configured entry tells the frontend about a sibling API service.
+    The frontend navigates to ``url`` on selection (full-page navigation,
+    same-origin per service).  Render nothing when the list has ≤ 1 entry.
+    """
+
+    id: str    # mission identifier, e.g. "ISS"
+    label: str  # display name, e.g. "ISS Live"
+    url: str   # root URL of the sibling service, e.g. "https://api-iss-…run.app"
 
 
 class ApiConfig(BaseModel):
@@ -410,6 +476,24 @@ class ApiConfig(BaseModel):
     # When set and the directory exists, create_app mounts it via StaticFiles(html=True)
     # so the SPA shares the API origin (no CORS). None = serve API only.
     static_dir: str | None = None
+    # Override the Parquet source directory for the replay path without
+    # changing preprocess.processed_data_dir (which other tooling reads).
+    # Useful for pointing the ISS service at the fault-injected dataset while
+    # ESA continues to use the nominal processed dir.
+    # None → fall back to preprocess.processed_data_dir.
+    replay_data_dir: str | None = None
+    # Live pump mode: when True, api-iss subscribes Lightstreamer and feeds the
+    # broadcaster directly instead of replaying pre-collected data.
+    # Set via SPACECRAFT_API__LIVE=true in the Cloud Run environment.
+    live: bool = False
+    # When live=True, archive raw ticks to GCS via collector_io.flush_buffer.
+    archive_to_gcs: bool = False
+    # Sibling-mission entries for the dashboard mission selector.
+    # Each entry describes a peer API service for a different mission so the
+    # frontend can render a switcher that navigates between them.
+    # Empty list (default) hides the switcher entirely — safe for single-mission
+    # deploys and all existing tests.
+    available_missions: list[MissionLink] = []
 
     @field_validator("port")
     @classmethod
@@ -438,6 +522,96 @@ class ApiConfig(BaseModel):
     def positive_int(cls, v: int) -> int:
         if v < 1:
             raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
+class CollectorConfig(BaseModel):
+    """ISS Live telemetry collector configuration (Phase 12)."""
+
+    lightstreamer_url: str = "https://push.lightstreamer.com"
+    adapter_set: str = "ISSLIVE"
+    fields: list[str] = ["Value", "TimeStamp"]
+    # "validation" → 6-channel Phase 12 set; "all" → all 18 PUIs.
+    channel_set: Literal["validation", "all"] = "validation"
+    # Root directory for raw tick shards (local path or gs:// URI).
+    raw_ticks_dir: str = "data/raw"
+    # Flush in-memory buffer to Parquet every N seconds. Hourly shards give
+    # ~1,800 rows/file at 2 s cadence — far healthier for Phase 13 reads than
+    # the ~150 rows/file produced by 300 s. Re-buffer-on-error (Step 2) makes
+    # longer intervals safe: transient GCS failures no longer cause data loss.
+    flush_interval_seconds: float = 3600.0
+    # If no item update arrives on ANY subscribed channel within this window,
+    # log a structured los_onset event (LOS detection, operational only).
+    los_staleness_seconds: float = 60.0
+    # If staleness persists beyond this window, the collector restarts itself
+    # (LightstreamerCollector._check_fatal_staleness -> self.stop()) rather than
+    # sitting silently wedged. Default 5400s (90 min) sits ~1.6x above the
+    # largest observed real LOS gap (~3289s / ~55 min — see the cadence table in
+    # .claude/rules/iss.md), so genuine TDRS handovers never trigger a restart.
+    # A prior undetected outage (2026-06-25 -> 2026-06-30, ~5.5 days) motivated
+    # this: the Lightstreamer client can wedge without exiting the process, so
+    # Docker's `--restart unless-stopped` alone never re-triggers a fresh
+    # session — only an explicit exit does.
+    fatal_staleness_seconds: float = 5400.0
+    # 30 s grid confirmed by 1-hour dry-run: all validation channels update at
+    # 1-10 s median cadence, well below the 30 s step.
+    grid_interval_seconds: int = 30
+
+    @field_validator("flush_interval_seconds", "los_staleness_seconds", "fatal_staleness_seconds")
+    @classmethod
+    def positive_float(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("fatal_staleness_seconds")
+    @classmethod
+    def fatal_above_los(cls, v: float, info: ValidationInfo) -> float:
+        los = info.data.get("los_staleness_seconds")
+        if los is not None and v <= los:
+            raise ValueError(
+                f"fatal_staleness_seconds ({v}) must be greater than "
+                f"los_staleness_seconds ({los}) — a restart threshold at or "
+                "below the LOS-logging threshold would fire on every routine LOS."
+            )
+        return v
+
+    @field_validator("grid_interval_seconds")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"must be >= 1, got {v}")
+        return v
+
+
+class InjectionConfig(BaseModel):
+    """Anomaly injection configuration (Phase 15).
+
+    Controls how synthetic faults are placed into held-out nominal ISS telemetry
+    to manufacture is_anomaly labels for injection-driven HPO.
+
+    Fault type weights, magnitude, and duration are specified per-channel in
+    ``profiles_path`` (generated by scripts/analyze_esa_anomalies.py from 47
+    anomalous ESA channels).  ESA-grounded magnitudes are 0.4-1.5 sigma across
+    all signal classes; fault mix is ~70% sustained (flatline/drift) vs ~30% spike.
+    ``ChannelProfile`` in injection/faults.py holds the fallback values for any
+    channel absent from the profiles JSON.
+    """
+
+    seed: int = 42
+    output_dir: str = "data/processed_injected"
+    faults_per_channel: int = 8
+    min_gap_between_faults: int = 50
+    # Path to per-ISS-channel injection profiles JSON (from analyze_esa_anomalies.py).
+    profiles_path: str = "configs/injection_profiles.json"
+
+    @field_validator("faults_per_channel")
+    @classmethod
+    def at_least_two(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError(
+                f"faults_per_channel must be >= 2 (need at least 1 in each HPO half), got {v}"
+            )
         return v
 
 
@@ -484,6 +658,18 @@ class Settings(BaseSettings):
     monitoring: MonitoringConfig = MonitoringConfig()
     drift: DriftConfig = DriftConfig()
     api: ApiConfig = ApiConfig()
+    collect: CollectorConfig = CollectorConfig()
+    injection: InjectionConfig = InjectionConfig()
+
+    @property
+    def replay_dir(self) -> str:
+        """Parquet source directory used by the replay path.
+
+        Returns api.replay_data_dir when set; otherwise falls back to
+        preprocess.processed_data_dir. Single source of truth consumed by
+        _load_replay_slice (app.py) and the streaming pump generators (streaming.py).
+        """
+        return self.api.replay_data_dir or self.preprocess.processed_data_dir
 
     @classmethod
     def settings_customise_sources(

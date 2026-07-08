@@ -76,3 +76,29 @@ variable "mlflow_admin_invokers" {
   type        = set(string)
   default     = []
 }
+
+# ---------------------------------------------------------------------------
+# ISS api-iss Cloud Run service
+# ---------------------------------------------------------------------------
+
+variable "iss_min_instances" {
+  description = "Minimum instances for the api-iss Cloud Run service (Phase 17+: always 1 for the always-on live Lightstreamer pump)"
+  type        = number
+  default     = 1
+}
+
+variable "api_iss_url" {
+  description = <<-EOT
+    Public URL of the api-iss Cloud Run service — used to populate
+    SPACECRAFT_API__AVAILABLE_MISSIONS on the ESA api service so the dashboard
+    mission switcher can navigate to ISS.  Chicken-and-egg: the URL is only
+    known after api-iss is first created.  Workflow:
+      1. terraform apply            # creates api-iss (ESA switcher omits ISS)
+      2. terraform output api_iss_url
+      3. terraform apply -var="api_iss_url=<url>"  # wires up ESA switcher
+    Leave empty to skip (the api-iss service always shows the ESA mission in
+    its own switcher via the direct google_cloud_run_v2_service.api.uri ref).
+  EOT
+  type        = string
+  default     = ""
+}

@@ -38,3 +38,14 @@ resource "google_service_account_iam_member" "deployer_wif" {
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.ref/refs/heads/main"
 }
+
+# Also allow the long-lived ISS feature branch. Phases 12-18 build the collector
+# image from iss_ext, well before merge to main, so it needs to push to Artifact
+# Registry. Scoped to this exact ref — PRs and other branches still get nothing.
+# NOTE: this grants iss_ext pushers the full deployer SA (same as main); acceptable
+# for a single-maintainer repo. Tighten to a push-only SA if collaborators are added.
+resource "google_service_account_iam_member" "deployer_wif_iss_ext" {
+  service_account_id = google_service_account.deployer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.ref/refs/heads/iss_ext"
+}

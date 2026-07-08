@@ -5,6 +5,10 @@
 #   REGION       GCP region (e.g. us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
 #   MISSION      Mission name (e.g. ESA-Mission2)
+#   PROCESSED_DATA_DIR  Base dir for the hpo_portion split. cloud_tune.sh sets the
+#                nominal bucket by default, or the _injected dir when INJECTED=1.
+#   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
+#                injected: --channels <list> (the injected dir has no channels.txt).
 #
 # Apply via:
 #   envsubst < deploy/ray/cluster_tune.yaml | kubectl apply -f -
@@ -29,7 +33,7 @@ spec:
   entrypoint: >-
     bash -c 'spacecraft-telemetry --env cloud ray tune
     --mission ${MISSION}
-    --channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt
+    ${CHANNELS_ARG}
     && python -c "import gcsfs;
     gcsfs.GCSFileSystem().put(\"models/${MISSION}/tuned_configs.json\",
     \"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\")"'
@@ -57,13 +61,16 @@ spec:
                 - name: SPACECRAFT_MLFLOW__TRACKING_URI
                   value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                  value: gs://${PROJECT_ID}-processed-data
+                  value: ${PROCESSED_DATA_DIR}
                 - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                   value: gs://${PROJECT_ID}-sample-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
+                # ISS=128, ESA=250 — set by cloud_tune.sh (LOS segment constraint).
+                - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                  value: "${WINDOW_SIZE_OVERRIDE}"
               resources:
                 requests:
                   cpu: "2"
@@ -118,13 +125,16 @@ spec:
                   - name: SPACECRAFT_MLFLOW__TRACKING_URI
                     value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
-                    value: gs://${PROJECT_ID}-processed-data
+                    value: ${PROCESSED_DATA_DIR}
                   - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                     value: gs://${PROJECT_ID}-sample-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
+                  # ISS=128, ESA=250 — set by cloud_tune.sh (LOS segment constraint).
+                  - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                    value: "${WINDOW_SIZE_OVERRIDE}"
                 resources:
                   requests:
                     cpu: "4"

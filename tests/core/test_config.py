@@ -8,6 +8,7 @@ from spacecraft_telemetry.core.config import (
     ApiConfig,
     DataConfig,
     DriftConfig,
+    InjectionConfig,
     LoggingConfig,
     MlflowConfig,
     ModelConfig,
@@ -61,7 +62,8 @@ class TestDataConfig:
         assert cfg.zenodo_record_id == "12528696"
         assert cfg.sample_fraction == 0.01
         assert cfg.sample_channels == 5
-        assert len(cfg.missions) == 3
+        assert "ESA-Mission1" in cfg.missions
+        assert "ISS" in cfg.missions
 
     def test_fraction_zero_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="sample_fraction"):
@@ -278,6 +280,15 @@ class TestTuneConfig:
         assert cfg.max_concurrent_trials == 2
         assert cfg.hpo_eval_fraction == 0.6
         assert cfg.parallel_subsystems is False
+        assert cfg.fp_penalty_weight == 5.0
+
+    def test_fp_penalty_weight_negative_is_invalid(self) -> None:
+        with pytest.raises(ValueError, match="fp_penalty_weight"):
+            TuneConfig(fp_penalty_weight=-1.0)
+
+    def test_fp_penalty_weight_zero_is_valid(self) -> None:
+        cfg = TuneConfig(fp_penalty_weight=0.0)
+        assert cfg.fp_penalty_weight == 0.0
 
     def test_hpo_eval_fraction_zero_is_invalid(self) -> None:
         with pytest.raises(ValueError, match="hpo_eval_fraction"):
@@ -487,7 +498,8 @@ class TestDriftConfig:
         cfg = DriftConfig()
         assert cfg.enabled is True
         assert cfg.window_size == 256
-        assert cfg.tick_interval == 60
+        assert cfg.tick_interval == 10
+        assert cfg.drift_confirm_windows == 1
         assert cfg.stattest == "wasserstein"
         assert cfg.feature_drift_threshold == pytest.approx(0.10)
         assert cfg.drift_alert_threshold == pytest.approx(0.30)
@@ -500,11 +512,21 @@ class TestDriftConfig:
         with pytest.raises(ValueError, match="must be >= 1"):
             DriftConfig(tick_interval=0)
 
-    def test_feature_drift_threshold_bounds(self) -> None:
-        with pytest.raises(ValueError, match="must be in"):
+    def test_drift_confirm_windows_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 1"):
+            DriftConfig(drift_confirm_windows=0)
+
+    def test_feature_drift_threshold_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="must be > 0"):
             DriftConfig(feature_drift_threshold=0.0)
-        with pytest.raises(ValueError, match="must be in"):
-            DriftConfig(feature_drift_threshold=1.0)
+        with pytest.raises(ValueError, match="must be > 0"):
+            DriftConfig(feature_drift_threshold=-0.1)
+
+    def test_feature_drift_threshold_allows_ge_one(self) -> None:
+        # Unlike drift_alert_threshold, this is a Wasserstein distance
+        # magnitude, not a fraction -- ISS calibrates it to ~1.0.
+        cfg = DriftConfig(feature_drift_threshold=1.0)
+        assert cfg.feature_drift_threshold == pytest.approx(1.0)
 
     def test_drift_alert_threshold_bounds(self) -> None:
         with pytest.raises(ValueError, match="must be in"):
@@ -523,9 +545,53 @@ class TestDriftConfig:
         monkeypatch.delenv("SPACECRAFT_DRIFT__ENABLED", raising=False)
         settings = load_settings("local")
         assert settings.drift.enabled is True
-        assert settings.drift.tick_interval == 60
+        assert settings.drift.tick_interval == 10
 
     def test_settings_has_drift_field(self) -> None:
         settings = Settings()
         assert isinstance(settings.drift, DriftConfig)
 
+
+
+class TestInjectionConfig:
+    def test_settings_has_injection_field(self) -> None:
+        settings = Settings()
+        assert isinstance(settings.injection, InjectionConfig)
+
+    def test_defaults(self) -> None:
+        cfg = InjectionConfig()
+        assert cfg.seed == 42
+        assert cfg.faults_per_channel == 8
+        assert cfg.output_dir == "data/processed_injected"
+        assert cfg.profiles_path == "configs/injection_profiles.json"
+        assert cfg.min_gap_between_faults == 50
+
+    def test_env_var_overrides_seed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SPACECRAFT_INJECTION__SEED", "99")
+        settings = Settings()
+        assert settings.injection.seed == 99
+
+    def test_env_var_overrides_output_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SPACECRAFT_INJECTION__OUTPUT_DIR", "/tmp/injected")
+        settings = Settings()
+        assert settings.injection.output_dir == "/tmp/injected"
+
+    def test_faults_per_channel_minimum(self) -> None:
+        with pytest.raises(ValueError, match="faults_per_channel must be >= 2"):
+            InjectionConfig(faults_per_channel=1)
+
+    def test_profile_lookup_falls_back_to_globals(self, tmp_path: Path) -> None:
+        """When a channel is absent from profiles_path, global fallback applies."""
+        import json
+
+        from spacecraft_telemetry.injection.faults import ChannelProfile
+
+        profiles = {"S1000003": {"signal_class": "slow_lownoise"}}
+        p = tmp_path / "profiles.json"
+        p.write_text(json.dumps(profiles))
+
+        # Unknown channel falls back to ChannelProfile() defaults
+        raw = json.loads(p.read_text())
+        channel_entry = raw.get("UNKNOWN_CHANNEL", {})
+        profile = ChannelProfile.from_dict(channel_entry)
+        assert profile.signal_class == "slow_lownoise"  # default

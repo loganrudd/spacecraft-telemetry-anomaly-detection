@@ -16,13 +16,15 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission1}"
+CHANNELS="${CHANNELS:-}"   # optional comma-separated list, e.g. S1000003,P1000003
 NO_WAIT=false
 DELETE_AFTER=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --mission)     MISSION="$2"; shift 2 ;;
-    --no-wait)     NO_WAIT=true; shift ;;
+    --mission)      MISSION="$2";   shift 2 ;;
+    --channels)     CHANNELS="$2";  shift 2 ;;
+    --no-wait)      NO_WAIT=true;   shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -30,9 +32,19 @@ done
 
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MISSION
 
-echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION})"
+# Build the channel-selection argument for the RayJob entrypoint.
+# envsubst does not support ${VAR:+...} conditional expansion — resolve it here
+# on the host so the YAML receives a plain ${CHANNELS_ARG} substitution.
+if [[ -n "${CHANNELS:-}" ]]; then
+  CHANNELS_ARG="--channels ${CHANNELS}"
+else
+  CHANNELS_ARG=""
+fi
+
+export PROJECT_ID REGION MISSION CHANNELS_ARG
+
+echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${CHANNELS:+, channels=${CHANNELS}})"
 
 if kubectl get rayjob spacecraft-preprocess -n ray &>/dev/null; then
   echo "==> Deleting existing spacecraft-preprocess RayJob"

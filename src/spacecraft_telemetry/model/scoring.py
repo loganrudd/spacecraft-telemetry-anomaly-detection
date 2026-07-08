@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -98,6 +97,12 @@ def predict(
                     total=n_batches,
                 )
 
+    if not all_preds:
+        raise ValueError(
+            f"predict() got an empty DataLoader — no test windows for channel {channel!r}. "
+            "The test split likely has no segments long enough for the model's window_size. "
+            "Check for LOS fragmentation or reduce window_size."
+        )
     predictions = np.concatenate(all_preds).astype(np.float32)
     targets = np.concatenate(all_targets).astype(np.float32)
     return predictions, targets
@@ -332,6 +337,7 @@ def score_channel(
     *,
     eval_split: Literal["full_test", "hpo_portion", "final_portion"] = "full_test",
     parent_hpo_run_id: str | None = None,
+    data_source: Literal["nominal", "injected"] = "nominal",
 ) -> dict[str, Any]:
     """Load model + test Parquet → predict → score → persist artifacts.
 
@@ -355,6 +361,11 @@ def score_channel(
         eval_split:        Which temporal slice of the test set to evaluate.
         parent_hpo_run_id: MLflow run ID of the HPO trial that produced the
                            scoring params (used to set ``tuned_from_run`` tag).
+        data_source:       "nominal" (default) or "injected" — recorded as the
+                           ``data_source`` tag so ray_fanout.tune can locate a
+                           channel's nominal baseline run independently of its
+                           injected-data run (used by the false-positive-rate
+                           penalty in the HPO objective; see ray_fanout/tune.py).
 
     Returns:
         Metrics dict over the selected eval portion. Headline keys are computed
@@ -450,7 +461,7 @@ def score_channel(
     with suppress(Exception):
         _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
 
-    _extra: dict[str, str] = {"eval_split": eval_split}
+    _extra: dict[str, str] = {"eval_split": eval_split, "data_source": data_source}
     if parent_hpo_run_id is not None:
         _extra["tuned_from_run"] = parent_hpo_run_id
 

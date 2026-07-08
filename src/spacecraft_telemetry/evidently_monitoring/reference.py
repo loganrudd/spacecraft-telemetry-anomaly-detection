@@ -24,10 +24,9 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
-
-from spacecraft_telemetry.core.config import Settings
 from upath import UPath
 
+from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.paths import to_upath
 from spacecraft_telemetry.features.definitions import _DEFAULT_WINDOWS, FEATURE_DEFINITIONS
 
@@ -199,7 +198,7 @@ def build_reference_profile(
     * ``split="train"`` — for **batch drift reports** (``drift batch-mission``).
       Compares the training distribution against the test/deployment distribution
       and shows whether meaningful temporal drift occurred between model training
-      (2009–2011) and inference time (2011–2013).  Using test vs test for batch
+      (2009-2011) and inference time (2011-2013).  Using test vs test for batch
       reports produces near-zero Wasserstein distances (same distribution → no
       drift detected), which is uninformative.
 

@@ -1,0 +1,110 @@
+# RayJob — parallel channel training on GKE Autopilot (CPU-only variant).
+#
+# Use this instead of cluster_train.yaml when the dataset is small enough that
+# GPU provisioning overhead exceeds training time (e.g. ISS with ~1 week of data
+# and 6 channels). cloud_train.sh selects this file automatically when CPU=1.
+#
+# Environment variables required before applying (cloud_train.sh sets these):
+#   PROJECT_ID   GCP project ID
+#   REGION       GCP region (e.g. us-central1)
+#   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
+#   MISSION      Mission name (e.g. ISS)
+#   WINDOW_SIZE_OVERRIDE  128 for ISS, 250 for ESA (set by cloud_train.sh)
+#
+# Sizing rationale (SINGLE-NODE — no worker group):
+#   Training 6 small ISS LSTMs on CPU is tiny, so a separate worker group is pure
+#   overhead: GKE Autopilot repeatedly failed to place an 8-vCPU worker
+#   (Insufficient cpu / NodeTerminated launch→kill cycle) while tasks sat pending.
+#   Instead the head runs the train tasks directly — num-cpus=6 schedules all 6
+#   channels (num_cpus=1 each) on one node, leaving ~2 vCPU of the 8-vCPU request
+#   for the driver + GCS/dashboard daemons. torch.set_num_threads(1) per task
+#   keeps the 6 BLAS pools from oversubscribing. No autoscaler, no worker
+#   provisioning, no GPU node → no 3–5 min wait, no placement churn.
+
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: spacecraft-train
+  namespace: ray
+spec:
+  entrypoint: >-
+    spacecraft-telemetry --env cloud ray train
+    --mission ${MISSION}
+    ${CHANNELS_ARG}
+
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 3600
+
+  rayClusterSpec:
+    rayVersion: "2.31.0"
+    # Single-node: no worker group, so no autoscaler needed.
+    enableInTreeAutoscaling: false
+
+    headGroupSpec:
+      rayStartParams:
+        dashboard-host: "0.0.0.0"
+        # num-cpus>0 so train tasks run ON the head (no worker group). 6 channels
+        # → 6 task slots; ~2 vCPU of the 8-vCPU request left for driver + GCS.
+        num-cpus: "6"
+      template:
+        spec:
+          serviceAccountName: ray-sa
+          containers:
+            - name: ray-head
+              image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
+              env:
+                - name: SPACECRAFT_ENV
+                  value: cloud
+                - name: SPACECRAFT_MLFLOW__TRACKING_URI
+                  value: ${MLFLOW_URL}
+                - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
+                  value: gs://${PROJECT_ID}-processed-data
+                - name: MLFLOW_ARTIFACTS_DESTINATION
+                  value: gs://${PROJECT_ID}-artifacts/mlflow
+                - name: SPACECRAFT_RAY__ADDRESS
+                  value: auto
+                - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
+                  value: "0"
+                - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                  value: "${WINDOW_SIZE_OVERRIDE}"
+                - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+                  value: "30"
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: "16Gi"
+                limits:
+                  cpu: "8"
+                  memory: "16Gi"
+              livenessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - >-
+                      wget -T 5 -q -O- http://localhost:52365/api/local_raylet_healthz
+                      | grep success &&
+                      wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
+                      | grep success
+                initialDelaySeconds: 180
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 5
+              readinessProbe:
+                exec:
+                  command:
+                    - bash
+                    - -c
+                    - >-
+                      wget -T 5 -q -O- http://localhost:52365/api/local_raylet_healthz
+                      | grep success &&
+                      wget -T 5 -q -O- http://localhost:8265/api/gcs_healthz
+                      | grep success
+                initialDelaySeconds: 90
+                periodSeconds: 10
+                timeoutSeconds: 20
+                failureThreshold: 10
+
+    # No workerGroupSpecs — single-node cluster. Train tasks run on the head
+    # (num-cpus=6 above). See the sizing rationale at the top of this file for
+    # why a separate CPU worker group was removed (Autopilot placement churn).

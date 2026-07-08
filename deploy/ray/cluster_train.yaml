@@ -57,6 +57,9 @@ spec:
                   value: auto
                 - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                   value: "${NUM_GPUS}"
+                # ISS=128, ESA=250 — set by cloud_train.sh (LOS segment constraint).
+                - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                  value: "${WINDOW_SIZE_OVERRIDE}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
               resources:
@@ -127,6 +130,9 @@ spec:
                   # Pack 8 channel models per L4 (24 GB VRAM, each LSTM <50 MB).
                   - name: SPACECRAFT_RAY__NUM_GPUS_PER_TASK
                     value: "${NUM_GPUS}"
+                  # ISS=128, ESA=250 — set by cloud_train.sh (LOS segment constraint).
+                  - name: SPACECRAFT_MODEL__WINDOW_SIZE
+                    value: "${WINDOW_SIZE_OVERRIDE}"
                   # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
                   # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
                   - name: LD_LIBRARY_PATH

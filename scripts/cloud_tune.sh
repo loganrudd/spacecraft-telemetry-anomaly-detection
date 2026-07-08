@@ -18,12 +18,16 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+INJECTED="${INJECTED:-0}"
+CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)     MISSION="$2"; shift 2 ;;
+    --injected)    INJECTED="1"; shift ;;
+    --channels)    CHANNELS="$2"; shift 2 ;;
     --no-wait)     NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -33,7 +37,28 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
-export PROJECT_ID REGION MLFLOW_URL MISSION
+
+# INJECTED=1 tunes against the manufactured-label dataset (ISS injection-driven
+# HPO). `inject run` writes no channels.txt, so fall back to the base channels.txt
+# (injected data covers exactly the same channels as the preprocessed dataset).
+if [[ "${INJECTED}" = "1" ]]; then
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
+  if [[ -n "${CHANNELS:-}" ]]; then
+    CHANNELS_ARG="--channels ${CHANNELS}"
+  else
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  fi
+else
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+fi
+# ISS W=128 override — see cloud_train.sh for rationale.
+if [[ "${MISSION}" = "ISS" ]]; then
+  WINDOW_SIZE_OVERRIDE="128"
+else
+  WINDOW_SIZE_OVERRIDE="250"
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION})"
 

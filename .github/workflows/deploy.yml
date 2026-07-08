@@ -197,9 +197,41 @@ jobs:
             --project "${{ env.PROJECT_ID }}" \
             --quiet
 
+  deploy-api-iss:
+    name: Deploy api-iss to Cloud Run (ISS mission)
+    needs: [build-api, deploy-mlflow]
+    # Same gate as deploy-api — both services run the same image. api-iss is
+    # the ISS mission serving endpoint; it shares sa-api and all env wiring.
+    if: |
+      always() &&
+      needs.build-api.result == 'success' &&
+      needs.deploy-mlflow.result != 'failure' &&
+      needs.deploy-mlflow.result != 'cancelled'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - name: Deploy api-iss service
+        run: |
+          gcloud run deploy api-iss \
+            --image "${{ needs.build-api.outputs.image }}" \
+            --region "${{ env.REGION }}" \
+            --project "${{ env.PROJECT_ID }}" \
+            --quiet
+
   smoke:
     name: Smoke test
-    needs: deploy-api
+    needs: [deploy-api, deploy-api-iss]
+    # Run when at least one deploy job succeeded; skip if both were skipped
+    # (image unchanged). always() prevents a skipped deploy-api-iss from
+    # transitively blocking the smoke test when only MLflow changed.
+    if: |
+      always() &&
+      (needs.deploy-api.result == 'success' || needs.deploy-api-iss.result == 'success')
     runs-on: ubuntu-latest
 
     steps:

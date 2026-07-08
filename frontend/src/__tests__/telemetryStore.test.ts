@@ -93,6 +93,27 @@ describe("TelemetryStore", () => {
     expect(telemetryStore.snapshot("ch-a")).toHaveLength(1); // repopulated from i=0
     expect(telemetryStore.snapshot("ch-b")).toHaveLength(0); // sibling cleared too
   });
+
+  it("does not clear when a live telemetry bucket lands behind recent raw ticks", () => {
+    // Live mode interleaves two streams on one channel: event: raw carries the
+    // wall-clock arrival time, while event: telemetry for a just-closed 30s grid
+    // bucket is labeled with the bucket START (~30s earlier). They must use
+    // independent monotonicity guards, or every bucket close looks like a
+    // replay-wrap and blanks the chart ("Waiting for data…").
+    telemetryStore.pushRaw({
+      channel: "ch-a",
+      timestamp: "2000-01-01T00:00:29Z",
+      value_normalized: 1,
+    });
+    telemetryStore.flushForTest();
+    expect(telemetryStore.snapshot("ch-a")).toHaveLength(1);
+
+    // Telemetry event for the [00:00, 00:30) bucket — labeled 00:00:00, i.e.
+    // BEFORE the 00:00:29 raw tick above. Must NOT trigger a clear.
+    telemetryStore.push(makeEvent("ch-a", 0)); // ts 2000-01-01T00:00:00Z
+    telemetryStore.flushForTest();
+    expect(telemetryStore.snapshot("ch-a")).toHaveLength(2); // raw + telemetry kept
+  });
 });
 
 describe("TelemetryStore — EMPTY sentinel", () => {

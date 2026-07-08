@@ -9,8 +9,17 @@
 # Use --tuned after cloud-tune to score the held-out 40% with HPO params.
 # tuned_configs.json must exist in GCS before using --tuned; the job exits 1 if missing.
 #
+# --injected (ISS Phase 15 only): scores the manufactured-label dataset and
+# tags the run data_source=injected. ray_fanout.tune's false-positive-rate
+# penalty needs BOTH a tagged injected run (for fault recall) AND a tagged
+# nominal run (for the FP baseline) per channel — run a plain baseline pass
+# (no --injected) at least once for any mission using injection-driven HPO:
+#   ./scripts/cloud_score.sh --mission ISS                # nominal baseline
+#   ./scripts/cloud_score.sh --mission ISS --injected      # injected pass
+#   ./scripts/cloud_tune.sh  --mission ISS --injected      # HPO uses both
+#
 # Usage:
-#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--no-wait] [--delete-after]
+#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--injected] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -35,13 +44,20 @@ set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
 TUNED="${TUNED:-}"
+INJECTED="${INJECTED:-0}"
+CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
 DELETE_AFTER=false
+
+CPU="${CPU:-0}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
     --tuned)        TUNED="1"; shift ;;
+    --injected)     INJECTED="1"; shift ;;
+    --channels)     CHANNELS="$2"; shift 2 ;;
+    --cpu)          CPU="1"; shift ;;
     --no-wait)      NO_WAIT=true; shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -51,6 +67,25 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+
+# INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO)
+# and tags the run data_source=injected (see model/scoring.py, cli.py
+# `ray score --injected`). `inject run` writes no channels.txt, so fall back
+# to the base channels.txt (injected data covers exactly the same channels as
+# the preprocessed dataset).
+if [[ "${INJECTED}" = "1" ]]; then
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
+  INJECTED_FLAG="--injected"
+  if [[ -n "${CHANNELS:-}" ]]; then
+    CHANNELS_ARG="--channels ${CHANNELS}"
+  else
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  fi
+else
+  PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
+  INJECTED_FLAG=""
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+fi
 # GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
 # Packing is bounded by GPU MEMORY, not vCPUs: each task is a separate process
 # holding ~3.6 GiB (CUDA context + batch-2048 activations), so ~5 fit on the
@@ -61,7 +96,14 @@ NUM_GPUS="${NUM_GPUS:-0.2}"
 # full_test scores every window — a coverage view that also evaluates channels
 # whose anomalies fall outside the held-out slice.
 EVAL_SPLIT="${EVAL_SPLIT:-final_portion}"
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED NUM_GPUS EVAL_SPLIT
+# ISS W=128 override — see cloud_train.sh for rationale.
+if [[ "${MISSION}" = "ISS" ]]; then
+  WINDOW_SIZE_OVERRIDE="128"
+else
+  WINDOW_SIZE_OVERRIDE="250"
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION TUNED INJECTED_FLAG NUM_GPUS EVAL_SPLIT \
+  PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"
@@ -75,7 +117,13 @@ if kubectl get rayjob spacecraft-score -n ray &>/dev/null; then
   kubectl wait --for=delete rayjob/spacecraft-score -n ray --timeout=120s
 fi
 
-envsubst < "$(dirname "$0")/../deploy/ray/cluster_score.yaml" | kubectl apply -f -
+if [[ "${CPU}" = "1" ]]; then
+  CLUSTER_YAML="deploy/ray/cluster_score_cpu.yaml"
+  echo "==> CPU mode: skipping GPU node provisioning"
+else
+  CLUSTER_YAML="deploy/ray/cluster_score.yaml"
+fi
+envsubst < "$(dirname "$0")/../${CLUSTER_YAML}" | kubectl apply -f -
 
 if $NO_WAIT; then
   echo "==> RayJob submitted. Monitor with:"

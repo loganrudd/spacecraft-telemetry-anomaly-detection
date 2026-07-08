@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
+from spacecraft_telemetry.core.config import MissionLink
+
 
 class TelemetryEvent(BaseModel):
     """Per-tick inference result emitted by the SSE telemetry stream."""
@@ -42,6 +44,9 @@ class HealthResponse(BaseModel):
     channel_subsystems: dict[str, str] = {}
     uptime_s: float = 0.0
     mlflow_tracking_uri: str = ""
+    # Sibling-mission entries for the dashboard mission selector. Empty list
+    # hides the selector (single-mission deploys, all existing tests).
+    available_missions: list[MissionLink] = []
 
 
 class StreamQueryParams(BaseModel):
@@ -85,6 +90,58 @@ class DriftEvent(BaseModel):
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"percent_drifted must be in [0, 1], got {v}")
         return v
+
+
+class RawTelemetryEvent(BaseModel):
+    """Per-tick raw event emitted at native Lightstreamer cadence (event: raw).
+
+    Carries the normalized value immediately on each received tick before the
+    30-second grid bucket closes.  Drives the continuous live chart line.
+    No prediction or anomaly fields — those arrive via TelemetryEvent at 30 s.
+    """
+
+    timestamp: datetime
+    channel: str
+    value_normalized: float
+
+
+class InjectRequest(BaseModel):
+    """Request body for POST /api/inject."""
+
+    fault_type: Literal["spike", "drift", "flatline"]
+    # Channel IDs to inject; empty list = all loaded channels.
+    channels: list[str] = []
+    # Additive offset in z-score units (ignored for flatline).
+    # 5-sigma default matches the drift fault-type default — large enough to climb
+    # past the EWMA-attenuated threshold but physically plausible.
+    magnitude_sigma: float = 5.0
+    # Number of replay ticks the fault lasts. 60 ticks = 30 min at 30s grid —
+    # gives the EWMA ramp-up and K consecutive crossings needed for drift.
+    duration_ticks: int = 60
+
+    @field_validator("magnitude_sigma")
+    @classmethod
+    def mag_positive(cls, v: float) -> float:
+        if not 0 < v <= 50:
+            raise ValueError(f"magnitude_sigma must be in (0, 50], got {v}")
+        return v
+
+    @field_validator("duration_ticks")
+    @classmethod
+    def dur_positive(cls, v: int) -> int:
+        if not 1 <= v <= 1000:
+            raise ValueError(f"duration_ticks must be in [1, 1000], got {v}")
+        return v
+
+
+class InjectResponse(BaseModel):
+    """Response body for POST /api/inject."""
+
+    status: str  # "accepted"
+    fault_type: str
+    channels: list[str]  # effective channel list (expanded from [] to all loaded)
+    magnitude_sigma: float
+    duration_ticks: int
 
 
 class ErrorResponse(BaseModel):

@@ -263,6 +263,18 @@ resource "google_cloud_run_v2_service" "api" {
           value = jsonencode(var.api_subsystems)
         }
       }
+
+      # Mission switcher: activated once api_iss_url is populated (two-pass
+      # apply — see variable "api_iss_url" in variables.tf for the workflow).
+      dynamic "env" {
+        for_each = var.api_iss_url != "" ? [1] : []
+        content {
+          name = "SPACECRAFT_API__AVAILABLE_MISSIONS"
+          value = jsonencode([
+            { id = "ISS", label = "NASA ISS", url = var.api_iss_url }
+          ])
+        }
+      }
     }
   }
 
@@ -282,12 +294,210 @@ resource "google_cloud_run_v2_service" "api" {
 }
 
 # ---------------------------------------------------------------------------
+# ISS API service — second mission, shares the api container image.
+# Live pump subscribes to and archives all 18 ISS PUIs (SPACECRAFT_COLLECT__
+# CHANNEL_SET=all below), but only the 6 curated power+thermal channels
+# (2 subsystems) carry a @champion telemanom-ISS-* model post the July drift
+# review (see .claude/rules/iss.md "Demo tiering") — the solar_array BGA
+# angles and attitude quaternions are demoted (non-stationary / degenerate
+# std) and so are archived but never reach the SSE stream (champion-gated,
+# see api/live/pump.py _served_channels). Anomalies are demonstrated via the
+# on-demand Inject Fault button.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_service" "api_iss" {
+  name     = "api-iss"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account = google_service_account.api.email
+
+    scaling {
+      min_instance_count = var.iss_min_instances
+      # Single instance: one Lightstreamer session, one broadcaster, one GCS
+      # archive writer. Multiple instances would cause split-brain SSE state and
+      # duplicate tick archival. SSE fan-out within the instance is O(1) viewers.
+      max_instance_count = 1
+    }
+
+    # Same caps as the ESA api service — SSE streams are long-lived.
+    max_instance_request_concurrency = 10
+    execution_environment            = "EXECUTION_ENVIRONMENT_GEN2"
+    timeout                          = "3600s"
+
+    containers {
+      image = local.placeholder_image
+
+      resources {
+        limits = {
+          # 6 champion models fit comfortably in 1 vCPU / 2 GiB — the pump's
+          # memory footprint scales with the 18 archived/subscribed channels
+          # (unaffected by the champion count), while inference load scales
+          # with the 6 modeled channels. Revisit only if the raw-tick/archive
+          # side (not inference) shows pressure (same measure-first discipline
+          # as ESA sizing in variables.tf).
+          cpu    = "1"
+          memory = "2Gi"
+        }
+        cpu_idle          = false
+        startup_cpu_boost = true
+      }
+
+      env {
+        name  = "SPACECRAFT_ENV"
+        value = "cloud"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__MISSION"
+        value = "ISS"
+      }
+
+      env {
+        name  = "SPACECRAFT_MLFLOW__TRACKING_URI"
+        value = google_cloud_run_v2_service.mlflow.uri
+      }
+
+      env {
+        name  = "SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR"
+        value = "gs://${var.project_id}-processed-data"
+      }
+
+      env {
+        name  = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+        value = "gs://${var.project_id}-sample-data"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__REFERENCE_PROFILES_DIR"
+        value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      env {
+        name  = "SPACECRAFT_MONITORING__REFERENCE_PROFILES_DIR"
+        value = "gs://${var.project_id}-artifacts/reference_profiles"
+      }
+
+      # ISS-only real-time drift calibration. The reference profile's rate_of_change
+      # is Δvalue/Δt_seconds; the live monitor only sees per-tick values with no
+      # timestamps, so it must be told the tick's wall-clock interval (ISS's fixed
+      # 30s grid) to reproduce the same units — otherwise rate_of_change is off by
+      # 30x and reads as permanent drift. feature_drift_threshold is raised from the
+      # generic Evidently default (0.10) because ISS's strongly periodic orbital
+      # signal makes short (256-tick) live windows diverge from the multi-day
+      # reference far more than Evidently's default assumes. drift_confirm_windows
+      # requires 3 consecutive alerting runs before flagging, suppressing transient
+      # spikes so nominal windows stop flagging constantly. Both values are a first
+      # pass from a read-only sweep (scratchpad/week_sweep.py: value-drift median
+      # 0.13-0.27 for the first ~3 days with brief spikes to ~1.0; genuine sustained
+      # drift develops day ~5-11, medians 0.5-1.8) against the train-split reference
+      # (see `make seed-reference-profiles ... MISSION=ISS` with --split train) --
+      # worth re-tuning with more banked data.
+      env {
+        name  = "SPACECRAFT_DRIFT__REALTIME_RATE_INTERVAL_SECONDS"
+        value = "30"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__FEATURE_DRIFT_THRESHOLD"
+        value = "1.0"
+      }
+
+      env {
+        name  = "SPACECRAFT_DRIFT__DRIFT_CONFIRM_WINDOWS"
+        value = "3"
+      }
+
+      env {
+        name  = "MLFLOW_ARTIFACTS_DESTINATION"
+        value = "gs://${var.project_id}-artifacts/mlflow"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__STATIC_DIR"
+        value = "/app/frontend/dist"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_WARMUP_ROWS"
+        value = "-1350"
+      }
+
+      env {
+        name  = "SPACECRAFT_API__REPLAY_MAX_ROWS"
+        value = "1350"
+      }
+
+      # Phase 17: live Lightstreamer pump mode.
+      env {
+        name  = "SPACECRAFT_API__LIVE"
+        value = "true"
+      }
+
+      # Archive raw ticks for all 18 channels to GCS (replaces standalone VM).
+      env {
+        name  = "SPACECRAFT_API__ARCHIVE_TO_GCS"
+        value = "true"
+      }
+
+      env {
+        name  = "SPACECRAFT_COLLECT__CHANNEL_SET"
+        value = "all"
+      }
+
+      env {
+        name  = "SPACECRAFT_COLLECT__RAW_TICKS_DIR"
+        value = "gs://${var.project_id}-raw-data"
+      }
+
+      # Flush raw-tick buffers every 5 min — bounds loss on Cloud Run recycle
+      # to an interval indistinguishable from a normal LOS gap (~53 s median).
+      env {
+        name  = "SPACECRAFT_COLLECT__FLUSH_INTERVAL_SECONDS"
+        value = "300"
+      }
+
+      # Mission switcher: ISS service always references the ESA service URI
+      # directly (cross-resource ref, no circular dependency). api.uri is
+      # already known since the api service exists before api_iss is created.
+      env {
+        name = "SPACECRAFT_API__AVAILABLE_MISSIONS"
+        value = jsonencode([
+          { id = "ESA-Mission1", label = "ESA Mission 1", url = google_cloud_run_v2_service.api.uri }
+        ])
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    google_cloud_run_v2_service.mlflow,
+    google_project_iam_member.api_cloudsql_client,
+  ]
+
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Cloud Run IAM
 # ---------------------------------------------------------------------------
 
 # Public access to the api service.
 resource "google_cloud_run_v2_service_iam_member" "api_public" {
   name     = google_cloud_run_v2_service.api.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# Public access to the api-iss service (same audience as api — portfolio demo).
+# sa-api already has mlflow invoker access (mlflow_api_invoker below), so no
+# new IAM is needed for the shared service account.
+resource "google_cloud_run_v2_service_iam_member" "api_iss_public" {
+  name     = google_cloud_run_v2_service.api_iss.name
   location = var.region
   role     = "roles/run.invoker"
   member   = "allUsers"

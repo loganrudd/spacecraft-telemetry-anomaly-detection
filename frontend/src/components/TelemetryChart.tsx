@@ -93,8 +93,13 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
   // stable as data arrives instead of squeezing all history into view.
   const visible = events.slice(-CHART_WINDOW);
 
-  const labeledIntervals = labeledIntervalsWithDetection(visible);
-  const predIntervals = collapseFlags(visible, "is_anomaly_predicted");
+  // Raw events (synthetic, smoothed_error=null) always have is_anomaly_predicted=false.
+  // Using them in collapseFlags closes intervals immediately, producing zero-width
+  // bands for single-bucket anomalies in live ISS mode (1-10s raw ticks between 30s
+  // grid telemetry events). Filter to grid-only so intervals span to the next grid tick.
+  const gridEvents = visible.filter((e) => e.smoothed_error !== null);
+  const labeledIntervals = labeledIntervalsWithDetection(gridEvents);
+  const predIntervals = collapseFlags(gridEvents, "is_anomaly_predicted");
   const chartHeight = CHART_HEIGHTS[density];
 
   if (events.length === 0) {
@@ -168,6 +173,14 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
             dot={false}
             isAnimationActive={false}
           />
+          {/* connectNulls MUST be true: in live ISS mode the buffer interleaves
+              event: raw points (prediction=null, 1-10s cadence) with event:
+              telemetry points (prediction set, 30s cadence), so prediction
+              points are never adjacent. With connectNulls={false} + dot={false}
+              each isolated prediction renders as nothing, making the overlay
+              invisible. Connecting across the raw nulls draws the 30s-sampled
+              forecast as a continuous line. ESA replay is unaffected (its buffer
+              has no raw points, so predictions are already contiguous). */}
           <Line
             type="monotone"
             dataKey="prediction"
@@ -177,7 +190,7 @@ function TelemetryChart({ channel, density = "comfortable" }: Props) {
             strokeDasharray="4 2"
             dot={false}
             isAnimationActive={false}
-            connectNulls={false}
+            connectNulls={true}
           />
         </LineChart>
       </ResponsiveContainer>

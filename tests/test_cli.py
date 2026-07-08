@@ -983,8 +983,10 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("spacecraft_telemetry.cli.MlflowClient") as mock_discovery_client_cls,
-            patch("spacecraft_telemetry.mlflow_tracking.registry.MlflowClient") as mock_registry_client_cls,
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
         ):
             mock_discovery_client = MagicMock()
             mock_registry_client = MagicMock()
@@ -1022,7 +1024,7 @@ class TestMlflowCli:
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
-            patch("spacecraft_telemetry.cli.MlflowClient") as mock_client_cls,
+            patch("mlflow.tracking.client.MlflowClient") as mock_client_cls,
         ):
             mock_client = MagicMock()
             mock_client_cls.return_value = mock_client
@@ -1148,3 +1150,236 @@ class TestDriftCommands:
             )
 
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+
+
+class TestCollectCommand:
+    def test_help_shows_options(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["collect", "--help"])
+        assert result.exit_code == 0
+        assert "--channel-set" in result.output
+        assert "--duration" in result.output
+        # --mission was removed (ISSLive is a single-mission feed)
+        assert "--mission" not in result.output
+
+    def test_collect_calls_collector_run(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_collector = MagicMock()
+        with patch(
+            "spacecraft_telemetry.ingest.collector.LightstreamerCollector",
+            return_value=mock_collector,
+        ):
+            result = runner.invoke(main, ["--env=local", "collect", "--duration=0"])
+
+        assert result.exit_code == 0, result.output
+        mock_collector.run.assert_called_once_with(seconds=0.0)
+
+    def test_channel_set_override_reaches_config(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--channel-set all propagates into the CollectorConfig passed to the ctor."""
+        import spacecraft_telemetry.ingest.collector as _mod
+
+        captured_configs: list[object] = []
+        orig_init = _mod.LightstreamerCollector.__init__
+
+        def _capture_init(self: object, config: object, dest_dir: object) -> None:
+            captured_configs.append(config)
+            orig_init(self, config, dest_dir)  # type: ignore[arg-type]
+
+        mock_run = MagicMock()
+        with (
+            patch.object(_mod.LightstreamerCollector, "__init__", _capture_init),
+            patch.object(_mod.LightstreamerCollector, "run", mock_run),
+        ):
+            result = runner.invoke(
+                main, ["--env=local", "collect", "--channel-set=all", "--duration=0"]
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured_configs, "LightstreamerCollector was not constructed"
+        assert captured_configs[0].channel_set == "all"  # type: ignore[union-attr]
+
+    def test_dest_dir_preserves_gcs_uri(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dest_dir passed to LightstreamerCollector must not mangle gs:// URIs.
+
+        pathlib.Path('gs://bucket/x') collapses the double-slash, causing UPath
+        to raise ValueError on the first flush. The CLI must pass the raw string.
+        """
+        monkeypatch.setenv(
+            "SPACECRAFT_COLLECT__RAW_TICKS_DIR", "gs://my-project-raw-data"
+        )
+
+        import spacecraft_telemetry.ingest.collector as _mod
+
+        captured_dest: list[str] = []
+        orig_init = _mod.LightstreamerCollector.__init__
+
+        def _capture_init(self: object, config: object, dest_dir: object) -> None:
+            captured_dest.append(str(dest_dir))
+            orig_init(self, config, dest_dir)  # type: ignore[arg-type]
+
+        mock_run = MagicMock()
+        with (
+            patch.object(_mod.LightstreamerCollector, "__init__", _capture_init),
+            patch.object(_mod.LightstreamerCollector, "run", mock_run),
+        ):
+            result = runner.invoke(main, ["--env=local", "collect", "--duration=0"])
+
+        assert result.exit_code == 0, result.output
+        assert captured_dest, "LightstreamerCollector was not constructed"
+        assert captured_dest[0].startswith("gs://"), (
+            f"gs:// URI mangled: {captured_dest[0]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# inject group (Phase 15)
+# ---------------------------------------------------------------------------
+
+
+class TestInjectGroup:
+    def test_inject_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["inject", "--help"])
+        assert result.exit_code == 0
+        assert "inject" in result.output.lower()
+
+    def test_inject_run_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["inject", "run", "--help"])
+        assert result.exit_code == 0
+        assert "--mission" in result.output
+        assert "--processed-dir" in result.output
+        assert "--output-dir" in result.output
+
+    def test_inject_run_calls_generate(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        manifest = {"S1000003": [{"type": "drift", "start": 10, "end": 50, "duration": 40,
+                                  "magnitude_sigma": 1.0, "signal_class": "slow_lownoise"}]}
+
+        with patch(
+            "spacecraft_telemetry.injection.generate_injected_dataset",
+            return_value=manifest,
+        ) as mock_gen:
+            result = runner.invoke(
+                main,
+                ["--env=local", "inject", "run", "--mission=ISS",
+                 "--channels=S1000003",
+                 f"--processed-dir={tmp_path}/proc",
+                 f"--output-dir={tmp_path}/injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_gen.assert_called_once()
+        call_kwargs = mock_gen.call_args
+        assert call_kwargs.args[1] == "ISS"  # mission
+        assert call_kwargs.args[2] == ["S1000003"]  # channel_list
+
+    def test_inject_run_processed_dir_override_applied(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import patch
+
+        captured_settings: list = []
+
+        def _fake_gen(settings, mission, channels):
+            captured_settings.append(settings)
+            return {}
+
+        with patch("spacecraft_telemetry.injection.generate_injected_dataset", _fake_gen):
+            result = runner.invoke(
+                main,
+                ["--env=local", "inject", "run", "--mission=ISS",
+                 f"--processed-dir={tmp_path}/custom_proc",
+                 f"--output-dir={tmp_path}/injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert captured_settings
+        assert str(captured_settings[0].preprocess.processed_data_dir) == str(
+            tmp_path / "custom_proc"
+        )
+
+
+class TestRayScoreProcessedDirOption:
+    def test_processed_dir_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--processed-dir" in result.output
+
+
+class TestRayScoreInjectedOption:
+    """--injected (Phase 15) tags scoring runs so ray_fanout.tune can locate a
+    channel's nominal baseline run independently of its injected-data run for
+    the HPO false-positive-rate penalty."""
+
+    def _mock_cm(self) -> MagicMock:
+        cm = MagicMock()
+        cm.__enter__.return_value = None
+        cm.__exit__.return_value = None
+        return cm
+
+    def test_injected_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--injected" in result.output
+
+    def test_injected_flag_passes_injected_data_source(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.discover_channels",
+                return_value=["ch_a"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+                return_value=[],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ISS", "--injected"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_score.call_args.kwargs["data_source"] == "injected"
+
+    def test_no_injected_flag_defaults_to_nominal_data_source(self, runner: CliRunner) -> None:
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.discover_channels",
+                return_value=["ch_a"],
+            ),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+                return_value=[],
+            ) as mock_score,
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "score", "--mission=ISS"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mock_score.call_args.kwargs["data_source"] == "nominal"
+
+
+class TestRayTuneProcessedDirOption:
+    def test_processed_dir_flag_in_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "tune", "--help"])
+        assert result.exit_code == 0
+        assert "--processed-dir" in result.output
