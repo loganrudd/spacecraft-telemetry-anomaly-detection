@@ -29,18 +29,32 @@ for the leakage-free protocol and honest framing).
 
 **ESA replay (recorded):** 
 <p align="center">
-  <img src="docs/assets/dashboard.gif" alt="ESA dashboard: telemetry replay with predicted/labeled anomaly bands and a subsystem overview" width="900">
+  <img src="docs/assets/esa.gif" width="900">
   <br><em>ESA — interactive replay with real labeled anomalies (live at the URL above)</em>
 </p>
 
-**ISS live pump (recorded):** the mp4 below is a live capture of real ISS telemetry streaming
+**ISS live pump (recorded):** the gif below is a sped up live capture of real ISS telemetry streaming
 through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
 session) is fully defined in Terraform and deployable on demand, but is kept **torn down
 between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
 for a 24/7 endpoint. ESA stays live because it scales to zero (≈$0 idle).
 <p align="center">
-  <img src="docs/assets/iss-live.mp4" alt="ISS live pump: real-time NASA ISSLive telemetry streaming through the inference pump with the LIVE indicator" width="900">
+  <img src="docs/assets/iss.gif" width="900">
   <br><em>ISS — real-time NASA ISSLive feed through the live Lightstreamer pump (recorded capture)</em>
+</p>
+
+**ISS LOS / TDRS handover (recorded):** ISS drops comms ~16×/day during TDRS
+handovers and zone-of-exclusion passes. When the feed goes silent, the live pump
+detects the silence and transparently fails over to recent recorded telemetry so
+the chart never freezes — the `LiveStatusBanner` labels the state
+("showing recent recorded data") with an empirical resume ETA, then the pump
+re-primes each channel from the last window of grid buckets and resumes on signal
+recovery.
+<p align="center">
+  <img src="docs/assets/trds.gif" width="900"
+       alt="ISS live pump failing over to recorded telemetry during a TDRS-handover LOS, with the status banner labeling the replay fallback">
+  <br><em>ISS — TDRS handover (Loss of Signal): the live pump transparently fails
+  over to recorded telemetry, labeled honestly by the banner, and re-primes on recovery.</em>
 </p>
 
 
