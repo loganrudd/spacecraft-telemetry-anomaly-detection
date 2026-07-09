@@ -33,7 +33,7 @@ for the leakage-free protocol and honest framing).
   <br><em>ESA — interactive replay with real labeled anomalies (live at the URL above)</em>
 </p>
 
-**ISS live pump (recorded):** the gif below is a sped up live capture of real ISS telemetry streaming
+**ISS live pump (recorded):** the gif below is a sped up live capture of real ISS telemetry streaming with a manually injected anomaly
 through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
 session) is fully defined in Terraform and deployable on demand, but is kept **torn down
 between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
