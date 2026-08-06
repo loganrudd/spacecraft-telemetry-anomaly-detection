@@ -1,5 +1,6 @@
 """Tests for model.dataset — load_series_parquet, _build_window_index,
-WindowedSequenceDataset, make_dataloaders, make_test_dataloader."""
+WindowedSequenceDataset, make_dataloaders, make_test_dataloader,
+window_target_timestamps."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from spacecraft_telemetry.model.dataset import (  # noqa: E402
     load_series_parquet,
     make_dataloaders,
     make_test_dataloader,
+    window_target_timestamps,
 )
 from tests.model.conftest import SeriesParquetFixture  # noqa: E402
 
@@ -340,3 +342,44 @@ def test_make_test_dataloader_anomaly_flags_match_tail(
     # First window (start=0) covers rows 0..span-1 — all nominal since anomaly
     # starts at row (N_TEST_ROWS - ANOMALY_ROWS) = 25, and span=11.
     assert not window_is_anomaly[0], "First window should not be anomalous"
+
+
+# ---------------------------------------------------------------------------
+# window_target_timestamps
+# ---------------------------------------------------------------------------
+
+
+def test_window_target_timestamps_matches_make_test_dataloader(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    """The torch-free helper must reproduce make_test_dataloader's timestamps exactly.
+
+    This is the property esa_adb.detections relies on: reconstructing
+    detection intervals from a logged errors.npy array (indexed the same way
+    as make_test_dataloader's target_timestamps) without re-running inference.
+    """
+    from spacecraft_telemetry.core.config import Settings
+
+    fx = tiny_series_parquet
+    settings = Settings(
+        model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
+    )
+    _, expected_timestamps, _ = make_test_dataloader(settings, fx.mission, fx.channel)
+    actual_timestamps = window_target_timestamps(settings, fx.mission, fx.channel)
+
+    np.testing.assert_array_equal(actual_timestamps, expected_timestamps)
+
+
+def test_window_target_timestamps_returns_correct_count(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    from spacecraft_telemetry.core.config import Settings
+
+    fx = tiny_series_parquet
+    settings = Settings(
+        model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
+    )
+    result = window_target_timestamps(settings, fx.mission, fx.channel)
+    assert len(result) == fx.n_test_windows

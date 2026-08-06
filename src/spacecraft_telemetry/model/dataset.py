@@ -8,6 +8,8 @@ Public API:
     make_dataloaders(settings, mission, channel)     -> (train_loader, val_loader)
     make_test_dataloader(settings, mission, channel) -> (loader, target_timestamps,
                                                          window_is_anomaly)
+    load_window_labels(settings, mission, channel)   -> window_is_anomaly (no torch)
+    window_target_timestamps(settings, mission, channel) -> target_timestamps (no torch)
 """
 
 from __future__ import annotations
@@ -334,4 +336,41 @@ def load_window_labels(
     result: np.ndarray[Any, np.dtype[np.bool_]] = (
         (cumsum[indices + span] - cumsum[indices]) > 0
     )
+    return result
+
+
+def window_target_timestamps(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> np.ndarray[Any, Any]:
+    """Return per-window target timestamps for the test split without a DataLoader.
+
+    Uses the same windowing logic as make_test_dataloader() but has no torch
+    dependency — lets esa_adb.detections re-derive detection intervals from a
+    scoring run's logged errors.npy/threshold.npy without re-running inference
+    (window start indices are deterministic given window_size and
+    prediction_horizon, so this reproduces make_test_dataloader's
+    target_timestamps exactly).
+
+    Returns:
+        (M,) datetime64[ns] — timestamp at each window's target position
+        (index s + W + H - 1), aligned 1:1 with load_window_labels() and with
+        the errors.npy/threshold.npy arrays score_channel() logs.
+
+    Args:
+        settings: Fully resolved Settings.
+        mission:  Mission name, e.g. ``"ESA-Mission1"``.
+        channel:  Channel ID, e.g. ``"channel_1"``.
+    """
+    cfg = settings.model
+    _, segment_ids, is_anomaly, timestamps = load_series_parquet(
+        settings.preprocess.processed_data_dir, mission, channel, "test"
+    )
+    indices = _build_window_index(
+        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        skip_anomalous_windows=False,
+    )
+    span = cfg.window_size + cfg.prediction_horizon
+    result: np.ndarray[Any, Any] = timestamps[indices + span - 1]
     return result
