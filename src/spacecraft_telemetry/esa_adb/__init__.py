@@ -12,8 +12,10 @@ metric) — see ``docs/architecture/esa-adb-metrics.md`` for when to use which.
 Public API (expanded as each module lands — see docs/plans/019):
 ----------
 intervals   normalize, union, intersect, subtract, total_duration, overlaps
+events      Event, load_events, group_events
 """
 
+from spacecraft_telemetry.esa_adb.events import Event, group_events, load_events
 from spacecraft_telemetry.esa_adb.intervals import (
     intersect,
     normalize,
@@ -24,7 +26,10 @@ from spacecraft_telemetry.esa_adb.intervals import (
 )
 
 __all__ = [
+    "Event",
+    "group_events",
     "intersect",
+    "load_events",
     "normalize",
     "overlaps",
     "subtract",
