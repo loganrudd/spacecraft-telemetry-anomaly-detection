@@ -192,20 +192,31 @@ def build_report(
     mission: str = "ESA-Mission1",
     channels: list[str] | None = None,
     run_map: OfflineRunMap | None = None,
+    include_tuned: bool = True,
 ) -> dict[str, Any]:
     """Build the full ESA-ADB-comparable report for ``mission``.
 
-    Requires a baseline (untuned) and a tuned scoring run to already exist for
-    every channel in ``channels`` — this function only reads already-logged
-    scoring artifacts, it never trains or scores. Raises if any channel is
-    missing a matching run rather than silently narrowing the evaluated
-    channel set.
+    Requires a baseline (untuned) scoring run — and, unless ``include_tuned``
+    is False, a tuned one — to already exist for every channel in ``channels``.
+    This function only reads already-logged scoring artifacts, it never trains
+    or scores. Raises if any channel is missing a matching run rather than
+    silently narrowing the evaluated channel set (which would quietly flatter
+    the OR-aggregated metrics).
+
+    Both rows are normally wanted: the paper reports two Telemanom variants,
+    and they line up with ours — Telemanom-ESA (no tuning) against our untuned
+    row, and Telemanom-ESA-Pruned (their thresholding/pruning applied) against
+    our HPO-tuned row. Reporting only one would compare against half the
+    paper's result.
 
     Args:
         run_map: When supplied, resolve runs from this offline map and read
             their arrays from staged paths instead of querying the MLflow
             tracking server (see esa_adb/offline.py). Use when the tracking
             backend is unavailable, or to pin exact run IDs for provenance.
+        include_tuned: Emit the "ours (tuned)" row. Set False only when no HPO
+            pass exists for the mission yet (e.g. an interrupted replication) —
+            the omission is recorded in the footnotes rather than being silent.
 
     Returns:
         {"mission", "channels", "rows": [...], "footnotes": [...]} — see
@@ -222,13 +233,11 @@ def build_report(
         mission=mission,
         channels=channels,
         offline=run_map is not None,
+        include_tuned=include_tuned,
     )
 
     events_df = load_events(settings, mission)
     timeline_full = mission_timeline(settings, mission, channels)
-    hpo_cutoff = _hpo_cutoff(settings, mission, channels)
-    far_future = pd.Timestamp.max.tz_localize("UTC")
-    timeline_tuned = intersect(timeline_full, [(hpo_cutoff, far_future)])
 
     per_channel_untuned = per_channel_detection_intervals(
         settings, mission, channels, tuned=False, run_map=run_map
@@ -236,20 +245,25 @@ def build_report(
     detections_untuned = mission_detection_intervals(
         settings, mission, channels, tuned=False, run_map=run_map
     )
-
-    per_channel_tuned_full = per_channel_detection_intervals(
-        settings, mission, channels, tuned=True, run_map=run_map
-    )
-    per_channel_tuned = {
-        ch: intersect(normalize(ivs), timeline_tuned) for ch, ivs in per_channel_tuned_full.items()
-    }
-    detections_tuned_full = mission_detection_intervals(
-        settings, mission, channels, tuned=True, run_map=run_map
-    )
-    detections_tuned = intersect(normalize(detections_tuned_full), timeline_tuned)
-
     events_full = group_events(events_df, channels, timeline_full)
-    events_tuned = group_events(events_df, channels, timeline_tuned)
+
+    if include_tuned:
+        hpo_cutoff = _hpo_cutoff(settings, mission, channels)
+        far_future = pd.Timestamp.max.tz_localize("UTC")
+        timeline_tuned = intersect(timeline_full, [(hpo_cutoff, far_future)])
+
+        per_channel_tuned_full = per_channel_detection_intervals(
+            settings, mission, channels, tuned=True, run_map=run_map
+        )
+        per_channel_tuned = {
+            ch: intersect(normalize(ivs), timeline_tuned)
+            for ch, ivs in per_channel_tuned_full.items()
+        }
+        detections_tuned_full = mission_detection_intervals(
+            settings, mission, channels, tuned=True, run_map=run_map
+        )
+        detections_tuned = intersect(normalize(detections_tuned_full), timeline_tuned)
+        events_tuned = group_events(events_df, channels, timeline_tuned)
 
     rows: list[dict[str, Any]] = []
     for scope, excluded in _SCOPE_EXCLUSIONS.items():
@@ -268,20 +282,21 @@ def build_report(
         )["f_beta"]
         rows.append(row_untuned)
 
-        row_tuned = _score_row(
-            scope=scope,
-            label="ours (tuned)",
-            events=events_tuned,
-            detections=detections_tuned,
-            timeline=timeline_tuned,
-            excluded=excluded,
-            split="held-out final portion (tune.hpo_eval_fraction)",
-            params="per-subsystem Ray Tune HPO",
-        )
-        row_tuned["channel_aware_f0_5"] = channel_aware(
-            events_tuned, per_channel_tuned, excluded_categories=excluded
-        )["f_beta"]
-        rows.append(row_tuned)
+        if include_tuned:
+            row_tuned = _score_row(
+                scope=scope,
+                label="ours (tuned)",
+                events=events_tuned,
+                detections=detections_tuned,
+                timeline=timeline_tuned,
+                excluded=excluded,
+                split="held-out final portion (tune.hpo_eval_fraction)",
+                params="per-subsystem Ray Tune HPO",
+            )
+            row_tuned["channel_aware_f0_5"] = channel_aware(
+                events_tuned, per_channel_tuned, excluded_categories=excluded
+            )["f_beta"]
+            rows.append(row_tuned)
 
         for label, ref in _PAPER_REFERENCE[scope].items():
             rows.append(
@@ -301,5 +316,14 @@ def build_report(
                 }
             )
 
+    footnotes = list(FOOTNOTES)
+    if not include_tuned:
+        footnotes.append(
+            "The 'ours (tuned)' row is OMITTED from this report (include_tuned=False): "
+            "no HPO pass exists for this mission. The paper's Telemanom-ESA-Pruned "
+            "result (its strongest) therefore has no counterpart row here — the "
+            "comparison covers only the untuned Telemanom-ESA variant."
+        )
+
     log.info("esa_adb.report.done", mission=mission, n_rows=len(rows))
-    return {"mission": mission, "channels": channels, "rows": rows, "footnotes": FOOTNOTES}
+    return {"mission": mission, "channels": channels, "rows": rows, "footnotes": footnotes}

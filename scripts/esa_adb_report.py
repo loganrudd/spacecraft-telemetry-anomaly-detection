@@ -97,6 +97,13 @@ def main() -> None:
         help="Override settings.data.sample_data_dir (holds labels.csv + "
         "anomaly_types.csv, the ground truth).",
     )
+    parser.add_argument(
+        "--skip-tuned",
+        action="store_true",
+        help="Omit the 'ours (tuned)' row. Only for missions with no HPO pass yet — "
+        "the paper's strongest result (Telemanom-ESA-Pruned) then has no counterpart "
+        "row, which is recorded in the footnotes.",
+    )
     args = parser.parse_args()
 
     from rich.console import Console
@@ -133,8 +140,15 @@ def main() -> None:
         mission=args.mission,
         channels=channels or LIGHTWEIGHT_CHANNELS,
         offline=run_map is not None,
+        include_tuned=not args.skip_tuned,
     )
-    report: dict[str, Any] = build_report(settings, args.mission, channels, run_map=run_map)
+    report: dict[str, Any] = build_report(
+        settings,
+        args.mission,
+        channels,
+        run_map=run_map,
+        include_tuned=not args.skip_tuned,
+    )
 
     con = Console()
     for scope in ("all_events", "anomalies_only"):

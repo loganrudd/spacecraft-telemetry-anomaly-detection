@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from spacecraft_telemetry.core.config import Settings, load_settings
 from spacecraft_telemetry.esa_adb.report import _PAPER_REFERENCE, build_report
@@ -163,6 +164,44 @@ class TestBuildReport:
 
         # 2 scopes x (untuned + tuned + 2 paper rows) = 8 rows.
         assert len(report["rows"]) == 8
+
+    def test_include_tuned_false_omits_tuned_rows(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """include_tuned=False drops the tuned row and never queries a tuned run.
+
+        Only a BASELINE run is logged here — with include_tuned=True this would
+        raise (no tuned run found). Succeeding proves the tuned lookup is skipped
+        entirely rather than merely dropped from the output.
+        """
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL], include_tuned=False)
+
+        labels = [r["label"] for r in report["rows"]]
+        assert not any(label == "ours (tuned)" for label in labels)
+        # 2 scopes x (untuned + 2 paper rows) = 6 rows.
+        assert len(report["rows"]) == 6
+        assert any("OMITTED" in note for note in report["footnotes"]), (
+            "omission of the tuned row must be disclosed in the footnotes"
+        )
+
+    def test_include_tuned_true_requires_tuned_run(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """The default must still fail loudly when no tuned run exists."""
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+
+        with pytest.raises(RuntimeError, match="tuned scoring run"):
+            build_report(settings, _MISSION, channels=[_CHANNEL])
 
     def test_ours_rows_detect_the_event(self, tmp_path: Path, mlflow_uri: str) -> None:
         """The single event overlaps the flagged window in both untuned and tuned runs."""
