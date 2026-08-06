@@ -25,12 +25,17 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.esa_adb.intervals import union as _union
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
 from spacecraft_telemetry.model.dataset import window_target_timestamps
-from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
+from spacecraft_telemetry.model.io import (
+    bytes_to_errors,
+    download_artifact_bytes,
+    read_artifact_bytes,
+)
 from spacecraft_telemetry.model.scoring import flag_anomalies
 
 if TYPE_CHECKING:
     from spacecraft_telemetry.core.config import Settings
     from spacecraft_telemetry.esa_adb.intervals import Interval
+    from spacecraft_telemetry.esa_adb.offline import OfflineRunMap, RunSpec
 
 log = get_logger(__name__)
 
@@ -128,6 +133,42 @@ def _flags_to_intervals(
     return intervals
 
 
+def _intervals_from_arrays(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    *,
+    smoothed: np.ndarray[Any, Any],
+    threshold: np.ndarray[Any, Any],
+    min_run_length: int,
+    source: str,
+) -> list[Interval]:
+    """Re-derive flags from a scoring run's arrays and map them onto timestamps.
+
+    Shared by the MLflow-backed and offline paths so both reconstruct flags
+    through the identical flag_anomalies() call score_channel() itself uses.
+
+    Raises:
+        ValueError: The scoring run's window count doesn't match the current
+            processed test partition — a stale run or a settings.model
+            mismatch would silently misalign flags to timestamps otherwise.
+    """
+    flags = flag_anomalies(smoothed, threshold, min_run_length)
+
+    target_timestamps = window_target_timestamps(settings, mission, channel)
+    if len(target_timestamps) != len(flags):
+        raise ValueError(
+            f"Window count mismatch for channel={channel!r}, source={source!r}: "
+            f"errors.npy has {len(flags)} windows but the current processed "
+            f"test partition yields {len(target_timestamps)}. The scoring "
+            "run's settings.model.window_size may not match the current "
+            "config, or the processed data changed since scoring. Re-run "
+            "`spacecraft-telemetry ray score`."
+        )
+
+    return _flags_to_intervals(flags, target_timestamps)
+
+
 def channel_detection_intervals(
     settings: Settings,
     mission: str,
@@ -141,10 +182,8 @@ def channel_detection_intervals(
     flag_anomalies() (the same function score_channel() itself calls), and
     maps them onto the current processed test partition's timestamps.
 
-    Raises:
-        ValueError: The scoring run's window count doesn't match the current
-            processed test partition — a stale run or a settings.model
-            mismatch would silently misalign flags to timestamps otherwise.
+    Requires a reachable MLflow tracking server; see
+    channel_detection_intervals_from_spec for the offline equivalent.
     """
     import mlflow
 
@@ -155,20 +194,43 @@ def channel_detection_intervals(
 
     smoothed = bytes_to_errors(download_artifact_bytes(run_id, "errors.npy", tracking_uri))
     threshold = bytes_to_errors(download_artifact_bytes(run_id, "threshold.npy", tracking_uri))
-    flags = flag_anomalies(smoothed, threshold, min_run_length)
 
-    target_timestamps = window_target_timestamps(settings, mission, channel)
-    if len(target_timestamps) != len(flags):
-        raise ValueError(
-            f"Window count mismatch for channel={channel!r}, run_id={run_id!r}: "
-            f"errors.npy has {len(flags)} windows but the current processed "
-            f"test partition yields {len(target_timestamps)}. The scoring "
-            "run's settings.model.window_size may not match the current "
-            "config, or the processed data changed since scoring. Re-run "
-            "`spacecraft-telemetry ray score`."
-        )
+    return _intervals_from_arrays(
+        settings,
+        mission,
+        channel,
+        smoothed=smoothed,
+        threshold=threshold,
+        min_run_length=min_run_length,
+        source=f"run_id={run_id}",
+    )
 
-    return _flags_to_intervals(flags, target_timestamps)
+
+def channel_detection_intervals_from_spec(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    spec: RunSpec,
+) -> list[Interval]:
+    """Offline counterpart of channel_detection_intervals — no tracking server.
+
+    Reads the staged errors.npy / threshold.npy at the paths in ``spec`` and
+    takes threshold_min_anomaly_len from the spec (it is a logged MLflow param,
+    absent from threshold_config.json, so it cannot be recovered from the
+    artifacts alone). See esa_adb/offline.py.
+    """
+    smoothed = bytes_to_errors(read_artifact_bytes(spec.errors_path))
+    threshold = bytes_to_errors(read_artifact_bytes(spec.threshold_path))
+
+    return _intervals_from_arrays(
+        settings,
+        mission,
+        channel,
+        smoothed=smoothed,
+        threshold=threshold,
+        min_run_length=spec.threshold_min_anomaly_len,
+        source=f"offline run_id={spec.run_id}",
+    )
 
 
 def per_channel_detection_intervals(
@@ -177,6 +239,7 @@ def per_channel_detection_intervals(
     channels: list[str],
     *,
     tuned: bool,
+    run_map: OfflineRunMap | None = None,
 ) -> dict[str, list[Interval]]:
     """Detection intervals for each channel, kept separate (channel identity preserved).
 
@@ -184,27 +247,42 @@ def per_channel_detection_intervals(
     detection, so it consumes this dict directly rather than the OR'd
     mission_detection_intervals() union.
 
-    Raises:
-        RuntimeError: propagated from find_scoring_run() — any channel with
-            no matching scoring run fails the whole report rather than being
-            silently dropped.
-    """
-    with suppress(Exception):
-        configure_mlflow(settings)
+    When ``run_map`` is supplied the MLflow tracking server is never contacted:
+    runs are resolved from the map and their arrays read from staged paths
+    (see esa_adb/offline.py). Otherwise runs are found by MLflow run tags.
 
-    tracking_uri = settings.mlflow.tracking_uri
-    exp = experiment_name(settings.model.model_type, "scoring", mission)
+    Raises:
+        RuntimeError / KeyError: propagated from find_scoring_run() or
+            OfflineRunMap.get() — any channel with no matching scoring run
+            fails the whole report rather than being silently dropped, which
+            would quietly weaken the OR-aggregation.
+    """
+    if run_map is None:
+        with suppress(Exception):
+            configure_mlflow(settings)
+        tracking_uri = settings.mlflow.tracking_uri
+        exp = experiment_name(settings.model.model_type, "scoring", mission)
 
     result: dict[str, list[Interval]] = {}
     for channel in channels:
-        run_id = find_scoring_run(exp, channel, tracking_uri, tuned=tuned)
-        channel_intervals = channel_detection_intervals(settings, mission, channel, run_id)
+        if run_map is None:
+            run_id = find_scoring_run(exp, channel, tracking_uri, tuned=tuned)
+            channel_intervals = channel_detection_intervals(settings, mission, channel, run_id)
+            source = run_id
+        else:
+            spec = run_map.get(channel, tuned=tuned)
+            channel_intervals = channel_detection_intervals_from_spec(
+                settings, mission, channel, spec
+            )
+            source = spec.run_id
         result[channel] = channel_intervals
         log.info(
             "esa_adb.detections.channel_done",
             mission=mission,
             channel=channel,
             tuned=tuned,
+            run_id=source,
+            offline=run_map is not None,
             n_intervals=len(channel_intervals),
         )
     return result
@@ -216,6 +294,7 @@ def mission_detection_intervals(
     channels: list[str],
     *,
     tuned: bool,
+    run_map: OfflineRunMap | None = None,
 ) -> list[Interval]:
     """OR-aggregate detection intervals across ``channels`` (time union).
 
@@ -224,7 +303,9 @@ def mission_detection_intervals(
     biggest reason our per-channel macro-averaged metrics aren't directly
     comparable to the paper's numbers (see docs/plans/019).
     """
-    per_channel = per_channel_detection_intervals(settings, mission, channels, tuned=tuned)
+    per_channel = per_channel_detection_intervals(
+        settings, mission, channels, tuned=tuned, run_map=run_map
+    )
     result: list[Interval] = []
     for intervals in per_channel.values():
         result = _union(result, intervals)

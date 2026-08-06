@@ -16,6 +16,7 @@ env/
 data/raw/
 data/processed/
 data/sample/
+data/adb_offline/
 *.parquet
 *.npy
 *.pkl

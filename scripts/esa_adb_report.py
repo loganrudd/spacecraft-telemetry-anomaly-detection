@@ -75,17 +75,56 @@ def main() -> None:
     parser.add_argument(
         "--out", default=None, metavar="JSON", help="Write the full report to this JSON file."
     )
+    parser.add_argument(
+        "--run-map",
+        default=None,
+        metavar="JSON",
+        help="Offline run map (channel -> baseline/tuned run IDs + staged artifact "
+        "paths). When given, the MLflow tracking server is never contacted — runs "
+        "are read from the staged paths instead. See scripts/stage_adb_offline.sh.",
+    )
+    parser.add_argument(
+        "--processed-dir",
+        default=None,
+        metavar="PATH",
+        help="Override settings.preprocess.processed_data_dir (e.g. a locally "
+        "staged copy of the processed test partitions).",
+    )
+    parser.add_argument(
+        "--sample-dir",
+        default=None,
+        metavar="PATH",
+        help="Override settings.data.sample_data_dir (holds labels.csv + "
+        "anomaly_types.csv, the ground truth).",
+    )
     args = parser.parse_args()
 
     from rich.console import Console
     from rich.table import Table
 
+    from spacecraft_telemetry.esa_adb.offline import load_run_map
     from spacecraft_telemetry.mlflow_tracking import configure_mlflow
 
     settings = load_settings(args.env)
-    # configure_mlflow first: sets the tracking URI and installs the GCP ID token
-    # for the Cloud Run backend before any search_runs call goes out.
-    configure_mlflow(settings)
+    if args.processed_dir:
+        settings = settings.model_copy(
+            update={
+                "preprocess": settings.preprocess.model_copy(
+                    update={"processed_data_dir": args.processed_dir}
+                )
+            }
+        )
+    if args.sample_dir:
+        settings = settings.model_copy(
+            update={"data": settings.data.model_copy(update={"sample_data_dir": args.sample_dir})}
+        )
+
+    run_map = load_run_map(args.run_map) if args.run_map else None
+    if run_map is None:
+        # configure_mlflow first: sets the tracking URI and installs the GCP ID
+        # token for the Cloud Run backend before any search_runs call goes out.
+        # Skipped entirely in offline mode — there is no server to reach.
+        configure_mlflow(settings)
 
     channels = args.channels.split(",") if args.channels else None
     log.info(
@@ -93,8 +132,9 @@ def main() -> None:
         env=args.env,
         mission=args.mission,
         channels=channels or LIGHTWEIGHT_CHANNELS,
+        offline=run_map is not None,
     )
-    report: dict[str, Any] = build_report(settings, args.mission, channels)
+    report: dict[str, Any] = build_report(settings, args.mission, channels, run_map=run_map)
 
     con = Console()
     for scope in ("all_events", "anomalies_only"):

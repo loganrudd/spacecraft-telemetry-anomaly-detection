@@ -120,6 +120,25 @@ def find_latest_run_for_channel(
 # ---------------------------------------------------------------------------
 
 
+def read_artifact_bytes(path: str) -> bytes:
+    """Read a staged artifact's raw bytes from a local path or ``gs://`` URI.
+
+    The tracking-server-free counterpart to download_artifact_bytes: used when
+    scoring artifacts have been staged out of the MLflow artifact store and the
+    tracking backend is unavailable (see esa_adb/offline.py). Kept in this
+    module so all artifact byte reads stay funnelled through model.io.
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+    """
+    from spacecraft_telemetry.core.paths import to_upath
+
+    p = to_upath(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Artifact not found: {path}")
+    return p.read_bytes()
+
+
 def download_artifact_bytes(
     run_id: str,
     artifact_path: str,
@@ -304,5 +323,3 @@ def load_scoring_params(
             f"param {exc.args[0]!r}. "
             "Re-run `spacecraft-telemetry ray score` for this channel."
         ) from exc
-
-

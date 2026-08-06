@@ -21,10 +21,12 @@ import pytest
 from spacecraft_telemetry.core.config import Settings, load_settings
 from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals,
+    channel_detection_intervals_from_spec,
     find_scoring_run,
     mission_detection_intervals,
     per_channel_detection_intervals,
 )
+from spacecraft_telemetry.esa_adb.offline import OfflineRunMap, RunSpec
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     experiment_name,
@@ -269,6 +271,160 @@ class TestChannelDetectionIntervals:
         )
         with pytest.raises(ValueError, match="Window count mismatch"):
             channel_detection_intervals(settings, _MISSION, "channel_41", run_id)
+
+
+# ---------------------------------------------------------------------------
+# channel_detection_intervals_from_spec (offline path — no MLflow server)
+# ---------------------------------------------------------------------------
+
+
+def _write_run_spec_files(
+    runs_dir: Path, run_id: str, smoothed: np.ndarray, threshold: np.ndarray
+) -> RunSpec:
+    """Write errors.npy / threshold.npy to disk and return the matching RunSpec.
+
+    Mirrors what scripts/stage_adb_offline.sh downloads from GCS, but writes
+    directly via model.io's own serialisers so no MLflow run is involved.
+    """
+    run_dir = runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "errors.npy").write_bytes(errors_to_bytes(smoothed))
+    (run_dir / "threshold.npy").write_bytes(threshold_to_bytes(threshold))
+    return RunSpec(
+        run_id=run_id,
+        errors_path=str(run_dir / "errors.npy"),
+        threshold_path=str(run_dir / "threshold.npy"),
+        threshold_min_anomaly_len=2,
+    )
+
+
+class TestChannelDetectionIntervalsFromSpec:
+    def test_matches_mlflow_path_result(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """The offline path must reconstruct identical intervals to the MLflow path."""
+        processed_dir = tmp_path / "processed"
+        n_rows = 10  # -> M = 7 windows
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows)
+        settings = _settings(processed_dir, mlflow_uri)
+
+        smoothed = np.array([0, 0, 0, 5, 5, 0, 0], dtype=np.float64)
+        threshold = np.ones(7, dtype=np.float64)
+
+        run_id = _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_41",
+            smoothed=smoothed,
+            threshold=threshold,
+            min_run_length=2,
+        )
+        online_intervals = channel_detection_intervals(settings, _MISSION, "channel_41", run_id)
+
+        spec = _write_run_spec_files(tmp_path / "runs", "offline-run", smoothed, threshold)
+        offline_intervals = channel_detection_intervals_from_spec(
+            settings, _MISSION, "channel_41", spec
+        )
+
+        assert offline_intervals == online_intervals
+        assert len(offline_intervals) == 1
+
+    def test_no_flags_returns_empty_list(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        settings = _settings(processed_dir, "sqlite:///unused.db")
+
+        spec = _write_run_spec_files(tmp_path / "runs", "offline-empty", np.zeros(7), np.ones(7))
+        assert channel_detection_intervals_from_spec(settings, _MISSION, "channel_41", spec) == []
+
+    def test_window_count_mismatch_raises(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)  # M=7
+        settings = _settings(processed_dir, "sqlite:///unused.db")
+
+        spec = _write_run_spec_files(
+            tmp_path / "runs", "offline-mismatch", np.zeros(5), np.ones(5)
+        )
+        with pytest.raises(ValueError, match="Window count mismatch"):
+            channel_detection_intervals_from_spec(settings, _MISSION, "channel_41", spec)
+
+    def test_missing_artifact_raises_file_not_found(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        settings = _settings(processed_dir, "sqlite:///unused.db")
+
+        spec = RunSpec(
+            run_id="missing",
+            errors_path=str(tmp_path / "runs" / "missing" / "errors.npy"),
+            threshold_path=str(tmp_path / "runs" / "missing" / "threshold.npy"),
+            threshold_min_anomaly_len=2,
+        )
+        with pytest.raises(FileNotFoundError):
+            channel_detection_intervals_from_spec(settings, _MISSION, "channel_41", spec)
+
+
+# ---------------------------------------------------------------------------
+# per_channel_detection_intervals / mission_detection_intervals with run_map
+# ---------------------------------------------------------------------------
+
+
+class TestOfflineRunMapIntegration:
+    def test_per_channel_uses_run_map_without_mlflow(self, tmp_path: Path) -> None:
+        """With a run_map, no MLflow server is contacted at all (bogus tracking_uri)."""
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        settings = _settings(processed_dir, "sqlite:///this/path/does/not/exist.db")
+
+        smoothed = np.array([0, 0, 0, 5, 5, 0, 0], dtype=np.float64)
+        threshold = np.ones(7, dtype=np.float64)
+        spec = _write_run_spec_files(tmp_path / "runs", "run-a", smoothed, threshold)
+        run_map = OfflineRunMap(mission=_MISSION, baseline={"channel_41": spec}, tuned={})
+
+        result = per_channel_detection_intervals(
+            settings, _MISSION, ["channel_41"], tuned=False, run_map=run_map
+        )
+        assert len(result["channel_41"]) == 1
+
+    def test_mission_detection_intervals_unions_via_run_map(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        _write_test_series(processed_dir, _MISSION, "channel_42", n_rows=10)
+        settings = _settings(processed_dir, "sqlite:///this/path/does/not/exist.db")
+
+        # _write_run_spec_files hardcodes threshold_min_anomaly_len=2, so each
+        # spike must span >=2 consecutive windows to survive flag_anomalies.
+        threshold = np.ones(7, dtype=np.float64)
+        spec_41 = _write_run_spec_files(
+            tmp_path / "runs",
+            "run-41",
+            np.array([5, 5, 0, 0, 0, 0, 0], dtype=np.float64),
+            threshold,
+        )
+        spec_42 = _write_run_spec_files(
+            tmp_path / "runs",
+            "run-42",
+            np.array([0, 0, 0, 0, 5, 5, 0], dtype=np.float64),
+            threshold,
+        )
+        run_map = OfflineRunMap(
+            mission=_MISSION,
+            baseline={"channel_41": spec_41, "channel_42": spec_42},
+            tuned={},
+        )
+
+        result = mission_detection_intervals(
+            settings, _MISSION, ["channel_41", "channel_42"], tuned=False, run_map=run_map
+        )
+        assert len(result) == 2
+
+    def test_missing_channel_in_run_map_raises_key_error(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        settings = _settings(processed_dir, "sqlite:///this/path/does/not/exist.db")
+
+        run_map = OfflineRunMap(mission=_MISSION, baseline={}, tuned={})
+        with pytest.raises(KeyError, match="channel_41"):
+            per_channel_detection_intervals(
+                settings, _MISSION, ["channel_41"], tuned=False, run_map=run_map
+            )
 
 
 # ---------------------------------------------------------------------------

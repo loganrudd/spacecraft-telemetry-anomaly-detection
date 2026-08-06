@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from spacecraft_telemetry.core.config import Settings
     from spacecraft_telemetry.esa_adb.events import Event
     from spacecraft_telemetry.esa_adb.intervals import Interval
+    from spacecraft_telemetry.esa_adb.offline import OfflineRunMap
 
 log = get_logger(__name__)
 
@@ -190,14 +191,21 @@ def build_report(
     settings: Settings,
     mission: str = "ESA-Mission1",
     channels: list[str] | None = None,
+    run_map: OfflineRunMap | None = None,
 ) -> dict[str, Any]:
     """Build the full ESA-ADB-comparable report for ``mission``.
 
-    Requires a baseline (untuned) and a tuned scoring run to already exist in
-    MLflow for every channel in ``channels`` — this function only reads
-    already-logged scoring artifacts, it never trains or scores. Raises
-    (via esa_adb.detections.find_scoring_run) if any channel is missing a
-    matching run rather than silently narrowing the evaluated channel set.
+    Requires a baseline (untuned) and a tuned scoring run to already exist for
+    every channel in ``channels`` — this function only reads already-logged
+    scoring artifacts, it never trains or scores. Raises if any channel is
+    missing a matching run rather than silently narrowing the evaluated
+    channel set.
+
+    Args:
+        run_map: When supplied, resolve runs from this offline map and read
+            their arrays from staged paths instead of querying the MLflow
+            tracking server (see esa_adb/offline.py). Use when the tracking
+            backend is unavailable, or to pin exact run IDs for provenance.
 
     Returns:
         {"mission", "channels", "rows": [...], "footnotes": [...]} — see
@@ -205,10 +213,16 @@ def build_report(
         a table-formatted driver.
     """
     channels = channels or LIGHTWEIGHT_CHANNELS
-    with suppress(Exception):
-        configure_mlflow(settings)
+    if run_map is None:
+        with suppress(Exception):
+            configure_mlflow(settings)
 
-    log.info("esa_adb.report.start", mission=mission, channels=channels)
+    log.info(
+        "esa_adb.report.start",
+        mission=mission,
+        channels=channels,
+        offline=run_map is not None,
+    )
 
     events_df = load_events(settings, mission)
     timeline_full = mission_timeline(settings, mission, channels)
@@ -216,16 +230,22 @@ def build_report(
     far_future = pd.Timestamp.max.tz_localize("UTC")
     timeline_tuned = intersect(timeline_full, [(hpo_cutoff, far_future)])
 
-    per_channel_untuned = per_channel_detection_intervals(settings, mission, channels, tuned=False)
-    detections_untuned = mission_detection_intervals(settings, mission, channels, tuned=False)
+    per_channel_untuned = per_channel_detection_intervals(
+        settings, mission, channels, tuned=False, run_map=run_map
+    )
+    detections_untuned = mission_detection_intervals(
+        settings, mission, channels, tuned=False, run_map=run_map
+    )
 
     per_channel_tuned_full = per_channel_detection_intervals(
-        settings, mission, channels, tuned=True
+        settings, mission, channels, tuned=True, run_map=run_map
     )
     per_channel_tuned = {
         ch: intersect(normalize(ivs), timeline_tuned) for ch, ivs in per_channel_tuned_full.items()
     }
-    detections_tuned_full = mission_detection_intervals(settings, mission, channels, tuned=True)
+    detections_tuned_full = mission_detection_intervals(
+        settings, mission, channels, tuned=True, run_map=run_map
+    )
     detections_tuned = intersect(normalize(detections_tuned_full), timeline_tuned)
 
     events_full = group_events(events_df, channels, timeline_full)
