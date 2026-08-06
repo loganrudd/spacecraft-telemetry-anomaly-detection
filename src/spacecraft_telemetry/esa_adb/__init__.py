@@ -13,8 +13,14 @@ Public API (expanded as each module lands — see docs/plans/019):
 ----------
 intervals   normalize, union, intersect, subtract, total_duration, overlaps
 events      Event, load_events, group_events
+detections  find_scoring_run, channel_detection_intervals, mission_detection_intervals
 """
 
+from spacecraft_telemetry.esa_adb.detections import (
+    channel_detection_intervals,
+    find_scoring_run,
+    mission_detection_intervals,
+)
 from spacecraft_telemetry.esa_adb.events import Event, group_events, load_events
 from spacecraft_telemetry.esa_adb.intervals import (
     intersect,
@@ -27,9 +33,12 @@ from spacecraft_telemetry.esa_adb.intervals import (
 
 __all__ = [
     "Event",
+    "channel_detection_intervals",
+    "find_scoring_run",
     "group_events",
     "intersect",
     "load_events",
+    "mission_detection_intervals",
     "normalize",
     "overlaps",
     "subtract",
