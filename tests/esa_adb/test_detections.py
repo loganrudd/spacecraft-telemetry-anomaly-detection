@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -22,6 +23,7 @@ from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals,
     find_scoring_run,
     mission_detection_intervals,
+    per_channel_detection_intervals,
 )
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
@@ -225,10 +227,13 @@ class TestChannelDetectionIntervals:
         assert len(intervals) == 1
         start, end = intervals[0]
         # target_timestamps[i] = base + (i + span - 1) * FREQ_S; span=4.
-        base = np.datetime64("2000-01-01T00:00:00", "us")
-        expected_start = base + np.timedelta64((3 + _SPAN - 1) * _FREQ_S, "s")
+        # Intervals are tz-aware UTC (see _flags_to_intervals docstring) —
+        # the underlying Parquet timestamps are naive numpy datetime64 but
+        # represent UTC instants.
+        base = pd.Timestamp("2000-01-01T00:00:00", tz="UTC")
+        expected_start = base + pd.Timedelta((3 + _SPAN - 1) * _FREQ_S, "s")
         expected_end = (
-            base + np.timedelta64((4 + _SPAN - 1) * _FREQ_S, "s") + np.timedelta64(_FREQ_S, "s")
+            base + pd.Timedelta((4 + _SPAN - 1) * _FREQ_S, "s") + pd.Timedelta(_FREQ_S, "s")
         )
         assert start == expected_start
         assert end == expected_end
@@ -264,6 +269,47 @@ class TestChannelDetectionIntervals:
         )
         with pytest.raises(ValueError, match="Window count mismatch"):
             channel_detection_intervals(settings, _MISSION, "channel_41", run_id)
+
+
+# ---------------------------------------------------------------------------
+# per_channel_detection_intervals
+# ---------------------------------------------------------------------------
+
+
+class TestPerChannelDetectionIntervals:
+    def test_keeps_channel_identity_separate(self, tmp_path: Path, mlflow_uri: str) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        _write_test_series(processed_dir, _MISSION, "channel_42", n_rows=10)
+        settings = _settings(processed_dir, mlflow_uri)
+
+        smoothed_41 = np.array([5, 0, 0, 0, 0, 0, 0], dtype=np.float64)
+        smoothed_42 = np.array([0, 0, 0, 0, 0, 5, 0], dtype=np.float64)
+        threshold = np.ones(7, dtype=np.float64)
+        _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_41",
+            smoothed=smoothed_41,
+            threshold=threshold,
+            min_run_length=1,
+        )
+        _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_42",
+            smoothed=smoothed_42,
+            threshold=threshold,
+            min_run_length=1,
+        )
+
+        result = per_channel_detection_intervals(
+            settings, _MISSION, ["channel_41", "channel_42"], tuned=False
+        )
+        assert set(result.keys()) == {"channel_41", "channel_42"}
+        assert len(result["channel_41"]) == 1
+        assert len(result["channel_42"]) == 1
+        assert result["channel_41"] != result["channel_42"]
 
 
 # ---------------------------------------------------------------------------

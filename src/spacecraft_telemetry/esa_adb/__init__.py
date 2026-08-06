@@ -9,18 +9,22 @@ This is a deliberately separate metric convention from
 ``model.scoring.evaluate_overlap`` (our serving-parity segment-overlap
 metric) — see ``docs/architecture/esa-adb-metrics.md`` for when to use which.
 
-Public API (expanded as each module lands — see docs/plans/019):
+Public API
 ----------
 intervals   normalize, union, intersect, subtract, total_duration, overlaps
 events      Event, load_events, group_events
-detections  find_scoring_run, channel_detection_intervals, mission_detection_intervals
+timeline    channel_timeline, mission_timeline
+detections  find_scoring_run, channel_detection_intervals,
+            per_channel_detection_intervals, mission_detection_intervals
 metrics     corrected_event_wise, alarming_precision, channel_aware
+report      build_report — the top-level entry point (see scripts/esa_adb_report.py)
 """
 
 from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals,
     find_scoring_run,
     mission_detection_intervals,
+    per_channel_detection_intervals,
 )
 from spacecraft_telemetry.esa_adb.events import Event, group_events, load_events
 from spacecraft_telemetry.esa_adb.intervals import (
@@ -36,20 +40,26 @@ from spacecraft_telemetry.esa_adb.metrics import (
     channel_aware,
     corrected_event_wise,
 )
+from spacecraft_telemetry.esa_adb.report import build_report
+from spacecraft_telemetry.esa_adb.timeline import channel_timeline, mission_timeline
 
 __all__ = [
     "Event",
     "alarming_precision",
+    "build_report",
     "channel_aware",
     "channel_detection_intervals",
+    "channel_timeline",
     "corrected_event_wise",
     "find_scoring_run",
     "group_events",
     "intersect",
     "load_events",
     "mission_detection_intervals",
+    "mission_timeline",
     "normalize",
     "overlaps",
+    "per_channel_detection_intervals",
     "subtract",
     "total_duration",
     "union",

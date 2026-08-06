@@ -105,6 +105,12 @@ def _flags_to_intervals(
     whole channel. Using the median (not target_timestamps[e], which doesn't
     exist when e is the last window) makes every run's closing edge robust to
     the boundary case without needing a lookahead sample.
+
+    ``target_timestamps`` is a tz-naive numpy datetime64 array (PyArrow's
+    to_numpy() drops the tz label from the UTC-typed Parquet column even
+    though the instants are UTC) — localized to UTC here so the result is
+    comparable to esa_adb.events' tz-aware pd.Timestamp intervals (read_labels
+    parses with utc=True).
     """
     runs = _true_runs(flags)
     if not runs:
@@ -116,8 +122,8 @@ def _flags_to_intervals(
 
     intervals: list[Interval] = []
     for s, e in runs:
-        start_ts = pd.Timestamp(target_timestamps[s])
-        end_ts = pd.Timestamp(target_timestamps[e - 1]) + step
+        start_ts = pd.Timestamp(target_timestamps[s]).tz_localize("UTC")
+        end_ts = pd.Timestamp(target_timestamps[e - 1]).tz_localize("UTC") + step
         intervals.append((start_ts, end_ts))
     return intervals
 
@@ -165,24 +171,23 @@ def channel_detection_intervals(
     return _flags_to_intervals(flags, target_timestamps)
 
 
-def mission_detection_intervals(
+def per_channel_detection_intervals(
     settings: Settings,
     mission: str,
     channels: list[str],
     *,
     tuned: bool,
-) -> list[Interval]:
-    """OR-aggregate detection intervals across ``channels``.
+) -> dict[str, list[Interval]]:
+    """Detection intervals for each channel, kept separate (channel identity preserved).
 
-    This is the "logical sum ... across all target channels" the ESA-ADB
-    paper computes its event-wise metrics against (§3.2.1) — the single
-    biggest reason our per-channel macro-averaged metrics aren't directly
-    comparable to the paper's numbers (see docs/plans/019).
+    esa_adb.metrics.channel_aware needs to know WHICH channel produced a
+    detection, so it consumes this dict directly rather than the OR'd
+    mission_detection_intervals() union.
 
     Raises:
         RuntimeError: propagated from find_scoring_run() — any channel with
             no matching scoring run fails the whole report rather than being
-            silently dropped from the union.
+            silently dropped.
     """
     with suppress(Exception):
         configure_mlflow(settings)
@@ -190,11 +195,11 @@ def mission_detection_intervals(
     tracking_uri = settings.mlflow.tracking_uri
     exp = experiment_name(settings.model.model_type, "scoring", mission)
 
-    result: list[Interval] = []
+    result: dict[str, list[Interval]] = {}
     for channel in channels:
         run_id = find_scoring_run(exp, channel, tracking_uri, tuned=tuned)
         channel_intervals = channel_detection_intervals(settings, mission, channel, run_id)
-        result = _union(result, channel_intervals)
+        result[channel] = channel_intervals
         log.info(
             "esa_adb.detections.channel_done",
             mission=mission,
@@ -202,4 +207,25 @@ def mission_detection_intervals(
             tuned=tuned,
             n_intervals=len(channel_intervals),
         )
+    return result
+
+
+def mission_detection_intervals(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    *,
+    tuned: bool,
+) -> list[Interval]:
+    """OR-aggregate detection intervals across ``channels`` (time union).
+
+    This is the "logical sum ... across all target channels" the ESA-ADB
+    paper computes its event-wise metrics against (§3.2.1) — the single
+    biggest reason our per-channel macro-averaged metrics aren't directly
+    comparable to the paper's numbers (see docs/plans/019).
+    """
+    per_channel = per_channel_detection_intervals(settings, mission, channels, tuned=tuned)
+    result: list[Interval] = []
+    for intervals in per_channel.values():
+        result = _union(result, intervals)
     return result
