@@ -310,6 +310,66 @@ class TestTemporalTrainTestSplit:
 
 
 class TestLabelTimesteps:
+    def test_point_label_marks_nearest_sample(self) -> None:
+        """Zero-duration (StartTime == EndTime) labels must mark a timestep.
+
+        A half-open [t, t) interval matches nothing, so point annotations were
+        silently absent from is_anomaly. Widening by 1 ns would not fix it:
+        ESA labels are second-resolution while telemetry timestamps carry
+        sub-second components, so exact matches essentially never occur — the
+        label must cover a sampling period around the instant.
+        """
+        df = _make_channel_df(n=20, freq="90s", start="2000-01-01")
+        # Instant deliberately BETWEEN samples (samples are at :00, :90, ...),
+        # and offset sub-second so it matches no timestamp exactly.
+        instant = pd.Timestamp("2000-01-01T00:04:35.250Z")
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        out = label_timesteps(df, labels)
+        assert out["is_anomaly"].sum() >= 1, "point label marked no timestep"
+        assert out["is_anomaly"].sum() <= 2, "point label over-marked"
+        marked = out.loc[out["is_anomaly"], "telemetry_timestamp"]
+        assert (marked - instant).abs().min() <= pd.Timedelta(seconds=90), (
+            "marked sample is not adjacent to the annotated instant"
+        )
+
+    def test_point_label_in_data_gap_marks_nothing(self) -> None:
+        """An instant inside a large gap has no sample to attribute it to."""
+        ts = list(pd.date_range("2000-01-01", periods=5, freq="90s", tz="UTC"))
+        ts += list(pd.date_range("2000-06-01", periods=5, freq="90s", tz="UTC"))
+        df = pd.DataFrame({
+            "telemetry_timestamp": ts,
+            "value": pd.array([1.0] * 10, dtype="float32"),
+            "channel_id": "channel_1",
+            "mission_id": "ESA-Mission1",
+        })
+        instant = pd.Timestamp("2000-03-15T00:00:00Z")  # deep inside the gap
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        out = label_timesteps(df, labels)
+        assert out["is_anomaly"].sum() == 0, "gap-interior instant should mark nothing"
+
+    def test_normal_interval_labels_unaffected_by_point_handling(self) -> None:
+        """Non-degenerate labels keep exact half-open semantics."""
+        df = _make_channel_df(n=20)
+        labels = _make_labels_df()
+        out = label_timesteps(df, labels)
+        ts = out["telemetry_timestamp"]
+        expected = (ts >= labels.loc[0, "start_time"]) & (ts < labels.loc[0, "end_time"])
+        assert (out["is_anomaly"] == expected).all()
+
     def test_adds_is_anomaly_column(self) -> None:
         df = _make_channel_df(n=20)
         labels = _make_labels_df()

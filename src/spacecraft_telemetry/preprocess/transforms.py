@@ -207,9 +207,29 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
     ts = df["telemetry_timestamp"]
     is_anomaly = pd.Series(False, index=df.index)
 
+    # ESA-AD annotates some events as instantaneous (StartTime == EndTime).
+    # A half-open [t, t) interval matches nothing, so those events would be
+    # silently absent from is_anomaly — see docs/plans/019. Widening by 1 ns
+    # does NOT help here: labels are second-resolution (read_labels strips the
+    # sub-second component) while telemetry timestamps carry milliseconds, so
+    # an exact timestamp match essentially never occurs. Instead give a point
+    # annotation a symmetric window of one median sampling period, which
+    # captures the single sample nearest the instant under regular sampling
+    # and correctly captures nothing when the instant falls inside a data gap.
+    half_width = pd.Timedelta(0)
+    if (channel_labels["start_time"] == channel_labels["end_time"]).any() and len(ts) > 1:
+        median_interval = ts.sort_values().diff().median()
+        if pd.notna(median_interval) and median_interval > pd.Timedelta(0):
+            half_width = median_interval / 2
+
+    n_point = 0
     for _, row in channel_labels.iterrows():
+        start, end = row["start_time"], row["end_time"]
+        if start == end:
+            n_point += 1
+            start, end = start - half_width, end + half_width
         # Half-open interval: start inclusive, end exclusive.
-        in_interval = (ts >= row["start_time"]) & (ts < row["end_time"])
+        in_interval = (ts >= start) & (ts < end)
         is_anomaly = is_anomaly | in_interval
 
     df["is_anomaly"] = is_anomaly
@@ -218,6 +238,7 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
         "label_timesteps",
         channel_id=channel_id,
         n_labels=len(channel_labels),
+        n_point_labels=n_point,
         n_anomalous=int(is_anomaly.sum()),
     )
     return df
