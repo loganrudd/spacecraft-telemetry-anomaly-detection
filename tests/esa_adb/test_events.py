@@ -166,6 +166,57 @@ class TestGroupEvents:
         assert events[0].event_id == "id_1"
         assert len(events[0].intervals) == 2, "non-contiguous fragments stay as 2 intervals"
 
+    def test_point_event_is_not_dropped(self) -> None:
+        """Zero-duration (StartTime == EndTime) annotations must survive grouping.
+
+        Half-open [t, t) is the empty set, so without widening these events
+        intersect nothing and vanish from the ground truth. On Mission1's
+        lightweight test split that silently removed 9 of 65 events — exactly
+        the paper's "Point" count in Supplementary Table 11.
+        """
+        df = _events_df(
+            [
+                {
+                    "event_id": "id_point",
+                    "channel_id": "channel_41",
+                    "start_time": "2000-01-01T06:00:00Z",
+                    "end_time": "2000-01-01T06:00:00Z",
+                    "category": "Anomaly",
+                }
+            ]
+        )
+        events = group_events(df, channels=["channel_41"], timeline=_FULL_TIMELINE)
+        assert len(events) == 1, "point event was dropped"
+        (start, end), = events[0].intervals
+        assert start == pd.Timestamp("2000-01-01T06:00:00Z")
+        assert end > start, "point event must have non-zero width to be detectable"
+        assert end - start == pd.Timedelta(1, "ns"), "widening must stay minimal"
+
+    def test_point_event_detected_by_covering_interval(self) -> None:
+        """A detection spanning the instant must overlap the widened point event."""
+        from spacecraft_telemetry.esa_adb.intervals import overlaps
+
+        df = _events_df(
+            [
+                {
+                    "event_id": "id_point",
+                    "channel_id": "channel_41",
+                    "start_time": "2000-01-01T06:00:00Z",
+                    "end_time": "2000-01-01T06:00:00Z",
+                    "category": "Anomaly",
+                }
+            ]
+        )
+        (event,) = group_events(df, channels=["channel_41"], timeline=_FULL_TIMELINE)
+        covering = [
+            (pd.Timestamp("2000-01-01T05:00:00Z"), pd.Timestamp("2000-01-01T07:00:00Z"))
+        ]
+        missing = [
+            (pd.Timestamp("2000-01-01T07:00:00Z"), pd.Timestamp("2000-01-01T08:00:00Z"))
+        ]
+        assert overlaps(event.intervals[0], covering) is True
+        assert overlaps(event.intervals[0], missing) is False
+
     def test_drops_channels_outside_scope(self) -> None:
         df = _events_df(
             [

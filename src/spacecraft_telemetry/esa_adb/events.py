@@ -107,6 +107,25 @@ def load_events(settings: Settings, mission: str) -> pd.DataFrame:
     return merged[columns]
 
 
+def _widen_point(start: pd.Timestamp, end: pd.Timestamp) -> Interval:
+    """Give zero-duration (point) annotations a minimal non-zero width.
+
+    ESA-AD annotates some events as instantaneous — ``StartTime == EndTime``.
+    Our intervals are half-open, so ``[t, t)`` is the empty set: it intersects
+    nothing, and such events would be silently dropped from the ground truth
+    (in Mission1's lightweight test split that is exactly the 9 events the
+    paper counts under "Point" in Supplementary Table 11, versus 56
+    "Subsequence" — 65 total).
+
+    Widening to ``[t, t + 1ns)`` makes the event representable while keeping it
+    the smallest possible span: a detection interval ``[a, b)`` overlaps it iff
+    ``a <= t < b``, which is the intended "the detection covers the instant t"
+    semantics. The 1 ns added to the annotated duration is negligible against
+    the TNR denominator (which is measured in years).
+    """
+    return (start, end) if end > start else (start, start + pd.Timedelta(1, "ns"))
+
+
 def group_events(
     events_df: pd.DataFrame,
     channels: list[str],
@@ -136,9 +155,10 @@ def group_events(
 
     events: list[Event] = []
     for event_id, group in scoped.groupby("event_id", sort=True):
-        raw_intervals: list[Interval] = list(
-            zip(group["start_time"], group["end_time"], strict=False)
-        )
+        raw_intervals: list[Interval] = [
+            _widen_point(s, e)
+            for s, e in zip(group["start_time"], group["end_time"], strict=False)
+        ]
         clipped = intersect(normalize(raw_intervals), timeline)
         if not clipped:
             continue
