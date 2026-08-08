@@ -116,6 +116,67 @@ def test_flag_anomalies_keeps_exact_min_length_run() -> None:
     assert not flags[4]
 
 
+def test_flag_anomalies_min_error_value_defaults_to_disabled() -> None:
+    """Default 0.0 must reproduce the pre-floor behaviour exactly."""
+    smoothed = np.array([0, 0, 2, 2, 2, 0], dtype=np.float64)
+    threshold = np.ones(6, dtype=np.float64)
+    assert np.array_equal(
+        flag_anomalies(smoothed, threshold, min_run_length=3),
+        flag_anomalies(smoothed, threshold, min_run_length=3, min_error_value=0.0),
+    )
+
+
+def test_flag_anomalies_floor_suppresses_small_relative_exceedance() -> None:
+    """A tiny absolute error that clears a tiny relative threshold is suppressed.
+
+    This is the quiet-channel failure mode the floor exists for: the run at
+    indices 1-4 exceeds its threshold by 2x but is numerically tiny.
+    """
+    smoothed = np.array([0.001, 0.02, 0.02, 0.02, 0.02, 0.001], dtype=np.float64)
+    threshold = np.full(6, 0.01, dtype=np.float64)
+
+    no_floor = flag_anomalies(smoothed, threshold, min_run_length=3)
+    assert no_floor[1:5].all(), "without a floor this run should flag"
+
+    with_floor = flag_anomalies(smoothed, threshold, min_run_length=3, min_error_value=0.1)
+    assert not with_floor.any(), "floor above the error magnitude must suppress it"
+
+
+def test_flag_anomalies_floor_keeps_large_excursion() -> None:
+    """The floor must not touch genuine large-error excursions."""
+    smoothed = np.array([0.001, 0.5, 0.5, 0.5, 0.5, 0.001], dtype=np.float64)
+    threshold = np.full(6, 0.01, dtype=np.float64)
+    flags = flag_anomalies(smoothed, threshold, min_run_length=3, min_error_value=0.1)
+    assert flags[1:5].all(), "excursion well above the floor must survive"
+
+
+def test_flag_anomalies_floor_is_not_equivalent_to_raising_z() -> None:
+    """The floor separates small-but-significant from large; z cannot.
+
+    Two runs: one tiny (quiet channel), one large. A floor keeps only the large
+    one. Raising the threshold uniformly enough to kill the tiny run also kills
+    the large one when the large run sits on a proportionally higher baseline —
+    which is precisely why the ESA-ADB "-Pruned" variant is not just a bigger z.
+    """
+    smoothed = np.array(
+        [0.001, 0.02, 0.02, 0.02, 0.001, 0.001, 0.5, 0.5, 0.5, 0.001], dtype=np.float64
+    )
+    threshold = np.array(
+        [1.0, 0.01, 0.01, 0.01, 1.0, 1.0, 0.4, 0.4, 0.4, 1.0], dtype=np.float64
+    )
+    floored = flag_anomalies(smoothed, threshold, min_run_length=3, min_error_value=0.1)
+    assert not floored[1:4].any(), "tiny run suppressed by floor"
+    assert floored[6:9].all(), "large run retained by floor"
+
+
+def test_flag_anomalies_floor_boundary_is_inclusive() -> None:
+    """A window exactly at the floor is kept (>=, not >)."""
+    smoothed = np.full(5, 0.1, dtype=np.float64)
+    threshold = np.zeros(5, dtype=np.float64)
+    flags = flag_anomalies(smoothed, threshold, min_run_length=1, min_error_value=0.1)
+    assert flags.all()
+
+
 def test_flag_anomalies_all_below_threshold() -> None:
     smoothed = np.zeros(10)
     threshold = np.ones(10)

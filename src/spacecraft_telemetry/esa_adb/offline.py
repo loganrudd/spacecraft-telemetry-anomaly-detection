@@ -45,15 +45,20 @@ _VARIANTS = ("baseline", "tuned")
 class RunSpec:
     """Everything needed to reconstruct one scoring run's flags, sans MLflow.
 
-    ``threshold_min_anomaly_len`` is carried explicitly because it is a logged
-    *param*, not part of ``threshold_config.json`` (which holds only window and
-    z) — so it cannot be recovered from the staged artifacts themselves.
+    ``threshold_min_anomaly_len`` and ``min_error_value`` are carried explicitly
+    because they are logged *params*, not part of ``threshold_config.json``
+    (which holds only window and z) — so they cannot be recovered from the
+    staged artifacts themselves.
+
+    ``min_error_value`` defaults to 0.0, which is exactly the behaviour of runs
+    logged before the absolute error floor existed.
     """
 
     run_id: str
     errors_path: str
     threshold_path: str
     threshold_min_anomaly_len: int
+    min_error_value: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -140,6 +145,8 @@ def load_run_map(path: str | Path) -> OfflineRunMap:
                 errors_path=f"{runs_dir}/{run_id}/errors.npy",
                 threshold_path=f"{runs_dir}/{run_id}/threshold.npy",
                 threshold_min_anomaly_len=int(entry["threshold_min_anomaly_len"]),
+                # Optional: absent for runs predating the absolute error floor.
+                min_error_value=float(entry.get("min_error_value", 0.0)),
             )
 
     log.info(

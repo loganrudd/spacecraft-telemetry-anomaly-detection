@@ -272,6 +272,11 @@ class ScoringParams:
     threshold_z: float
     error_smoothing_window: int
     threshold_min_anomaly_len: int
+    # Absolute floor on the smoothed error (ESA-ADB's "pruning"). Pointwise and
+    # stateless, so the streaming engine applies it identically to batch
+    # scoring — see model.scoring.flag_anomalies. 0.0 = disabled, which is also
+    # the behaviour of any scoring run logged before this param existed.
+    min_error_value: float = 0.0
 
 
 def load_scoring_params(
@@ -316,6 +321,9 @@ def load_scoring_params(
             threshold_z=float(p["threshold_z"]),
             error_smoothing_window=int(p["error_smoothing_window"]),
             threshold_min_anomaly_len=int(p["threshold_min_anomaly_len"]),
+            # Optional via .get(): scoring runs predating the absolute error
+            # floor have no such param, and 0.0 reproduces their behaviour.
+            min_error_value=float(p.get("min_error_value", 0.0)),
         )
     except KeyError as exc:
         raise RuntimeError(

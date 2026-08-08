@@ -166,13 +166,32 @@ def flag_anomalies(
     smoothed: np.ndarray[Any, Any],
     threshold: np.ndarray[Any, Any],
     min_run_length: int,
+    min_error_value: float = 0.0,
 ) -> np.ndarray[Any, np.dtype[np.bool_]]:
     """Boolean anomaly flags; contiguous runs shorter than min_run_length are dropped.
 
     A single-tick spike or brief noise burst (run length < min_run_length) is
     zeroed out. Only sustained exceedances are returned as True.
+
+    ``min_error_value`` is an *absolute* floor on the smoothed error, applied
+    before the run-length filter: a window below the floor is never anomalous
+    no matter how far it exceeds the (relative) dynamic threshold. This is what
+    ESA-ADB calls "pruning" (Telemanom-ESA-Pruned; original Telemanom hardcodes
+    0.05 in errors.py#L339). It is pointwise and stateless, so the streaming
+    serving path applies it identically — unlike Hundman §3.3
+    :func:`prune_anomalies`, which is retrospective and batch-only.
+
+    Rationale: a purely relative threshold flags numerically tiny errors on
+    quiet channels as multi-sigma events. A floor removes those while leaving
+    genuine large-error excursions untouched — which raising ``threshold_z``
+    cannot do, since it suppresses real excursions on quiet channels too.
+
+    ``min_error_value=0.0`` (the default) disables the floor and preserves the
+    original behaviour exactly.
     """
     raw = smoothed > threshold
+    if min_error_value > 0.0:
+        raw = raw & (smoothed >= min_error_value)
     result = np.zeros(len(raw), dtype=bool)
     for s, e in _find_sequences(raw):
         if e - s >= min_run_length:
@@ -423,7 +442,9 @@ def score_channel(
     # train/serve parity by reporting the un-pruned pipeline as the headline and
     # the pruned result only as an offline "ceiling" (see docs/architecture/
     # online-pruning-investigation.md for the path to online pruning).
-    flags_raw = flag_anomalies(smoothed, threshold, cfg.threshold_min_anomaly_len)
+    flags_raw = flag_anomalies(
+        smoothed, threshold, cfg.threshold_min_anomaly_len, cfg.min_error_value
+    )
     flags_pruned = prune_anomalies(smoothed, flags_raw, cfg.prune_min_decrease)
 
     # Slice true/pred labels for the reported metrics.
@@ -510,6 +531,9 @@ def score_channel(
             "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
             # Affects only the offline pruned-ceiling metrics, not the headline.
             "prune_min_decrease": cfg.prune_min_decrease,
+            # Absolute error floor (ESA-ADB's "pruning"); 0.0 = disabled.
+            # Logged so esa_adb/detections.py can reconstruct flags exactly.
+            "min_error_value": cfg.min_error_value,
             "eval_split": eval_split,
         })
         log_metrics_final(metrics)

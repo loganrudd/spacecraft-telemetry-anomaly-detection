@@ -141,6 +141,7 @@ def _intervals_from_arrays(
     smoothed: np.ndarray[Any, Any],
     threshold: np.ndarray[Any, Any],
     min_run_length: int,
+    min_error_value: float = 0.0,
     source: str,
 ) -> list[Interval]:
     """Re-derive flags from a scoring run's arrays and map them onto timestamps.
@@ -148,12 +149,17 @@ def _intervals_from_arrays(
     Shared by the MLflow-backed and offline paths so both reconstruct flags
     through the identical flag_anomalies() call score_channel() itself uses.
 
+    ``min_error_value`` MUST match what the scoring run applied, or the
+    reconstructed detections silently diverge from the ones score_channel
+    produced. It defaults to 0.0 for runs logged before the parameter existed,
+    which is exactly the behaviour those runs had.
+
     Raises:
         ValueError: The scoring run's window count doesn't match the current
             processed test partition — a stale run or a settings.model
             mismatch would silently misalign flags to timestamps otherwise.
     """
-    flags = flag_anomalies(smoothed, threshold, min_run_length)
+    flags = flag_anomalies(smoothed, threshold, min_run_length, min_error_value)
 
     target_timestamps = window_target_timestamps(settings, mission, channel)
     if len(target_timestamps) != len(flags):
@@ -191,6 +197,9 @@ def channel_detection_intervals(
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     run = client.get_run(run_id)
     min_run_length = int(run.data.params["threshold_min_anomaly_len"])
+    # Absent on runs logged before min_error_value existed — 0.0 is exactly the
+    # behaviour those runs had, so the default reproduces them faithfully.
+    min_error_value = float(run.data.params.get("min_error_value", 0.0))
 
     smoothed = bytes_to_errors(download_artifact_bytes(run_id, "errors.npy", tracking_uri))
     threshold = bytes_to_errors(download_artifact_bytes(run_id, "threshold.npy", tracking_uri))
@@ -202,6 +211,7 @@ def channel_detection_intervals(
         smoothed=smoothed,
         threshold=threshold,
         min_run_length=min_run_length,
+        min_error_value=min_error_value,
         source=f"run_id={run_id}",
     )
 
@@ -215,9 +225,9 @@ def channel_detection_intervals_from_spec(
     """Offline counterpart of channel_detection_intervals — no tracking server.
 
     Reads the staged errors.npy / threshold.npy at the paths in ``spec`` and
-    takes threshold_min_anomaly_len from the spec (it is a logged MLflow param,
-    absent from threshold_config.json, so it cannot be recovered from the
-    artifacts alone). See esa_adb/offline.py.
+    takes threshold_min_anomaly_len and min_error_value from the spec (both are
+    logged MLflow params, absent from threshold_config.json, so they cannot be
+    recovered from the artifacts alone). See esa_adb/offline.py.
     """
     smoothed = bytes_to_errors(read_artifact_bytes(spec.errors_path))
     threshold = bytes_to_errors(read_artifact_bytes(spec.threshold_path))
@@ -229,6 +239,7 @@ def channel_detection_intervals_from_spec(
         smoothed=smoothed,
         threshold=threshold,
         min_run_length=spec.threshold_min_anomaly_len,
+        min_error_value=spec.min_error_value,
         source=f"offline run_id={spec.run_id}",
     )
 
