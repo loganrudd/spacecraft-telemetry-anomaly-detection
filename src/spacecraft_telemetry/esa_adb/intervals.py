@@ -77,6 +77,15 @@ def subtract(a: list[Interval], b: list[Interval]) -> list[Interval]:
 
     Both inputs are normalized first. Implemented by walking ``a`` and
     clipping out every ``b`` interval that overlaps the current remainder.
+
+    This is the only asymptotically quadratic (O(len(a) x len(b))) primitive
+    in this module — the inner loop has no bisect short-circuit like
+    esa_adb.metrics._count_overlapping does. It is deliberately NOT rewritten:
+    it isn't on the measured hot path (see docs/plans/019 Stage 3), and the
+    inner ``break`` keeps real inputs near-linear (each ``a`` interval only
+    scans ``b`` intervals until its remainder is exhausted). Re-deriving this
+    boundary logic — which 33 tests currently pin — for an unmeasured gain is
+    how correctness bugs get introduced.
     """
     norm_a = normalize(a)
     norm_b = normalize(b)
