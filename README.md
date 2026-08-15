@@ -675,7 +675,18 @@ standing demonstration.
 | 15 | Anomaly injection + injection-driven HPO | Complete |
 | 16 | Multi-mission serving (replay) | Complete |
 | 17 | Live telemetry pump | Complete |
-| 18 | ISS deployment + docs polish | Planned |
+| 18 | ISS deployment + docs polish | Complete |
+| 19 | ESA-ADB-comparable evaluation (paper metric + split) | Complete |
+| 20 | Experiment variant axis (separate mission from experiment config) | Planned |
+| 21 | 6-in/6-out multivariate Telemanom | Planned |
+
+Phases 19–21 are post-18 workstreams rather than new platform capabilities: 19 is
+evaluation credibility (implementing ESA-ADB's own corrected event-wise metric and
+replicating its 50/50 split, verified against the benchmark's reference scorer — see
+[Head-to-head with the ESA-ADB benchmark](#head-to-head-with-the-esa-adb-benchmark)),
+20 is the plumbing that lets an experiment configuration stop masquerading as a
+mission, and 21 is the first detector change aimed at the precision gap 19 measured.
+21 depends on 20 and is the step the [Future Work](#future-work) items build on.
 
 
 ## Future Work
