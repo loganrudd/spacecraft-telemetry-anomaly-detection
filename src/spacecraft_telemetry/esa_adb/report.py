@@ -167,6 +167,25 @@ def _hpo_cutoff(settings: Settings, mission: str, channels: list[str]) -> pd.Tim
     return max(cutoffs)
 
 
+def tuned_eval_window(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    timeline_full: list[Interval],
+) -> list[Interval]:
+    """The held-out portion of ``timeline_full`` the "tuned" row is scored against.
+
+    This is the leakage boundary: everything before the HPO cutoff (see
+    _hpo_cutoff) was used to select hyperparameters, so scoring against it
+    would contaminate every tuned number this report produces. Single source
+    for both build_report() and scripts/diag_tp_duration.py, which must
+    reproduce the exact same window to classify the same detections.
+    """
+    cutoff = _hpo_cutoff(settings, mission, channels)
+    far_future = pd.Timestamp.max.tz_localize("UTC")
+    return intersect(timeline_full, [(cutoff, far_future)])
+
+
 def _score_row(
     *,
     scope: str,
@@ -255,9 +274,7 @@ def build_report(
     events_full = group_events(events_df, channels, timeline_full)
 
     if include_tuned:
-        hpo_cutoff = _hpo_cutoff(settings, mission, channels)
-        far_future = pd.Timestamp.max.tz_localize("UTC")
-        timeline_tuned = intersect(timeline_full, [(hpo_cutoff, far_future)])
+        timeline_tuned = tuned_eval_window(settings, mission, channels, timeline_full)
 
         per_channel_tuned_full = per_channel_detection_intervals(
             settings, mission, channels, tuned=True, run_map=run_map

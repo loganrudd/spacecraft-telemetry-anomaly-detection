@@ -12,10 +12,9 @@ If TP detections run materially longer than FP detections, raising
 architecture change. If both distributions sit at the same floor, the lever is
 dead. Either answer is worth having before committing to modelling work.
 
-Mirrors the tuned eval window from esa_adb/report.py exactly (``_hpo_cutoff`` ->
-intersect with the full mission timeline), so the detections classified here are
-the same 33 the report scores -- this is a read-only analysis of existing
-scoring runs, it never re-scores.
+Mirrors the tuned eval window from esa_adb/report.py exactly (``tuned_eval_window``),
+so the detections classified here are the same 33 the report scores -- this is a
+read-only analysis of existing scoring runs, it never re-scores.
 
 Detections are classified three ways, matching the plan's diagnostic table:
   * ``anomaly``    -- overlaps an event of category "Anomaly"
@@ -48,7 +47,7 @@ from spacecraft_telemetry.core.config import load_settings
 from spacecraft_telemetry.esa_adb.detections import mission_detection_intervals
 from spacecraft_telemetry.esa_adb.events import group_events, load_events
 from spacecraft_telemetry.esa_adb.intervals import intersect, normalize, overlaps
-from spacecraft_telemetry.esa_adb.report import LIGHTWEIGHT_CHANNELS, _hpo_cutoff
+from spacecraft_telemetry.esa_adb.report import LIGHTWEIGHT_CHANNELS, tuned_eval_window
 from spacecraft_telemetry.esa_adb.timeline import mission_timeline
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow
 
@@ -87,9 +86,7 @@ def main() -> None:
     # Reproduce report.py's tuned evaluation window exactly.
     events_df = load_events(settings, mission)
     timeline_full = mission_timeline(settings, mission, channels)
-    hpo_cutoff = _hpo_cutoff(settings, mission, channels)
-    far_future = pd.Timestamp.max.tz_localize("UTC")
-    timeline_tuned = intersect(timeline_full, [(hpo_cutoff, far_future)])
+    timeline_tuned = tuned_eval_window(settings, mission, channels, timeline_full)
 
     detections = intersect(
         normalize(mission_detection_intervals(settings, mission, channels, tuned=True)),
@@ -114,7 +111,7 @@ def main() -> None:
             buckets["false_pos"].append(dur)
 
     print(f"\nmission={mission}  channels={len(channels)}  tuned eval window")
-    print(f"HPO cutoff: {hpo_cutoff}")
+    print(f"tuned eval window starts at: {min(iv[0] for iv in timeline_tuned)}")
     print(f"{len(detections)} mission-level detections, {len(included)} included events "
           f"({len(anomalies)} of category 'Anomaly')\n")
 
