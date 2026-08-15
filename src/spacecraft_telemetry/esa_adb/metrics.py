@@ -150,22 +150,41 @@ def alarming_precision(
     """Event-wise alarming precision (paper eq. 4).
 
     ``PrA = TP_e / (TP_e + TP_r)``, where ``TP_r`` counts *redundant*
-    detections — extra alarms beyond the first for an already-detected
-    event. Computed as (detections matched to >=1 included event) minus
-    (distinct included events with >=1 matching detection): a single event
-    hit by 3 detections contributes 1 to TP_e and 2 to TP_r.
+    detections — extra alarms beyond the first for something already
+    detected.
+
+    Redundancy is counted **per ground-truth interval, not per event**,
+    matching the reference scorer (``kplabs-pl/ESA-ADB``,
+    ``timeeval/metrics/ESA_ADB_metrics.py``), which tallies hits per
+    interval and then sums ``count - 1`` over intervals hit more than once.
+    The distinction is large here, not academic: an ESA event is a *group*
+    of annotation fragments (~18 per event across 3589 fragments / 200
+    events), and only fragmentation of the *detections* is genuinely
+    redundant alarming. Counting per event instead — i.e.
+    ``matched_detections - tp_e`` — charges an event's own fragmentation as
+    redundancy, so an event whose 18 fragments are each cleanly hit once
+    scores 17 redundant alarms instead of 0, biasing PrA low.
+
+    ``tp_e`` stays event-level: it is the same TP the corrected event-wise
+    scorer reports, which was verified identical to the reference.
     """
     included, _ = _split_by_exclusion(events, excluded_categories)
     event_matched, detection_matched = _match(included, detections)
     tp_e = sum(event_matched)
-    n_matched_detections = sum(detection_matched)
-    tp_r = max(0, n_matched_detections - tp_e)
+
+    tp_r = 0
+    for event in included:
+        for interval in event.intervals:
+            n_hits = sum(1 for det in detections if overlaps(det, [interval]))
+            if n_hits > 1:
+                tp_r += n_hits - 1
+
     pr_a = tp_e / (tp_e + tp_r) if (tp_e + tp_r) > 0 else 0.0
     return {
         "alarming_precision": pr_a,
         "tp_e": tp_e,
         "tp_r": tp_r,
-        "n_matched_detections": n_matched_detections,
+        "n_matched_detections": sum(detection_matched),
     }
 
 

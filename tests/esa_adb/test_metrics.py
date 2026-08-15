@@ -184,6 +184,39 @@ class TestAlarmingPrecision:
         result = alarming_precision([event], [], excluded_categories=_EXCLUDED)
         assert result["alarming_precision"] == 0.0
 
+    def test_fragmented_event_cleanly_hit_is_not_redundant(self) -> None:
+        """A multi-fragment event hit once per fragment has ZERO redundancy.
+
+        Regression test for counting redundancy per event instead of per
+        ground-truth interval. ESA events are groups of annotation fragments
+        (~18 each on Mission1), so the event-level count
+        ``matched_detections - tp_e`` charged an event's own fragmentation as
+        redundant alarming: this case scored tp_r=2 (PrA 1/3) instead of 0.
+        """
+        t0, t10, t20, t30, t40, t50 = _ts(0, 10, 20, 30, 40, 50)
+        event = _event("id_1", [(t0, t10), (t20, t30), (t40, t50)])
+        # Exactly one detection per fragment — nothing redundant here.
+        detections = [(t0, t10), (t20, t30), (t40, t50)]
+
+        result = alarming_precision([event], detections, excluded_categories=_EXCLUDED)
+
+        assert result["tp_e"] == 1
+        assert result["tp_r"] == 0
+        assert result["alarming_precision"] == 1.0
+
+    def test_fragmented_event_charges_only_the_doubly_hit_fragment(self) -> None:
+        """Redundancy is per fragment: only the fragment hit twice is charged."""
+        t0, t2, t5, t10, t20, t30 = _ts(0, 2, 5, 10, 20, 30)
+        event = _event("id_1", [(t0, t10), (t20, t30)])
+        # First fragment hit twice, second hit once → exactly 1 redundant alarm.
+        detections = [(t0, t2), (t5, t10), (t20, t30)]
+
+        result = alarming_precision([event], detections, excluded_categories=_EXCLUDED)
+
+        assert result["tp_e"] == 1
+        assert result["tp_r"] == 1
+        assert result["alarming_precision"] == 0.5
+
 
 # ---------------------------------------------------------------------------
 # channel_aware
