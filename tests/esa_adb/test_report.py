@@ -102,6 +102,59 @@ def _write_labels(sample_dir: Path) -> None:
     ).to_csv(mission_dir / "anomaly_types.csv", index=False)
 
 
+def _write_two_category_labels(sample_dir: Path) -> None:
+    """Like _write_labels, but with a second event of category Rare Event.
+
+    Used by TestScopeInvariants: Rare Event is excluded from the
+    anomalies_only scope but not all_events, so this fixture is what makes
+    the anomalies_only-n_events-never-exceeds-all_events invariant test a
+    strict inequality rather than a trivially-equal one.
+    """
+    mission_dir = sample_dir / _MISSION
+    mission_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "ID": "id_1",
+                "Channel": _CHANNEL,
+                # Same window-14-overlapping interval as _write_labels.
+                "StartTime": "2000-01-01T00:25:00Z",
+                "EndTime": "2000-01-01T00:26:00Z",
+            },
+            {
+                "ID": "id_2",
+                "Channel": _CHANNEL,
+                # Elsewhere in the window — undetected either way, but still
+                # a distinct annotated event that must count in all_events.
+                "StartTime": "2000-01-01T00:01:00Z",
+                "EndTime": "2000-01-01T00:02:00Z",
+            },
+        ]
+    ).to_csv(mission_dir / "labels.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "ID": "id_1",
+                "Class": "class_1",
+                "Subclass": "subclass_1",
+                "Category": "Anomaly",
+                "Dimensionality": "Univariate",
+                "Locality": "Local",
+                "Length": "Subsequence",
+            },
+            {
+                "ID": "id_2",
+                "Class": "class_2",
+                "Subclass": "subclass_2",
+                "Category": "Rare Event",
+                "Dimensionality": "Univariate",
+                "Locality": "Local",
+                "Length": "Subsequence",
+            },
+        ]
+    ).to_csv(mission_dir / "anomaly_types.csv", index=False)
+
+
 def _settings(processed_dir: Path, sample_dir: Path, mlflow_uri: str) -> Settings:
     base_settings = load_settings("test")
     return base_settings.model_copy(
@@ -287,3 +340,74 @@ class TestBuildReport:
                 assert row["f0_5"] == ref["f0_5"]
                 assert row["channel_aware_f0_5"] is None
                 assert row["n_events"] is None
+
+
+class TestScopeInvariants:
+    """Two invariants that hold on every row of both the arm-A and production
+    reports (see docs/reviews/019-esa-adb-comparable-eval.md's correction to
+    the original review). A third, `anomalies_only recall >= all_events
+    recall`, was proposed by the review and is FALSE — production data
+    disproved it (all_events recall 0.417 vs anomalies_only 0.286). Excluding
+    Rare Event changes both numerator and denominator, in either direction.
+    Do not add that one here.
+    """
+
+    def test_n_detections_identical_across_scopes_for_same_label(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """Detections are computed once and only scoped at metric time."""
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_two_category_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(settings, tuned=True)
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL])
+        by_label: dict[str, set[int]] = {}
+        for row in report["rows"]:
+            if row["n_detections"] is None:  # paper reference rows carry no detections
+                continue
+            by_label.setdefault(row["label"], set()).add(row["n_detections"])
+
+        assert by_label, "fixture should produce at least one non-paper row"
+        for label, values in by_label.items():
+            assert len(values) == 1, f"{label}: n_detections differs across scopes: {values}"
+
+    def test_anomalies_only_n_events_never_exceeds_all_events(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """Excluding Rare Event only removes events — it never adds them."""
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_two_category_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(settings, tuned=True)
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL])
+        by_label_scope: dict[tuple[str, str], int] = {}
+        for row in report["rows"]:
+            if row["n_events"] is None:  # paper reference rows carry no n_events
+                continue
+            by_label_scope[(row["label"], row["scope"])] = row["n_events"]
+
+        labels = {label for label, _scope in by_label_scope}
+        assert labels, "fixture should produce at least one non-paper row"
+        for label in labels:
+            all_events_n = by_label_scope[(label, "all_events")]
+            anomalies_only_n = by_label_scope[(label, "anomalies_only")]
+            assert anomalies_only_n <= all_events_n, (
+                f"{label}: anomalies_only n_events ({anomalies_only_n}) exceeds "
+                f"all_events ({all_events_n})"
+            )
+        # Sanity: the fixture's Rare Event event must actually exercise the
+        # inequality on at least one row, or this test would pass vacuously.
+        assert any(
+            by_label_scope[(label, "anomalies_only")] < by_label_scope[(label, "all_events")]
+            for label in labels
+        ), "fixture must produce a strict inequality on at least one row"
