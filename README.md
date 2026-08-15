@@ -669,6 +669,7 @@ standing demonstration.
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
+| 11 | Documentation + polish | Complete |
 | 12 | ISS Live ingestion + collector | Complete |
 | 13 | ISS preprocessing (30 s grid, LOS detection) | Complete |
 | 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
