@@ -18,9 +18,11 @@ Two scopes, matching the paper's own tables:
 
 Residual caveats that survive even after this report (stated as footnotes in
 the output, not silently dropped — see docs/plans/019):
-  - Model class: Telemanom-ESA is multivariate-in/multi-out with all channels
-    + telecommands as input; ours is univariate 1-in/1-out. Permanent,
-    disclosed, not closable without reimplementing their model (out of scope).
+  - Model class: Telemanom-ESA is the same Telemanom LSTM (layers [80, 80])
+    run 6-in/6-out over channels 41-46 on the lightweight subset, forecasting
+    10 steps ahead; ours is 1-in/1-out, one step. Telecommands are NOT an
+    input there (only in the full-set runs). Disclosed; closable in principle
+    by widening our input/output dims (out of scope for this plan).
   - Split (Stage A only): our train/test split (train_fraction=0.8,
     train_lookback=730D) differs from the paper's chronological 50/50 half.
     Stage B (mission="ESA-Mission1-ADB", configs/esa_adb.yaml) closes this.
@@ -106,10 +108,15 @@ _PAPER_REFERENCE: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 FOOTNOTES = [
-    "Model class differs (permanent, not closable here): Telemanom-ESA is "
-    "multivariate-in/multi-out (all channels + telecommands as input, "
-    "window=256); ours is univariate 1-in/1-out per Hundman defaults "
-    "(window_size from settings.model). See docs/plans/019 Non-goals.",
+    "Model class differs: Telemanom-ESA is the same Telemanom LSTM (layers "
+    "[80, 80], as here) but runs 6-in/6-out on the lightweight subset "
+    "(mission1_experiments.py sets input_channels=target_channels=channels "
+    "41-46) and forecasts 10 steps ahead (prediction_window_size=10); ours is "
+    "1-in/1-out, one step ahead. Telecommands are NOT an input in the "
+    "lightweight config -- they enter only the full-set runs (which score "
+    "0.008). Window size is NOT a difference: their manifest sets "
+    "window_size=250, the same Hundman default we use (256 is DC-VAE's "
+    "window). See docs/plans/019 Non-goals.",
     "Split differs unless this report was run against mission='ESA-Mission1-ADB' "
     "(Stage B, configs/esa_adb.yaml): our default split is train_fraction=0.8 + "
     "train_lookback=730D; the paper's Mission1 lightweight split is a "

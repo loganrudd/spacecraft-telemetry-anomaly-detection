@@ -172,6 +172,31 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
     "min_error_value": 0.0,
 }
 
+# Widened space for the plan-019 ESA-ADB ablation arms ONLY (missions prefixed
+# `ESA-Mission1-ADB`). Production `ESA-Mission1` and ISS keep SEARCH_SPACE /
+# ISS_SEARCH_SPACE unchanged — this must not move the live demo's thresholds.
+#
+# Why: the first sweep of both arms landed against the ceiling on a *different*
+# parameter each, so neither optimum was interior and the arms were not
+# comparable to each other:
+#   arm A (84 months): threshold_z      = 4.783 of 5.0 max  (96%)
+#   arm C (24 months): min_error_value  = 0.2955 of 0.3 max (98.5%)
+# A truncated search space is a confound with training length — arm C plausibly
+# wants a higher absolute floor precisely because 24 months of training yields
+# worse forecasts and therefore larger baseline errors. Widening both bounds for
+# both arms is what makes the A/C comparison mean what it claims to mean.
+#
+# 0.6 stays consistent with the empirical basis documented on SEARCH_SPACE
+# above: smoothed-error p99.9 is ~0.15-0.41 and max ~0.44-1.03 on these
+# channels, so 0.6 still sits below the observed max while genuinely spanning
+# "keeps only the extreme tail". z to 8.0 is deliberately generous — the goal is
+# for the optimum to be interior, not to be tight.
+ESA_ADB_SEARCH_SPACE: dict[str, Any] = {
+    **SEARCH_SPACE,
+    "threshold_z":     tune.uniform(2.5, 8.0),  # was (2.5, 5.0) — arm A pegged at 4.783
+    "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
+}
+
 
 def _prepare_channel_data(
     settings: Settings,
@@ -865,11 +890,25 @@ def run_all_sweeps(
     # (short injected faults cannot sustain long consecutive-exceedance runs).
     # See the comments on _ISS_MAX_THRESHOLD_WINDOW / ISS_SEARCH_SPACE.
     # ESA uses the default space.
-    _space = ISS_SEARCH_SPACE if mission.startswith("ISS") else SEARCH_SPACE
+    # ESA-ADB ablation arms use a widened space so neither arm's optimum is
+    # pinned to a bound (see ESA_ADB_SEARCH_SPACE). Production ESA-Mission1 does
+    # NOT match this prefix and keeps the default space.
+    if mission.startswith("ISS"):
+        _space = ISS_SEARCH_SPACE
+    elif mission.startswith("ESA-Mission1-ADB"):
+        _space = ESA_ADB_SEARCH_SPACE
+    else:
+        _space = SEARCH_SPACE
     if mission.startswith("ISS"):
         log.info(
             "tune.all_sweeps.iss_search_space",
             max_threshold_window=_ISS_MAX_THRESHOLD_WINDOW,
+        )
+    elif mission.startswith("ESA-Mission1-ADB"):
+        log.info(
+            "tune.all_sweeps.esa_adb_search_space",
+            threshold_z_max=8.0,
+            min_error_value_max=0.6,
         )
 
     def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
