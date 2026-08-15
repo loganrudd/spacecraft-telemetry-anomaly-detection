@@ -234,11 +234,26 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
 
     df["is_anomaly"] = is_anomaly
 
+    if n_point > 0 and half_width == pd.Timedelta(0):
+        # half_width stayed 0 despite point labels present: either median_interval
+        # was NaN/non-positive (degenerate channel — e.g. a single-row partition)
+        # or len(ts) <= 1. Every point label therefore fell back to a [t, t)
+        # interval matching nothing — exactly the bug this widening exists to fix,
+        # just silently reproduced. Log it rather than raise: preprocessing must
+        # still tolerate a degenerate channel.
+        log.warning(
+            "label_timesteps.point_labels_dropped",
+            channel_id=channel_id,
+            n_point_labels=n_point,
+            reason="half_width is 0 — point labels could not be widened and match nothing",
+        )
+
     log.info(
         "label_timesteps",
         channel_id=channel_id,
         n_labels=len(channel_labels),
         n_point_labels=n_point,
+        half_width_seconds=half_width.total_seconds(),
         n_anomalous=int(is_anomaly.sum()),
     )
     return df

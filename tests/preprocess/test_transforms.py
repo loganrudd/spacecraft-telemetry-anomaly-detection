@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import structlog.testing
 
 from spacecraft_telemetry.preprocess.transforms import (
     detect_gaps,
@@ -420,6 +421,33 @@ class TestLabelTimesteps:
         assert out["is_anomaly"].sum() > 0
         # Timestamps well before either segment must be nominal.
         assert not out["is_anomaly"].iloc[0]
+
+    def test_single_row_channel_point_label_logs_warning(self) -> None:
+        """len(ts) <= 1 keeps half_width at 0, so the point label matches nothing.
+
+        This is the same failure mode the point-label widening was built to
+        fix (a [t, t) interval matching nothing), just reproduced silently
+        through the other guard (len(ts) > 1). It must not raise — preprocessing
+        tolerates a degenerate channel — but it must be logged.
+        """
+        df = _make_channel_df(n=1)
+        instant = df["telemetry_timestamp"].iloc[0]
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        with structlog.testing.capture_logs() as captured:
+            out = label_timesteps(df, labels)
+
+        assert not out["is_anomaly"].any(), "degenerate channel should mark nothing"
+        warnings = [e for e in captured if e["event"] == "label_timesteps.point_labels_dropped"]
+        assert len(warnings) == 1
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["n_point_labels"] == 1
 
     def test_empty_labels_returns_all_false(self) -> None:
         df = _make_channel_df(n=20)
