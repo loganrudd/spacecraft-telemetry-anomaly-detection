@@ -15,7 +15,6 @@ paper computes its event-wise metrics against (see esa_adb/metrics.py).
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -269,8 +268,14 @@ def per_channel_detection_intervals(
             would quietly weaken the OR-aggregation.
     """
     if run_map is None:
-        with suppress(Exception):
+        # This is the branch where MLflow IS required — see report.py's
+        # matching comment. A failure here must stay visible, not vanish
+        # silently; find_scoring_run below still fails loudly if the tracking
+        # URI ends up misconfigured, so it's safe to continue.
+        try:
             configure_mlflow(settings)
+        except Exception as exc:
+            log.warning("esa_adb.detections.configure_mlflow_failed", error=str(exc))
         tracking_uri = settings.mlflow.tracking_uri
         exp = experiment_name(settings.model.model_type, "scoring", mission)
 

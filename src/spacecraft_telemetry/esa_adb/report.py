@@ -32,7 +32,6 @@ the output, not silently dropped — see docs/plans/019):
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -251,8 +250,16 @@ def build_report(
     """
     channels = channels or LIGHTWEIGHT_CHANNELS
     if run_map is None:
-        with suppress(Exception):
+        # This is the branch where MLflow IS required (the report reads scoring
+        # runs from it) — a failure here must stay visible rather than vanish
+        # silently. A misconfigured tracking URI still fails loudly downstream
+        # in find_scoring_run with a clear message, so it's safe to continue;
+        # what must not happen is losing the root cause (e.g. an ID-token fetch
+        # failure masked by ambient gcloud credentials happening to cover it).
+        try:
             configure_mlflow(settings)
+        except Exception as exc:
+            log.warning("esa_adb.report.configure_mlflow_failed", error=str(exc))
 
     log.info(
         "esa_adb.report.start",

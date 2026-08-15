@@ -480,6 +480,46 @@ class TestPerChannelDetectionIntervals:
         assert len(result["channel_42"]) == 1
         assert result["channel_41"] != result["channel_42"]
 
+    def test_configure_mlflow_failure_is_logged_not_silently_swallowed(
+        self,
+        tmp_path: Path,
+        mlflow_uri: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A configure_mlflow failure (e.g. GCP ID-token fetch) must be visible.
+
+        Regression for the observed 2026-08-15 case: fetch_id_token_failed
+        passed silently and the run only worked because ambient gcloud
+        credentials happened to cover it. The failure must not vanish — and
+        since this branch is where MLflow IS required, the call must still
+        fail loudly downstream (find_scoring_run) rather than being masked.
+
+        Checks capsys rather than structlog.testing.capture_logs(): this
+        module's logger is realized (and cached, per core/logging.py's
+        cache_logger_on_first_use=True) well before this test runs inside the
+        full suite, which makes capture_logs() miss the event. structlog
+        emits to stdout regardless (see test_iss_io.py's precedent).
+        """
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        settings = _settings(processed_dir, mlflow_uri)
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("fetch_id_token_failed")
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.esa_adb.detections.configure_mlflow", _raise
+        )
+
+        with pytest.raises(RuntimeError, match="No MLflow experiment"):
+            per_channel_detection_intervals(settings, _MISSION, ["channel_41"], tuned=False)
+
+        stdout = capsys.readouterr().out
+        assert "esa_adb.detections.configure_mlflow_failed" in stdout
+        assert "warning" in stdout
+        assert "fetch_id_token_failed" in stdout
+
 
 # ---------------------------------------------------------------------------
 # mission_detection_intervals

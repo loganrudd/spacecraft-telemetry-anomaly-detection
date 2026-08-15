@@ -203,6 +203,44 @@ class TestBuildReport:
         with pytest.raises(RuntimeError, match="tuned scoring run"):
             build_report(settings, _MISSION, channels=[_CHANNEL])
 
+    def test_configure_mlflow_failure_is_logged_not_silently_swallowed(
+        self,
+        tmp_path: Path,
+        mlflow_uri: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A configure_mlflow failure (e.g. GCP ID-token fetch) must be visible.
+
+        Regression for the observed 2026-08-15 case: fetch_id_token_failed
+        passed silently and the run only worked because ambient gcloud
+        credentials happened to cover it. build_report's run_map=None branch
+        is exactly where MLflow is required, so the failure must not vanish —
+        it still fails loudly downstream rather than being masked.
+
+        Checks capsys rather than structlog.testing.capture_logs() — see
+        test_detections.py's matching test for why (cache_logger_on_first_use
+        breaks capture_logs() for already-realized module loggers).
+        """
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("fetch_id_token_failed")
+
+        monkeypatch.setattr("spacecraft_telemetry.esa_adb.report.configure_mlflow", _raise)
+
+        with pytest.raises(RuntimeError, match="No MLflow experiment"):
+            build_report(settings, _MISSION, channels=[_CHANNEL], include_tuned=False)
+
+        stdout = capsys.readouterr().out
+        assert "esa_adb.report.configure_mlflow_failed" in stdout
+        assert "warning" in stdout
+        assert "fetch_id_token_failed" in stdout
+
     def test_ours_rows_detect_the_event(self, tmp_path: Path, mlflow_uri: str) -> None:
         """The single event overlaps the flagged window in both untuned and tuned runs."""
         processed_dir = tmp_path / "processed"

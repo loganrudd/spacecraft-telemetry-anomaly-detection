@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import structlog.testing
+import pytest
 
 from spacecraft_telemetry.preprocess.transforms import (
     detect_gaps,
@@ -422,13 +422,22 @@ class TestLabelTimesteps:
         # Timestamps well before either segment must be nominal.
         assert not out["is_anomaly"].iloc[0]
 
-    def test_single_row_channel_point_label_logs_warning(self) -> None:
+    def test_single_row_channel_point_label_logs_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """len(ts) <= 1 keeps half_width at 0, so the point label matches nothing.
 
         This is the same failure mode the point-label widening was built to
         fix (a [t, t) interval matching nothing), just reproduced silently
         through the other guard (len(ts) > 1). It must not raise — preprocessing
         tolerates a degenerate channel — but it must be logged.
+
+        structlog emits to stdout via PrintLoggerFactory, and module-level
+        loggers are cached on first use (core/logging.py's
+        cache_logger_on_first_use=True) — by the time this runs inside the
+        full suite, this module's logger has typically already been realized
+        by an earlier test, which makes structlog.testing.capture_logs() miss
+        the event. Check capsys instead (see test_iss_io.py's precedent).
         """
         df = _make_channel_df(n=1)
         instant = df["telemetry_timestamp"].iloc[0]
@@ -440,14 +449,13 @@ class TestLabelTimesteps:
                 "end_time": instant,
             }]
         )
-        with structlog.testing.capture_logs() as captured:
-            out = label_timesteps(df, labels)
+        out = label_timesteps(df, labels)
 
         assert not out["is_anomaly"].any(), "degenerate channel should mark nothing"
-        warnings = [e for e in captured if e["event"] == "label_timesteps.point_labels_dropped"]
-        assert len(warnings) == 1
-        assert warnings[0]["log_level"] == "warning"
-        assert warnings[0]["n_point_labels"] == 1
+        stdout = capsys.readouterr().out
+        assert "label_timesteps.point_labels_dropped" in stdout
+        assert "warning" in stdout
+        assert "n_point_labels=1" in stdout
 
     def test_empty_labels_returns_all_false(self) -> None:
         df = _make_channel_df(n=20)
