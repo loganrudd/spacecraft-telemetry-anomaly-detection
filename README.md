@@ -22,7 +22,7 @@ deployment, and — for ISS — a real-time Lightstreamer → asyncio pump feedi
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
 **Results (ESA):** on the held-out final 40% of ESA-Mission1, anomalies are flagged in
-**30 of 31** labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation)
+**22 of 31** labeled channels (segment recall 0.37, precision 0.57 — see [Evaluation](#evaluation)
 for the leakage-free protocol and honest framing).
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
@@ -204,23 +204,35 @@ point-adjust convention common in the SMAP/MSL literature, which inflates scores
 by crediting an entire anomaly segment for a single detected point.
 
 **Results (ESA-Mission1, held-out 40%, tuned).** Of 31 channels with labeled
-anomalies in the held-out window, **30 register detection** (segment-F0.5 > 0):
+anomalies in the held-out window, **22 register detection** (segment-F0.5 > 0):
 
 | metric (mean over detected channels) | value |
 |---|---|
-| segment recall | 0.56 |
-| segment precision | 0.22 |
-| segment F0.5 | 0.19 |
+| segment recall | 0.37 |
+| segment precision | 0.57 |
+| segment F0.5 | 0.43 |
 
-Detection is **precision-limited**: the forecaster recalls over half the true
-anomaly segments, but most predicted segments don't overlap a *labeled* one. A
-detection-level diagnostic bears this out — of 33 mission-level detections in the
-benchmark run below, 18% hit a labeled anomaly and **30% hit a labeled Rare Event**,
-a real annotated phenomenon that the anomalies-only scope excludes by definition.
-The rest fire a median of 245 hours from the nearest real anomaly, so they are not
-near-misses on mislocated events. Three channels (41, 43, 45) reach segment-F0.5
-≥ 0.7 individually; the fleet mean of 0.19 reflects label sparsity across the
-majority of channels rather than systematic detection failure. The number is
+Detection is **recall-limited**: thresholds are tuned for F0.5, which weights
+precision twice as heavily as recall, so the forecaster fires conservatively —
+most segments it flags do overlap a labeled one, but it stays silent through
+roughly two thirds of them, and 9 of the 31 labeled channels produce no detection
+at all. That is the shape the objective asks for rather than a defect in it. One
+channel (22) reaches segment-F0.5 ≥ 0.7 individually, at 0.833.
+
+These supersede an earlier reported F0.5 of 0.19 (recall 0.56, precision 0.22).
+**Two things moved at once** — a fix to `label_timesteps`, which had been dropping
+zero-duration point annotations and so under-counting true segments, and a re-tune
+on a widened threshold search space — so the gain cannot be attributed to either
+alone and is stated here as a combined before/after.
+
+Where the remaining false positives go is visible in the benchmark run below: of
+its 33 mission-level detections, 18% hit a labeled anomaly and **30% hit a labeled
+Rare Event**, a real annotated phenomenon that the anomalies-only scope excludes
+by definition. The rest fire a median of 245 hours from the nearest real anomaly,
+so they are not near-misses on mislocated events. A duration filter would not
+separate them either: the shortest true-positive detection (2.27 min) is exactly
+as short as the shortest false positive, because real anomalies here have a median
+duration of 0.06 min — far shorter than the runs the scorer emits. The numbers are
 reported as-is, not tuned upward against the held-out split.
 
 ### Head-to-head with the ESA-ADB benchmark
