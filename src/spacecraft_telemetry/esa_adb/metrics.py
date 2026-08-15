@@ -21,6 +21,7 @@ Two scopes are used by the report (esa_adb.report):
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -141,6 +142,40 @@ def corrected_event_wise(
     }
 
 
+def _assert_normalized(detections: list[Interval]) -> None:
+    """Assert ``detections`` is sorted by start with no overlapping/touching intervals.
+
+    alarming_precision's bisect-based redundancy count assumes this — every
+    call site already normalizes detections before calling (esa_adb.report,
+    esa_adb.detections), so this is a precondition check on an invariant that
+    should already hold, not a fallback path.
+    """
+    for i in range(len(detections) - 1):
+        if detections[i][1] >= detections[i + 1][0]:
+            raise ValueError(
+                "alarming_precision requires normalized (sorted, disjoint) "
+                f"detections; found overlapping/touching intervals at index {i}: "
+                f"{detections[i]} and {detections[i + 1]}. Call intervals.normalize() first."
+            )
+
+
+def _count_overlapping(starts: list[Any], ends: list[Any], interval: Interval) -> int:
+    """Count normalized, disjoint detections overlapping ``interval`` via bisect.
+
+    ``starts``/``ends`` are each independently sorted ascending because the
+    detections are normalized and disjoint (see _assert_normalized), so the
+    overlapping subset is exactly the contiguous slice [lo, hi):
+      - hi: first index with start >= interval's end (detections starting at
+        or after the interval end cannot overlap it — bisect_left on starts).
+      - lo: first index with end > interval's start (detections ending at or
+        before the interval start cannot overlap it — bisect_right on ends).
+    """
+    s, e = interval
+    hi = bisect_left(starts, e)
+    lo = bisect_right(ends, s)
+    return max(0, hi - lo)
+
+
 def alarming_precision(
     events: list[Event],
     detections: list[Interval],
@@ -167,15 +202,25 @@ def alarming_precision(
 
     ``tp_e`` stays event-level: it is the same TP the corrected event-wise
     scorer reports, which was verified identical to the reference.
+
+    Requires ``detections`` to already be normalized (sorted, disjoint) —
+    every call site normalizes before calling — so the per-fragment
+    redundancy count can bisect instead of rescanning every detection
+    (measured 22.3s at the real untuned shape: 65 events x 18 fragments x
+    53,344 detections; this makes it O(log n) per fragment instead of O(n)).
     """
     included, _ = _split_by_exclusion(events, excluded_categories)
     event_matched, detection_matched = _match(included, detections)
     tp_e = sum(event_matched)
 
+    _assert_normalized(detections)
+    starts = [d[0] for d in detections]
+    ends = [d[1] for d in detections]
+
     tp_r = 0
     for event in included:
         for interval in event.intervals:
-            n_hits = sum(1 for det in detections if overlaps(det, [interval]))
+            n_hits = _count_overlapping(starts, ends, interval)
             if n_hits > 1:
                 tp_r += n_hits - 1
 

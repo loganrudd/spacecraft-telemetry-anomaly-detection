@@ -10,8 +10,10 @@ metric is not doing what the paper's equation (1) says it does.
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from spacecraft_telemetry.esa_adb.events import Event
+from spacecraft_telemetry.esa_adb.intervals import overlaps
 from spacecraft_telemetry.esa_adb.metrics import (
     alarming_precision,
     channel_aware,
@@ -169,10 +171,13 @@ class TestAlarmingPrecision:
         assert result["tp_r"] == 0
 
     def test_redundant_detections_on_same_event_penalised(self) -> None:
-        t0, t5, t10, t15, t20 = _ts(0, 5, 10, 15, 20)
+        t0, t5, t10, t14, t16, t20 = _ts(0, 5, 10, 14, 16, 20)
         event = _event("id_1", [(t0, t20)])
-        # Three separate detections all inside the single event's span.
-        detections = [(t0, t5), (t10, t15), (t15, t20)]
+        # Three separate, genuinely disjoint detections (real detections are
+        # always normalize()'d before reaching this function — touching
+        # intervals like (t10, t15)/(t15, t20) would already be merged into
+        # one, so a gap between each pair is required for a valid fixture).
+        detections = [(t0, t5), (t10, t14), (t16, t20)]
         result = alarming_precision([event], detections, excluded_categories=_EXCLUDED)
         assert result["tp_e"] == 1
         assert result["tp_r"] == 2
@@ -216,6 +221,68 @@ class TestAlarmingPrecision:
         assert result["tp_e"] == 1
         assert result["tp_r"] == 1
         assert result["alarming_precision"] == 0.5
+
+    def test_touching_detections_raise(self) -> None:
+        """The bisect-based redundancy count assumes normalized (disjoint) input.
+
+        Touching intervals ((t10, t15) and (t15, t20)) would already have been
+        merged into one by intervals.normalize() at every real call site, so
+        this is a precondition violation, not a valid input to tolerate.
+        """
+        t0, t10, t15, t20 = _ts(0, 10, 15, 20)
+        event = _event("id_1", [(t0, t20)])
+        detections = [(t10, t15), (t15, t20)]
+        with pytest.raises(ValueError, match="normalized"):
+            alarming_precision([event], detections, excluded_categories=_EXCLUDED)
+
+    def test_overlapping_detections_raise(self) -> None:
+        t0, t10, t12, t20 = _ts(0, 10, 12, 20)
+        event = _event("id_1", [(t0, t20)])
+        detections = [(t0, t12), (t10, t20)]  # overlap between t10 and t12
+        with pytest.raises(ValueError, match="normalized"):
+            alarming_precision([event], detections, excluded_categories=_EXCLUDED)
+
+    def test_matches_naive_brute_force_on_a_larger_fixture(self) -> None:
+        """Cross-check the bisect-based count against the original O(n) scan.
+
+        Regression coverage for the Q1 rewrite: several events with multiple
+        fragments and multiple detections per fragment, some hit once, some
+        hit multiple times, some not hit at all.
+        """
+        base = pd.Timestamp("2000-01-01T00:00:00Z")
+        ts = [base + pd.Timedelta(minutes=m) for m in range(0, 200, 2)]  # 100 points
+
+        events = [
+            _event("id_1", [(ts[0], ts[10]), (ts[20], ts[30])]),
+            _event("id_2", [(ts[50], ts[60])]),
+            _event("id_3", [(ts[70], ts[75])]),  # never detected
+        ]
+        detections = [
+            (ts[1], ts[3]),
+            (ts[5], ts[7]),  # 2nd hit on id_1's first fragment
+            (ts[21], ts[24]),
+            (ts[26], ts[29]),
+            (ts[52], ts[54]),
+            (ts[55], ts[57]),
+            (ts[58], ts[59]),  # 3rd hit on id_2's fragment
+            (ts[90], ts[95]),  # matches nothing
+        ]
+
+        def _naive_tp_r(
+            evts: list[Event], dets: list[tuple[pd.Timestamp, pd.Timestamp]]
+        ) -> int:
+            total = 0
+            for evt in evts:
+                for interval in evt.intervals:
+                    n_hits = sum(1 for det in dets if overlaps(det, [interval]))
+                    if n_hits > 1:
+                        total += n_hits - 1
+            return total
+
+        result = alarming_precision(events, detections, excluded_categories=_EXCLUDED)
+        assert result["tp_r"] == _naive_tp_r(events, detections)
+        # 1 extra on id_1 frag 1, 1 extra on id_1 frag 2, 2 extra on id_2.
+        assert result["tp_r"] == 4
 
 
 # ---------------------------------------------------------------------------
