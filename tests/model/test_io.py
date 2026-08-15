@@ -121,6 +121,89 @@ def test_download_artifact_bytes_retrieves_data(_mlflow_uri: str) -> None:
     assert result == payload
 
 
+def test_download_artifact_bytes_reads_directly_from_gs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gs:// run.info.artifact_uri must be read directly, bypassing the proxy.
+
+    P1: client.download_artifacts() streams bytes through the MLflow tracking
+    server (measured 33-49s for a ~60MB artifact); a direct GCS read is the
+    fix. The proxy path (download_artifacts) must not be called at all here.
+    """
+    import mlflow
+
+    class _FakeInfo:
+        artifact_uri = "gs://bucket/mlflow/1/run123/artifacts"
+
+    class _FakeRun:
+        info = _FakeInfo()
+
+    class _FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            del tracking_uri
+
+        def get_run(self, run_id: str) -> _FakeRun:
+            del run_id
+            return _FakeRun()
+
+        def download_artifacts(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError(
+                "proxy download must not be called when artifact_uri is gs://"
+            )
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
+
+    captured: dict[str, str] = {}
+
+    class _FakeUPath:
+        def read_bytes(self) -> bytes:
+            return b"gcs-bytes"
+
+    def _fake_to_upath(value: str) -> _FakeUPath:
+        captured["value"] = value
+        return _FakeUPath()
+
+    monkeypatch.setattr("spacecraft_telemetry.core.paths.to_upath", _fake_to_upath)
+
+    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+
+    assert result == b"gcs-bytes"
+    assert captured["value"] == "gs://bucket/mlflow/1/run123/artifacts/errors.npy"
+
+
+def test_download_artifact_bytes_falls_back_to_proxy_for_non_gs_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-gs:// artifact_uri (e.g. local file://) must use the proxy path."""
+    import mlflow
+
+    class _FakeInfo:
+        artifact_uri = "mlflow-artifacts:/1/run123/artifacts"
+
+    class _FakeRun:
+        info = _FakeInfo()
+
+    class _FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            del tracking_uri
+
+        def get_run(self, run_id: str) -> _FakeRun:
+            del run_id
+            return _FakeRun()
+
+        def download_artifacts(self, run_id: str, artifact_path: str, dst_path: str) -> str:
+            del run_id
+            local = Path(dst_path) / artifact_path
+            local.write_bytes(b"proxied-bytes")
+            return str(local)
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
+
+    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+
+    assert result == b"proxied-bytes"
+
+
 def test_find_latest_run_for_channel_returns_most_recent(_mlflow_uri: str) -> None:
     """find_latest_run_for_channel must return the last run for a channel."""
     mlflow.set_tracking_uri(_mlflow_uri)

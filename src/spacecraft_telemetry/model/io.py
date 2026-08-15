@@ -146,6 +146,18 @@ def download_artifact_bytes(
 ) -> bytes:
     """Download a named artifact from an MLflow run and return its raw bytes.
 
+    Reads directly from the run's artifact store when it resolves to a
+    ``gs://`` URI (``run.info.artifact_uri`` — the cloud MLflow server logs
+    this as the real bucket path, not a proxied ``mlflow-artifacts:`` scheme),
+    bypassing ``client.download_artifacts()``, which streams bytes through the
+    MLflow tracking server. Measured: errors.npy (~60MB) took 33-49s through
+    the proxy (~0.5-0.7 MB/s — a 1 vCPU Cloud Run instance is not built to
+    stream large binaries) vs. a direct GCS read.
+
+    Falls back to the tracking-server proxy for any other artifact store
+    scheme (e.g. local ``file://`` runs used in tests, or a genuinely proxied
+    store) — same behaviour as before this optimisation.
+
     Args:
         run_id:        MLflow run ID.
         artifact_path: Path within the run's artifact store, e.g. "errors.npy".
@@ -159,7 +171,14 @@ def download_artifact_bytes(
     """
     import mlflow
 
+    from spacecraft_telemetry.core.paths import to_upath
+
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    run = client.get_run(run_id)
+    artifact_uri = run.info.artifact_uri
+    if artifact_uri and artifact_uri.startswith("gs://"):
+        return to_upath(f"{artifact_uri.rstrip('/')}/{artifact_path}").read_bytes()
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_path = client.download_artifacts(run_id, artifact_path, tmp_dir)
         return Path(local_path).read_bytes()
