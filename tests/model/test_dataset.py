@@ -15,10 +15,12 @@ torch = pytest.importorskip("torch")
 from spacecraft_telemetry.model.dataset import (  # noqa: E402
     WindowedSequenceDataset,
     _build_window_index,
+    load_series_metadata,
     load_series_parquet,
     make_dataloaders,
     make_test_dataloader,
     window_target_timestamps,
+    window_target_timestamps_from_metadata,
 )
 from tests.model.conftest import SeriesParquetFixture  # noqa: E402
 
@@ -81,6 +83,44 @@ def test_load_series_empty_dir_raises(tmp_path: Path) -> None:
         load_series_parquet(
             tmp_path / "processed", "ESA-Mission1", "channel_1", "train"
         )
+
+
+# ---------------------------------------------------------------------------
+# load_series_metadata
+# ---------------------------------------------------------------------------
+
+
+def test_load_series_metadata_matches_load_series_parquet(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    """The lighter loader must return identical segment_ids/is_anomaly/timestamps."""
+    fx = tiny_series_parquet
+    _, expected_seg_ids, expected_is_anomaly, expected_timestamps = load_series_parquet(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    seg_ids, is_anomaly, timestamps = load_series_metadata(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    np.testing.assert_array_equal(seg_ids, expected_seg_ids)
+    np.testing.assert_array_equal(is_anomaly, expected_is_anomaly)
+    np.testing.assert_array_equal(timestamps, expected_timestamps)
+
+
+def test_load_series_metadata_dtypes(tiny_series_parquet: SeriesParquetFixture) -> None:
+    fx = tiny_series_parquet
+    seg_ids, is_anomaly, _ = load_series_metadata(
+        fx.processed_dir, fx.mission, fx.channel, "train"
+    )
+    assert seg_ids.dtype == np.int32
+    assert is_anomaly.dtype == bool
+
+
+def test_load_series_metadata_missing_channel_raises(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    fx = tiny_series_parquet
+    with pytest.raises(FileNotFoundError, match="channel_id=nonexistent"):
+        load_series_metadata(fx.processed_dir, fx.mission, "nonexistent", "train")
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +423,32 @@ def test_window_target_timestamps_returns_correct_count(
     )
     result = window_target_timestamps(settings, fx.mission, fx.channel)
     assert len(result) == fx.n_test_windows
+
+
+def test_window_target_timestamps_from_metadata_matches_disk_read(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    """The preloaded-arrays path must reproduce window_target_timestamps exactly.
+
+    Regression for docs/plans/019 P2/P3: esa_adb.report.build_report preloads
+    (segment_ids, is_anomaly, timestamps) once per channel via
+    load_series_metadata() and reuses them across mission_timeline,
+    _hpo_cutoff, and detection reconstruction instead of re-reading the
+    partition each time — this must be a pure refactor with no behaviour
+    change.
+    """
+    from spacecraft_telemetry.core.config import Settings
+
+    fx = tiny_series_parquet
+    settings = Settings(
+        model={"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon},
+        preprocess={"processed_data_dir": str(fx.processed_dir)},
+    )
+    expected = window_target_timestamps(settings, fx.mission, fx.channel)
+
+    segment_ids, is_anomaly, timestamps = load_series_metadata(
+        fx.processed_dir, fx.mission, fx.channel, "test"
+    )
+    actual = window_target_timestamps_from_metadata(settings, segment_ids, is_anomaly, timestamps)
+
+    np.testing.assert_array_equal(actual, expected)

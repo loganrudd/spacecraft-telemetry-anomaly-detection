@@ -333,6 +333,73 @@ class TestBuildReport:
             "a per-channel detection fetch is being repeated"
         )
 
+    def test_preloads_series_metadata_once_per_channel(
+        self, tmp_path: Path, mlflow_uri: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for P2/P3: the test partition must be read once per channel.
+
+        Before P2/P3, mission_timeline, _hpo_cutoff, and per-channel detection
+        reconstruction (untuned + tuned) each independently re-read the full
+        parquet partition — up to 4 reads per channel. build_report now
+        preloads (segment_ids, is_anomaly, timestamps) once per channel via
+        load_series_metadata() and threads it through all of those.
+
+        Patches every fallback disk-read entry point the downstream functions
+        would fall back to if a caller forgot to pass metadata_by_channel
+        through (esa_adb.timeline's own load_series_metadata reference, and
+        the window_target_timestamps disk-reading path in both report.py's
+        _hpo_cutoff and detections.py's _intervals_from_arrays) — a single
+        counter shared across all of them, so a regression in any one of
+        those call sites is caught, not just the top-level preload.
+        """
+        import spacecraft_telemetry.esa_adb.detections as detections_module
+        import spacecraft_telemetry.esa_adb.report as report_module
+        import spacecraft_telemetry.esa_adb.timeline as timeline_module
+
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(settings, tuned=True)
+
+        calls: list[str] = []
+
+        def _counting_metadata_call(real: object):
+            def _wrapped(*args: object, **kwargs: object) -> object:
+                calls.append("load_series_metadata")
+                return real(*args, **kwargs)  # type: ignore[operator]
+
+            return _wrapped
+
+        def _disk_read_fallback_call(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError(
+                "window_target_timestamps (full disk-read fallback) must not be "
+                "called when build_report has preloaded metadata_by_channel"
+            )
+
+        monkeypatch.setattr(
+            report_module, "load_series_metadata",
+            _counting_metadata_call(report_module.load_series_metadata),
+        )
+        monkeypatch.setattr(
+            timeline_module, "load_series_metadata",
+            _counting_metadata_call(timeline_module.load_series_metadata),
+        )
+        monkeypatch.setattr(report_module, "window_target_timestamps", _disk_read_fallback_call)
+        monkeypatch.setattr(
+            detections_module, "window_target_timestamps", _disk_read_fallback_call
+        )
+
+        build_report(settings, _MISSION, channels=[_CHANNEL])
+
+        assert len(calls) == 1, (
+            f"expected 1 total load_series_metadata call for 1 channel, got {len(calls)} "
+            f"({calls}) — the test partition is being re-read somewhere downstream"
+        )
+
     def test_ours_rows_detect_the_event(self, tmp_path: Path, mlflow_uri: str) -> None:
         """The single event overlaps the flagged window in both untuned and tuned runs."""
         processed_dir = tmp_path / "processed"

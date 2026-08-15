@@ -9,7 +9,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from spacecraft_telemetry.core.config import Settings, load_settings
-from spacecraft_telemetry.esa_adb.timeline import channel_timeline, mission_timeline
+from spacecraft_telemetry.esa_adb.timeline import (
+    channel_timeline,
+    channel_timeline_from_metadata,
+    mission_timeline,
+)
+from spacecraft_telemetry.model.dataset import load_series_metadata
 
 _MISSION = "ESA-Mission1-Test"
 _FREQ_S = 90
@@ -102,3 +107,41 @@ class TestMissionTimeline:
         result = mission_timeline(_settings(processed_dir), _MISSION, ["channel_41", "channel_42"])
         # Both channels share the same timestamps here, so the union collapses to 1.
         assert len(result) == 1
+
+    def test_metadata_by_channel_matches_disk_read(self, tmp_path: Path) -> None:
+        """Preloaded metadata must reproduce the disk-reading result exactly.
+
+        Regression for docs/plans/019 P2/P3: build_report preloads each
+        channel's (segment_ids, is_anomaly, timestamps) once and reuses them
+        here instead of re-reading the partition — must be a pure refactor.
+        """
+        processed_dir = tmp_path / "processed"
+        _write_series(processed_dir, _MISSION, "channel_41", seg_sizes=[5, 5])
+        _write_series(processed_dir, _MISSION, "channel_42", seg_sizes=[3, 3])
+        settings = _settings(processed_dir)
+        channels = ["channel_41", "channel_42"]
+
+        expected = mission_timeline(settings, _MISSION, channels)
+
+        metadata_by_channel = {
+            ch: load_series_metadata(processed_dir, _MISSION, ch, "test") for ch in channels
+        }
+        actual = mission_timeline(
+            settings, _MISSION, channels, metadata_by_channel=metadata_by_channel
+        )
+
+        assert actual == expected
+
+
+class TestChannelTimelineFromMetadata:
+    def test_matches_channel_timeline(self, tmp_path: Path) -> None:
+        processed_dir = tmp_path / "processed"
+        _write_series(processed_dir, _MISSION, "channel_41", seg_sizes=[5, 5])
+        expected = channel_timeline(_settings(processed_dir), _MISSION, "channel_41")
+
+        segment_ids, _, timestamps = load_series_metadata(
+            processed_dir, _MISSION, "channel_41", "test"
+        )
+        actual = channel_timeline_from_metadata(segment_ids, timestamps)
+
+        assert actual == expected

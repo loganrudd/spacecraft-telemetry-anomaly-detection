@@ -23,7 +23,10 @@ import pandas as pd
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.esa_adb.intervals import union as _union
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
-from spacecraft_telemetry.model.dataset import window_target_timestamps
+from spacecraft_telemetry.model.dataset import (
+    window_target_timestamps,
+    window_target_timestamps_from_metadata,
+)
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
@@ -37,6 +40,14 @@ if TYPE_CHECKING:
     from spacecraft_telemetry.esa_adb.offline import OfflineRunMap, RunSpec
 
 log = get_logger(__name__)
+
+# (segment_ids, is_anomaly, timestamps) — load_series_metadata()'s return
+# shape, preloaded once per channel by esa_adb.report.build_report so
+# per-channel detection reconstruction doesn't re-read the parquet partition
+# for every scoring run (untuned + tuned) it processes (docs/plans/019 P2/P3).
+SeriesMetadata = tuple[
+    np.ndarray[Any, np.dtype[np.int32]], np.ndarray[Any, Any], np.ndarray[Any, Any]
+]
 
 
 def find_scoring_run(
@@ -142,6 +153,7 @@ def _intervals_from_arrays(
     min_run_length: int,
     min_error_value: float = 0.0,
     source: str,
+    metadata: SeriesMetadata | None = None,
 ) -> list[Interval]:
     """Re-derive flags from a scoring run's arrays and map them onto timestamps.
 
@@ -153,6 +165,13 @@ def _intervals_from_arrays(
     produced. It defaults to 0.0 for runs logged before the parameter existed,
     which is exactly the behaviour those runs had.
 
+    Args:
+        metadata: When given, reuse this channel's preloaded
+            (segment_ids, is_anomaly, timestamps) instead of re-reading the
+            parquet partition (see esa_adb.report.build_report, docs/plans/019
+            P2/P3) — a channel typically has both an untuned and a tuned
+            scoring run reconstructed, and the partition is identical for both.
+
     Raises:
         ValueError: The scoring run's window count doesn't match the current
             processed test partition — a stale run or a settings.model
@@ -160,7 +179,13 @@ def _intervals_from_arrays(
     """
     flags = flag_anomalies(smoothed, threshold, min_run_length, min_error_value)
 
-    target_timestamps = window_target_timestamps(settings, mission, channel)
+    if metadata is not None:
+        segment_ids, is_anomaly, timestamps = metadata
+        target_timestamps = window_target_timestamps_from_metadata(
+            settings, segment_ids, is_anomaly, timestamps
+        )
+    else:
+        target_timestamps = window_target_timestamps(settings, mission, channel)
     if len(target_timestamps) != len(flags):
         raise ValueError(
             f"Window count mismatch for channel={channel!r}, source={source!r}: "
@@ -179,6 +204,8 @@ def channel_detection_intervals(
     mission: str,
     channel: str,
     run_id: str,
+    *,
+    metadata: SeriesMetadata | None = None,
 ) -> list[Interval]:
     """Reconstruct one channel's flagged-anomaly intervals from a scoring run.
 
@@ -189,6 +216,10 @@ def channel_detection_intervals(
 
     Requires a reachable MLflow tracking server; see
     channel_detection_intervals_from_spec for the offline equivalent.
+
+    Args:
+        metadata: See _intervals_from_arrays — preloaded (segment_ids,
+            is_anomaly, timestamps) to avoid re-reading the parquet partition.
     """
     import mlflow
 
@@ -212,6 +243,7 @@ def channel_detection_intervals(
         min_run_length=min_run_length,
         min_error_value=min_error_value,
         source=f"run_id={run_id}",
+        metadata=metadata,
     )
 
 
@@ -220,6 +252,8 @@ def channel_detection_intervals_from_spec(
     mission: str,
     channel: str,
     spec: RunSpec,
+    *,
+    metadata: SeriesMetadata | None = None,
 ) -> list[Interval]:
     """Offline counterpart of channel_detection_intervals — no tracking server.
 
@@ -227,6 +261,10 @@ def channel_detection_intervals_from_spec(
     takes threshold_min_anomaly_len and min_error_value from the spec (both are
     logged MLflow params, absent from threshold_config.json, so they cannot be
     recovered from the artifacts alone). See esa_adb/offline.py.
+
+    Args:
+        metadata: See _intervals_from_arrays — preloaded (segment_ids,
+            is_anomaly, timestamps) to avoid re-reading the parquet partition.
     """
     smoothed = bytes_to_errors(read_artifact_bytes(spec.errors_path))
     threshold = bytes_to_errors(read_artifact_bytes(spec.threshold_path))
@@ -240,6 +278,7 @@ def channel_detection_intervals_from_spec(
         min_run_length=spec.threshold_min_anomaly_len,
         min_error_value=spec.min_error_value,
         source=f"offline run_id={spec.run_id}",
+        metadata=metadata,
     )
 
 
@@ -250,6 +289,7 @@ def per_channel_detection_intervals(
     *,
     tuned: bool,
     run_map: OfflineRunMap | None = None,
+    metadata_by_channel: dict[str, SeriesMetadata] | None = None,
 ) -> dict[str, list[Interval]]:
     """Detection intervals for each channel, kept separate (channel identity preserved).
 
@@ -260,6 +300,14 @@ def per_channel_detection_intervals(
     When ``run_map`` is supplied the MLflow tracking server is never contacted:
     runs are resolved from the map and their arrays read from staged paths
     (see esa_adb/offline.py). Otherwise runs are found by MLflow run tags.
+
+    Args:
+        metadata_by_channel: When given, reuse each channel's preloaded
+            (segment_ids, is_anomaly, timestamps) instead of re-reading the
+            parquet partition (see esa_adb.report.build_report, docs/plans/019
+            P2/P3) — this function is called once per untuned/tuned variant,
+            so without preloading, every channel's partition is read again
+            for the second call.
 
     Raises:
         RuntimeError / KeyError: propagated from find_scoring_run() or
@@ -281,14 +329,17 @@ def per_channel_detection_intervals(
 
     result: dict[str, list[Interval]] = {}
     for channel in channels:
+        metadata = metadata_by_channel[channel] if metadata_by_channel is not None else None
         if run_map is None:
             run_id = find_scoring_run(exp, channel, tracking_uri, tuned=tuned)
-            channel_intervals = channel_detection_intervals(settings, mission, channel, run_id)
+            channel_intervals = channel_detection_intervals(
+                settings, mission, channel, run_id, metadata=metadata
+            )
             source = run_id
         else:
             spec = run_map.get(channel, tuned=tuned)
             channel_intervals = channel_detection_intervals_from_spec(
-                settings, mission, channel, spec
+                settings, mission, channel, spec, metadata=metadata
             )
             source = spec.run_id
         result[channel] = channel_intervals

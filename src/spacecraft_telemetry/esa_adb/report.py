@@ -50,10 +50,15 @@ from spacecraft_telemetry.esa_adb.metrics import (
 )
 from spacecraft_telemetry.esa_adb.timeline import mission_timeline
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow
-from spacecraft_telemetry.model.dataset import window_target_timestamps
+from spacecraft_telemetry.model.dataset import (
+    load_series_metadata,
+    window_target_timestamps,
+    window_target_timestamps_from_metadata,
+)
 
 if TYPE_CHECKING:
     from spacecraft_telemetry.core.config import Settings
+    from spacecraft_telemetry.esa_adb.detections import SeriesMetadata
     from spacecraft_telemetry.esa_adb.events import Event
     from spacecraft_telemetry.esa_adb.intervals import Interval
     from spacecraft_telemetry.esa_adb.offline import OfflineRunMap
@@ -135,7 +140,13 @@ FOOTNOTES = [
 ]
 
 
-def _hpo_cutoff(settings: Settings, mission: str, channels: list[str]) -> pd.Timestamp:
+def _hpo_cutoff(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    *,
+    metadata_by_channel: dict[str, SeriesMetadata] | None = None,
+) -> pd.Timestamp:
     """Latest per-channel HPO-portion cutoff across ``channels``.
 
     score_channel()'s eval_split="final_portion" is the tail after the first
@@ -149,11 +160,22 @@ def _hpo_cutoff(settings: Settings, mission: str, channels: list[str]) -> pd.Tim
     the tz label from the UTC-typed Parquet column) — localized to UTC here
     for the same reason as esa_adb.detections._flags_to_intervals and
     esa_adb.timeline.channel_timeline.
+
+    Args:
+        metadata_by_channel: When given, reuse each channel's preloaded
+            (segment_ids, is_anomaly, timestamps) instead of re-reading the
+            parquet partition (see build_report, docs/plans/019 P2/P3).
     """
     fraction = settings.tune.hpo_eval_fraction
     cutoffs: list[pd.Timestamp] = []
     for channel in channels:
-        ts = window_target_timestamps(settings, mission, channel)
+        if metadata_by_channel is not None:
+            segment_ids, is_anomaly, timestamps = metadata_by_channel[channel]
+            ts = window_target_timestamps_from_metadata(
+                settings, segment_ids, is_anomaly, timestamps
+            )
+        else:
+            ts = window_target_timestamps(settings, mission, channel)
         if len(ts) == 0:
             continue
         idx = min(int(len(ts) * fraction), len(ts) - 1)
@@ -171,6 +193,8 @@ def tuned_eval_window(
     mission: str,
     channels: list[str],
     timeline_full: list[Interval],
+    *,
+    metadata_by_channel: dict[str, SeriesMetadata] | None = None,
 ) -> list[Interval]:
     """The held-out portion of ``timeline_full`` the "tuned" row is scored against.
 
@@ -179,8 +203,12 @@ def tuned_eval_window(
     would contaminate every tuned number this report produces. Single source
     for both build_report() and scripts/diag_tp_duration.py, which must
     reproduce the exact same window to classify the same detections.
+
+    Args:
+        metadata_by_channel: See _hpo_cutoff — preloaded per-channel arrays
+            to avoid re-reading the parquet partition.
     """
-    cutoff = _hpo_cutoff(settings, mission, channels)
+    cutoff = _hpo_cutoff(settings, mission, channels, metadata_by_channel=metadata_by_channel)
     far_future = pd.Timestamp.max.tz_localize("UTC")
     return intersect(timeline_full, [(cutoff, far_future)])
 
@@ -270,19 +298,50 @@ def build_report(
     )
 
     events_df = load_events(settings, mission)
-    timeline_full = mission_timeline(settings, mission, channels)
+
+    # Preloaded once per channel and threaded explicitly through every call
+    # below that would otherwise re-read the same parquet partition
+    # (mission_timeline, _hpo_cutoff, and per_channel_detection_intervals for
+    # both the untuned and tuned variants) — 4 reads per channel down to 1.
+    # Deliberately NOT an lru_cache: at ~100-channel production scale, caching
+    # full load_series_parquet() output (which also includes the large
+    # values column this report never uses) would be unusable against
+    # CLAUDE.md's local memory ceiling. load_series_metadata() only reads the
+    # small columns actually needed. See docs/plans/019 P2/P3.
+    metadata_by_channel: dict[str, SeriesMetadata] = {
+        channel: load_series_metadata(
+            settings.preprocess.processed_data_dir, mission, channel, "test"
+        )
+        for channel in channels
+    }
+
+    timeline_full = mission_timeline(
+        settings, mission, channels, metadata_by_channel=metadata_by_channel
+    )
 
     per_channel_untuned = per_channel_detection_intervals(
-        settings, mission, channels, tuned=False, run_map=run_map
+        settings,
+        mission,
+        channels,
+        tuned=False,
+        run_map=run_map,
+        metadata_by_channel=metadata_by_channel,
     )
     detections_untuned = mission_intervals_from_per_channel(per_channel_untuned)
     events_full = group_events(events_df, channels, timeline_full)
 
     if include_tuned:
-        timeline_tuned = tuned_eval_window(settings, mission, channels, timeline_full)
+        timeline_tuned = tuned_eval_window(
+            settings, mission, channels, timeline_full, metadata_by_channel=metadata_by_channel
+        )
 
         per_channel_tuned_full = per_channel_detection_intervals(
-            settings, mission, channels, tuned=True, run_map=run_map
+            settings,
+            mission,
+            channels,
+            tuned=True,
+            run_map=run_map,
+            metadata_by_channel=metadata_by_channel,
         )
         per_channel_tuned = {
             ch: intersect(normalize(ivs), timeline_tuned)
