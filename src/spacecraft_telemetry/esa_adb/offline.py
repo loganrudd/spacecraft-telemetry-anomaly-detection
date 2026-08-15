@@ -1,10 +1,24 @@
-"""Run the ESA-ADB report without an MLflow tracking server.
+"""Run the ESA-ADB report from a pinned, reproducible set of scoring runs.
 
-``esa_adb.detections`` normally resolves a channel's scoring run by querying
-MLflow run tags (``channel_id``, ``tuned_from_run``). Those tags live only in
-the tracking backend (Postgres in cloud deployments), so when that server is
-down the artifacts in GCS are orphaned: ``errors.npy`` and ``threshold.npy``
-carry no channel identity of their own.
+Primary purpose: **provenance**, not outage recovery. Without this module,
+build_report() resolves each channel's scoring run by querying MLflow for
+the *most recent* run matching a tag — which means a published number's
+inputs can silently drift if anyone re-scores a channel later. An explicit
+run map (``--run-map`` on scripts/esa_adb_report.py) pins the exact run IDs
+a number came from, independent of any later re-scoring, and the MLflow
+tracking server is never contacted — runs are read from staged artifact
+paths instead. That reproducibility guarantee is worth keeping even though
+this module's original trigger (see below) is no longer live: don't delete
+it as dead code just because MLflow itself is healthy.
+
+Original trigger (plan 019 A9): a one-off MLflow outage. ``esa_adb.detections``
+normally resolves a channel's scoring run by querying MLflow run tags
+(``channel_id``, ``tuned_from_run``). Those tags live only in the tracking
+backend (Postgres in cloud deployments), so when that server is down the
+artifacts in GCS are orphaned: ``errors.npy`` and ``threshold.npy`` carry no
+channel identity of their own. MLflow is now reproducible from Terraform in
+~40s, so this specific scenario is a minor inconvenience rather than a
+blocker — the provenance use case above is the one that endures.
 
 The mapping is still recoverable from object storage alone — see
 ``scripts/stage_adb_offline.sh`` and docs/plans/019 for the derivation:
@@ -19,9 +33,7 @@ The mapping is still recoverable from object storage alone — see
      known baseline run (two EWMA smoothings of the same raw error series
      correlate far more strongly than different channels do).
 
-This module consumes the *result* of that recovery: an explicit run map,
-which also serves as a provenance record — it pins the exact run IDs a
-published number came from, independent of any later re-scoring.
+This module consumes the *result* of that recovery: an explicit run map.
 """
 
 from __future__ import annotations
