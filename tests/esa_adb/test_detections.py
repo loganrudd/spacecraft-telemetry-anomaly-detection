@@ -256,6 +256,12 @@ class TestChannelDetectionIntervals:
         assert channel_detection_intervals(settings, _MISSION, "channel_41", run_id) == []
 
     def test_window_count_mismatch_raises(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """The stale-run guard: a mismatched errors.npy length must raise, not
+        silently misalign flags to the wrong timestamps. This is the only guard
+        standing between a stale run (re-preprocessed but not re-scored) and
+        corrupted detection intervals — the message must carry both counts so
+        the mismatch is diagnosable without re-deriving it from the arrays.
+        """
         processed_dir = tmp_path / "processed"
         _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)  # M=7
         settings = _settings(processed_dir, mlflow_uri)
@@ -269,8 +275,11 @@ class TestChannelDetectionIntervals:
             threshold=np.ones(5),
             min_run_length=1,
         )
-        with pytest.raises(ValueError, match="Window count mismatch"):
+        with pytest.raises(ValueError, match="Window count mismatch") as exc_info:
             channel_detection_intervals(settings, _MISSION, "channel_41", run_id)
+        message = str(exc_info.value)
+        assert "5 windows" in message, "message must carry the errors.npy window count"
+        assert "yields 7" in message, "message must carry the current test-partition window count"
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +345,7 @@ class TestChannelDetectionIntervalsFromSpec:
         assert channel_detection_intervals_from_spec(settings, _MISSION, "channel_41", spec) == []
 
     def test_window_count_mismatch_raises(self, tmp_path: Path) -> None:
+        """Offline counterpart of the stale-run guard — same message contract."""
         processed_dir = tmp_path / "processed"
         _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)  # M=7
         settings = _settings(processed_dir, "sqlite:///unused.db")
@@ -343,8 +353,11 @@ class TestChannelDetectionIntervalsFromSpec:
         spec = _write_run_spec_files(
             tmp_path / "runs", "offline-mismatch", np.zeros(5), np.ones(5)
         )
-        with pytest.raises(ValueError, match="Window count mismatch"):
+        with pytest.raises(ValueError, match="Window count mismatch") as exc_info:
             channel_detection_intervals_from_spec(settings, _MISSION, "channel_41", spec)
+        message = str(exc_info.value)
+        assert "5 windows" in message, "message must carry the errors.npy window count"
+        assert "yields 7" in message, "message must carry the current test-partition window count"
 
     def test_missing_artifact_raises_file_not_found(self, tmp_path: Path) -> None:
         processed_dir = tmp_path / "processed"
