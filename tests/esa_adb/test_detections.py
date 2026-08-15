@@ -24,6 +24,7 @@ from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals_from_spec,
     find_scoring_run,
     mission_detection_intervals,
+    mission_intervals_from_per_channel,
     per_channel_detection_intervals,
 )
 from spacecraft_telemetry.esa_adb.offline import OfflineRunMap, RunSpec
@@ -576,3 +577,72 @@ class TestMissionDetectionIntervals:
             mission_detection_intervals(
                 settings, _MISSION, ["channel_41", "channel_42"], tuned=False
             )
+
+
+# ---------------------------------------------------------------------------
+# mission_intervals_from_per_channel
+# ---------------------------------------------------------------------------
+
+
+class TestMissionIntervalsFromPerChannel:
+    """Pure interval-algebra tests — no MLflow/parquet I/O.
+
+    esa_adb.report.build_report composes from an already-fetched
+    per_channel_detection_intervals() dict via this function instead of
+    calling mission_detection_intervals() (which would re-fetch every
+    channel's artifacts a second time — see A1 in docs/reviews/019).
+    """
+
+    def _ts(self, *minutes: int) -> list[pd.Timestamp]:
+        base = pd.Timestamp("2000-01-01T00:00:00Z")
+        return [base + pd.Timedelta(minutes=m) for m in minutes]
+
+    def test_unions_disjoint_channels(self) -> None:
+        t0, t1, t2, t3 = self._ts(0, 1, 2, 3)
+        per_channel = {"channel_41": [(t0, t1)], "channel_42": [(t2, t3)]}
+        result = mission_intervals_from_per_channel(per_channel)
+        assert result == [(t0, t1), (t2, t3)]
+
+    def test_merges_overlapping_channels(self) -> None:
+        t0, t1, t2, t3 = self._ts(0, 1, 2, 3)
+        per_channel = {"channel_41": [(t0, t2)], "channel_42": [(t1, t3)]}
+        result = mission_intervals_from_per_channel(per_channel)
+        assert result == [(t0, t3)]
+
+    def test_empty_dict_returns_empty_list(self) -> None:
+        assert mission_intervals_from_per_channel({}) == []
+
+    def test_matches_mission_detection_intervals(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """Composing from an already-fetched dict must equal the fetch-again wrapper."""
+        processed_dir = tmp_path / "processed"
+        _write_test_series(processed_dir, _MISSION, "channel_41", n_rows=10)
+        _write_test_series(processed_dir, _MISSION, "channel_42", n_rows=10)
+        settings = _settings(processed_dir, mlflow_uri)
+
+        smoothed_41 = np.array([5, 0, 0, 0, 0, 0, 0], dtype=np.float64)
+        smoothed_42 = np.array([0, 0, 0, 0, 0, 5, 0], dtype=np.float64)
+        threshold = np.ones(7, dtype=np.float64)
+        _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_41",
+            smoothed=smoothed_41,
+            threshold=threshold,
+            min_run_length=1,
+        )
+        _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_42",
+            smoothed=smoothed_42,
+            threshold=threshold,
+            min_run_length=1,
+        )
+
+        channels = ["channel_41", "channel_42"]
+        per_channel = per_channel_detection_intervals(settings, _MISSION, channels, tuned=False)
+        composed = mission_intervals_from_per_channel(per_channel)
+        fetched_again = mission_detection_intervals(settings, _MISSION, channels, tuned=False)
+        assert composed == fetched_again

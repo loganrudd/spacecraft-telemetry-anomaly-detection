@@ -304,6 +304,26 @@ def per_channel_detection_intervals(
     return result
 
 
+def mission_intervals_from_per_channel(per_channel: dict[str, list[Interval]]) -> list[Interval]:
+    """OR-aggregate (time union) an already-fetched per-channel detections dict.
+
+    This is the "logical sum ... across all target channels" the ESA-ADB
+    paper computes its event-wise metrics against (§3.2.1) — the single
+    biggest reason our per-channel macro-averaged metrics aren't directly
+    comparable to the paper's numbers (see docs/plans/019).
+
+    Split out of mission_detection_intervals so callers that already hold a
+    per_channel_detection_intervals() result (esa_adb.report.build_report)
+    can compose the union without re-fetching every channel's artifacts a
+    second time — each fetch downloads errors.npy/threshold.npy and re-reads
+    the test partition, so the duplicate call roughly doubled report runtime.
+    """
+    result: list[Interval] = []
+    for intervals in per_channel.values():
+        result = _union(result, intervals)
+    return result
+
+
 def mission_detection_intervals(
     settings: Settings,
     mission: str,
@@ -314,15 +334,10 @@ def mission_detection_intervals(
 ) -> list[Interval]:
     """OR-aggregate detection intervals across ``channels`` (time union).
 
-    This is the "logical sum ... across all target channels" the ESA-ADB
-    paper computes its event-wise metrics against (§3.2.1) — the single
-    biggest reason our per-channel macro-averaged metrics aren't directly
-    comparable to the paper's numbers (see docs/plans/019).
+    Fetches per-channel detections itself — see mission_intervals_from_per_channel
+    for the composable version that reuses an already-fetched dict.
     """
     per_channel = per_channel_detection_intervals(
         settings, mission, channels, tuned=tuned, run_map=run_map
     )
-    result: list[Interval] = []
-    for intervals in per_channel.values():
-        result = _union(result, intervals)
-    return result
+    return mission_intervals_from_per_channel(per_channel)

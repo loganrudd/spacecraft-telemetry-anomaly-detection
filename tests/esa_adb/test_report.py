@@ -294,6 +294,45 @@ class TestBuildReport:
         assert "warning" in stdout
         assert "fetch_id_token_failed" in stdout
 
+    def test_fetches_detection_intervals_once_per_variant(
+        self, tmp_path: Path, mlflow_uri: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for A1: build_report must not re-fetch per-channel detections.
+
+        Before A1, build_report called per_channel_detection_intervals() AND
+        mission_detection_intervals() (which calls it again internally) for
+        each of the untuned/tuned variants — every artifact downloaded and
+        every parquet re-read twice per scope. It must now call
+        per_channel_detection_intervals() exactly once per variant (untuned,
+        tuned) — twice total, not four times.
+        """
+        import spacecraft_telemetry.esa_adb.report as report_module
+
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(settings, tuned=True)
+
+        real = report_module.per_channel_detection_intervals
+        calls: list[bool] = []
+
+        def _counting(*args: object, **kwargs: object) -> object:
+            calls.append(True)
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(report_module, "per_channel_detection_intervals", _counting)
+
+        build_report(settings, _MISSION, channels=[_CHANNEL])
+
+        assert len(calls) == 2, (
+            f"expected 2 calls (untuned + tuned), got {len(calls)} — "
+            "a per-channel detection fetch is being repeated"
+        )
+
     def test_ours_rows_detect_the_event(self, tmp_path: Path, mlflow_uri: str) -> None:
         """The single event overlaps the flagged window in both untuned and tuned runs."""
         processed_dir = tmp_path / "processed"

@@ -38,7 +38,7 @@ import pandas as pd
 
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.esa_adb.detections import (
-    mission_detection_intervals,
+    mission_intervals_from_per_channel,
     per_channel_detection_intervals,
 )
 from spacecraft_telemetry.esa_adb.events import group_events, load_events
@@ -275,9 +275,7 @@ def build_report(
     per_channel_untuned = per_channel_detection_intervals(
         settings, mission, channels, tuned=False, run_map=run_map
     )
-    detections_untuned = mission_detection_intervals(
-        settings, mission, channels, tuned=False, run_map=run_map
-    )
+    detections_untuned = mission_intervals_from_per_channel(per_channel_untuned)
     events_full = group_events(events_df, channels, timeline_full)
 
     if include_tuned:
@@ -290,9 +288,7 @@ def build_report(
             ch: intersect(normalize(ivs), timeline_tuned)
             for ch, ivs in per_channel_tuned_full.items()
         }
-        detections_tuned_full = mission_detection_intervals(
-            settings, mission, channels, tuned=True, run_map=run_map
-        )
+        detections_tuned_full = mission_intervals_from_per_channel(per_channel_tuned_full)
         detections_tuned = intersect(normalize(detections_tuned_full), timeline_tuned)
         events_tuned = group_events(events_df, channels, timeline_tuned)
 
