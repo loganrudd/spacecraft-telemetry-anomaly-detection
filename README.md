@@ -22,7 +22,7 @@ deployment, and — for ISS — a real-time Lightstreamer → asyncio pump feedi
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
 **Results (ESA):** on the held-out final 40% of ESA-Mission1, anomalies are flagged in
-**22 of 31** labeled channels (segment recall 0.37, precision 0.57 — see [Evaluation](#evaluation)
+**22 of 31** labeled channels (segment recall 0.51, precision 0.46 — see [Evaluation](#evaluation)
 for the leakage-free protocol and honest framing).
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
@@ -208,22 +208,33 @@ anomalies in the held-out window, **22 register detection** (segment-F0.5 > 0):
 
 | metric (mean over detected channels) | value |
 |---|---|
-| segment recall | 0.37 |
-| segment precision | 0.57 |
-| segment F0.5 | 0.43 |
+| segment recall | 0.51 |
+| segment precision | 0.46 |
+| segment F0.5 | 0.41 |
 
-Detection is **recall-limited**: thresholds are tuned for F0.5, which weights
-precision twice as heavily as recall, so the forecaster fires conservatively —
-most segments it flags do overlap a labeled one, but it stays silent through
-roughly two thirds of them, and 9 of the 31 labeled channels produce no detection
-at all. That is the shape the objective asks for rather than a defect in it. One
-channel (22) reaches segment-F0.5 ≥ 0.7 individually, at 0.833.
+Precision and recall sit close together: the forecaster catches about half the
+labeled segments, and slightly under half of what it flags overlaps a labeled one.
+Nine of the 31 labeled channels produce no detection at all. Five channels reach
+segment-F0.5 ≥ 0.7 individually — channels 41–45, the subsystem the ESA-ADB
+comparison below examines — topping out at 0.855.
 
 These supersede an earlier reported F0.5 of 0.19 (recall 0.56, precision 0.22).
-**Two things moved at once** — a fix to `label_timesteps`, which had been dropping
-zero-duration point annotations and so under-counting true segments, and a re-tune
-on a widened threshold search space — so the gain cannot be attributed to either
-alone and is stated here as a combined before/after.
+Two independent changes separate those numbers from these, and both were measured
+in isolation rather than reported as one lump:
+
+| | segment F0.5 |
+|---|---:|
+| originally reported | 0.19 |
+| after re-tuning on a widened threshold search space | 0.43 |
+| after also correcting the ground truth | **0.41** |
+
+Essentially all of the gain is the re-tune. Correcting the ground truth moved the
+number slightly **down**, which is the honest direction: `label_timesteps` had been
+dropping zero-duration ("point") anomaly annotations — a half-open `[t, t)`
+interval matches nothing — so those events were silently absent from `is_anomaly`.
+Restoring them (channel 41 alone gained 5 true segments, 18 → 23) means the earlier
+figures were scored against an incomplete, easier target than the dataset actually
+poses.
 
 Where the remaining false positives go is visible in the benchmark run below: of
 its 33 mission-level detections, 18% hit a labeled anomaly and **30% hit a labeled
@@ -288,10 +299,10 @@ ground truth:
 
 | bucket | count | meaning |
 |---|---:|---|
-| detected | 30 | anomalies in held-out window, segment-F0.5 > 0 |
-| outside eval window | 23 | trained & serving, but labeled anomalies fall in the first-60% / pre-test era — not scoreable on the held-out split |
-| no labeled anomalies | 8 | nothing to detect in the dataset — excluded |
-| forecaster blind spot | 1 | forecasts the channel *and its anomalies* accurately, so the error never spikes — a known Telemanom limitation, confirmed with `scripts/inspect_channel.py` |
+| detected | 22 | labeled anomalies in the held-out window, segment-F0.5 > 0 |
+| labeled but missed | 9 | anomalies present in the held-out window, no overlapping detection. Includes the forecaster blind spot — channels predicted accurately *through* their own anomalies, so the error never spikes (`scripts/inspect_channel.py`) — plus channels silenced by the higher tuned thresholds |
+| no labeled anomalies in eval window | 23 | trained and scoreable, but labeled anomalies fall in the first-60% / pre-test era — nothing to detect on the held-out split |
+| never trained | 8 | no registered model (`channel_3`, `53`–`56`, `67`–`69`) — not scoreable at all |
 
 The live demo serves 8 validated subsystem_6 channels.
 
