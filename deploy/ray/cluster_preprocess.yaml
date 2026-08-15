@@ -56,6 +56,14 @@ spec:
                   value: gs://${PROJECT_ID}-sample-data
                 - name: SPACECRAFT_COLLECT__RAW_TICKS_DIR
                   value: gs://${PROJECT_ID}-raw-data
+                # Split parameters, overridable per run (defaults resolved in
+                # scripts/cloud_preprocess.sh to match configs/cloud.yaml).
+                # Used by the ESA-ADB replication (Plan 019 Stage B), which needs
+                # the paper's chronological 50/50 halves with no lookback cap.
+                - name: SPACECRAFT_PREPROCESS__TRAIN_FRACTION
+                  value: "${TRAIN_FRACTION}"
+                - name: SPACECRAFT_PREPROCESS__TRAIN_LOOKBACK
+                  value: "${TRAIN_LOOKBACK}"
                 - name: SPACECRAFT_RAY__ADDRESS
                   value: auto
               resources:
@@ -117,6 +125,12 @@ spec:
                     value: gs://${PROJECT_ID}-sample-data
                   - name: SPACECRAFT_COLLECT__RAW_TICKS_DIR
                     value: gs://${PROJECT_ID}-raw-data
+                  # Must match the head's values — the @ray.remote fan-out does the
+                  # actual splitting inside worker tasks.
+                  - name: SPACECRAFT_PREPROCESS__TRAIN_FRACTION
+                    value: "${TRAIN_FRACTION}"
+                  - name: SPACECRAFT_PREPROCESS__TRAIN_LOOKBACK
+                    value: "${TRAIN_LOOKBACK}"
                   - name: SPACECRAFT_RAY__ADDRESS
                     value: auto
                 resources:

@@ -279,7 +279,12 @@ class ChannelInferenceEngine:
             )
 
         # 6. K-trailing anomaly flag.
+        # The absolute error floor is applied here exactly as batch scoring
+        # applies it in model.scoring.flag_anomalies — it is pointwise and
+        # stateless, so no train/serve skew. 0.0 (default) is a no-op.
         raw_t = s_t > threshold_val
+        if self._params.min_error_value > 0.0:
+            raw_t = raw_t and s_t >= self._params.min_error_value
         self._raw_flag_buf.append(raw_t)
         K = self._params.threshold_min_anomaly_len
         is_anomaly_predicted = len(self._raw_flag_buf) == K and all(

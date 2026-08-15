@@ -8,6 +8,8 @@ Public API:
     make_dataloaders(settings, mission, channel)     -> (train_loader, val_loader)
     make_test_dataloader(settings, mission, channel) -> (loader, target_timestamps,
                                                          window_is_anomaly)
+    load_window_labels(settings, mission, channel)   -> window_is_anomaly (no torch)
+    window_target_timestamps(settings, mission, channel) -> target_timestamps (no torch)
 """
 
 from __future__ import annotations
@@ -25,6 +27,44 @@ from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.paths import to_upath
+
+
+def _read_partition_table(
+    processed_dir: Path | UPath | str,
+    mission: str,
+    channel: str,
+    split: Literal["train", "test"],
+    columns: list[str],
+) -> pa.Table:
+    """Read + concat + timestamp-sort one channel partition's Parquet files.
+
+    Shared by load_series_parquet and load_series_metadata so both read the
+    identical partition-discovery/sort logic and differ only in which
+    columns PyArrow actually parses.
+
+    Raises:
+        FileNotFoundError: If the partition directory doesn't exist or has no
+            Parquet files.
+    """
+    partition_dir = (
+        to_upath(processed_dir) / mission / split
+        / f"mission_id={mission}" / f"channel_id={channel}"
+    )
+    if not partition_dir.exists():
+        raise FileNotFoundError(
+            f"No series Parquet found for mission={mission!r} channel={channel!r} "
+            f"split={split!r}. Expected directory: {partition_dir}"
+        )
+
+    parquet_files = sorted(partition_dir.glob("*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"Directory exists but contains no .parquet files: {partition_dir}"
+        )
+
+    tables = [pq.read_table(str(f), columns=columns) for f in parquet_files]
+    table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+    return table.sort_by("telemetry_timestamp")
 
 
 def load_series_parquet(
@@ -53,31 +93,10 @@ def load_series_parquet(
         FileNotFoundError: If the partition directory doesn't exist or has no
             Parquet files.
     """
-    partition_dir = (
-        to_upath(processed_dir) / mission / split
-        / f"mission_id={mission}" / f"channel_id={channel}"
+    table = _read_partition_table(
+        processed_dir, mission, channel, split,
+        columns=["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"],
     )
-    if not partition_dir.exists():
-        raise FileNotFoundError(
-            f"No series Parquet found for mission={mission!r} channel={channel!r} "
-            f"split={split!r}. Expected directory: {partition_dir}"
-        )
-
-    parquet_files = sorted(partition_dir.glob("*.parquet"))
-    if not parquet_files:
-        raise FileNotFoundError(
-            f"Directory exists but contains no .parquet files: {partition_dir}"
-        )
-
-    tables = [
-        pq.read_table(
-            str(f),
-            columns=["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"],
-        )
-        for f in parquet_files
-    ]
-    table = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
-    table = table.sort_by("telemetry_timestamp")
 
     values = table.column("value_normalized").to_numpy(zero_copy_only=False).astype(np.float32)
     segment_ids = table.column("segment_id").to_numpy(zero_copy_only=False).astype(np.int32)
@@ -85,6 +104,45 @@ def load_series_parquet(
     timestamps = table.column("telemetry_timestamp").to_numpy(zero_copy_only=False)
 
     return values, segment_ids, is_anomaly, timestamps
+
+
+def load_series_metadata(
+    processed_dir: Path | UPath | str,
+    mission: str,
+    channel: str,
+    split: Literal["train", "test"],
+) -> tuple[
+    np.ndarray[Any, np.dtype[np.int32]],
+    np.ndarray[Any, np.dtype[np.bool_]],
+    np.ndarray[Any, Any],
+]:
+    """Read only the small per-timestep columns needed for windowing/timeline math.
+
+    Skips ``value_normalized`` — the largest column on disk and the one
+    column none of esa_adb.timeline / esa_adb.report / esa_adb.detections
+    ever reads. Same partition as load_series_parquet, just fewer columns
+    parsed — use this wherever only segment_ids/is_anomaly/timestamps are
+    needed (window-index building, target-timestamp derivation, observed
+    timeline construction).
+
+    Returns:
+        segment_ids: (N,) int32    — segment ID per timestep
+        is_anomaly:  (N,) bool     — per-timestep anomaly flag
+        timestamps:  (N,) datetime64[ns] — telemetry timestamp per timestep
+
+    Raises:
+        FileNotFoundError: Same as load_series_parquet.
+    """
+    table = _read_partition_table(
+        processed_dir, mission, channel, split,
+        columns=["telemetry_timestamp", "segment_id", "is_anomaly"],
+    )
+
+    segment_ids = table.column("segment_id").to_numpy(zero_copy_only=False).astype(np.int32)
+    is_anomaly = table.column("is_anomaly").to_numpy(zero_copy_only=False).astype(bool)
+    timestamps = table.column("telemetry_timestamp").to_numpy(zero_copy_only=False)
+
+    return segment_ids, is_anomaly, timestamps
 
 
 def _build_window_index(
@@ -335,3 +393,63 @@ def load_window_labels(
         (cumsum[indices + span] - cumsum[indices]) > 0
     )
     return result
+
+
+def window_target_timestamps_from_metadata(
+    settings: Settings,
+    segment_ids: np.ndarray[Any, np.dtype[np.int32]],
+    is_anomaly: np.ndarray[Any, np.dtype[np.bool_]],
+    timestamps: np.ndarray[Any, Any],
+) -> np.ndarray[Any, Any]:
+    """Pure computation of window_target_timestamps given preloaded metadata arrays.
+
+    Split out of window_target_timestamps so a caller that already holds a
+    channel's (segment_ids, is_anomaly, timestamps) — loaded once via
+    load_series_metadata() — can reuse it across multiple calls (timeline,
+    HPO cutoff, untuned + tuned detection reconstruction) instead of
+    re-reading the parquet partition every time (docs/plans/019 P2/P3).
+    """
+    cfg = settings.model
+    indices = _build_window_index(
+        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        skip_anomalous_windows=False,
+    )
+    span = cfg.window_size + cfg.prediction_horizon
+    result: np.ndarray[Any, Any] = timestamps[indices + span - 1]
+    return result
+
+
+def window_target_timestamps(
+    settings: Settings,
+    mission: str,
+    channel: str,
+) -> np.ndarray[Any, Any]:
+    """Return per-window target timestamps for the test split without a DataLoader.
+
+    Uses the same windowing logic as make_test_dataloader() but has no torch
+    dependency — lets esa_adb.detections re-derive detection intervals from a
+    scoring run's logged errors.npy/threshold.npy without re-running inference
+    (window start indices are deterministic given window_size and
+    prediction_horizon, so this reproduces make_test_dataloader's
+    target_timestamps exactly).
+
+    Reads only segment_ids/is_anomaly/timestamps (load_series_metadata, not
+    load_series_parquet) — this function never uses the values column. A
+    caller making several calls for the same channel (e.g. build_report)
+    should instead preload once via load_series_metadata() and call
+    window_target_timestamps_from_metadata() directly.
+
+    Returns:
+        (M,) datetime64[ns] — timestamp at each window's target position
+        (index s + W + H - 1), aligned 1:1 with load_window_labels() and with
+        the errors.npy/threshold.npy arrays score_channel() logs.
+
+    Args:
+        settings: Fully resolved Settings.
+        mission:  Mission name, e.g. ``"ESA-Mission1"``.
+        channel:  Channel ID, e.g. ``"channel_1"``.
+    """
+    segment_ids, is_anomaly, timestamps = load_series_metadata(
+        settings.preprocess.processed_data_dir, mission, channel, "test"
+    )
+    return window_target_timestamps_from_metadata(settings, segment_ids, is_anomaly, timestamps)

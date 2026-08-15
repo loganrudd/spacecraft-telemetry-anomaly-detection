@@ -51,8 +51,21 @@ log = get_logger(__name__)
 # online serving path cannot replicate it), so a tuned config must not carry it
 # — that keeps the served params identical to what HPO optimized. See
 # ray_fanout/tune.py SEARCH_SPACE and docs/architecture/online-pruning-investigation.md.
+#
+# min_error_value IS present, despite also being called "pruning" in the
+# ESA-ADB paper. The two are unrelated mechanisms: prune_min_decrease is
+# Hundman §3.3 (ranks all flagged sequences against each other — retrospective,
+# batch-only), whereas min_error_value is an absolute per-window floor that the
+# streaming engine applies identically (api/inference.py). It is therefore a
+# legitimate tuned param with no train/serve parity cost.
 _TUNABLE_SCORING_FIELDS = frozenset(
-    {"threshold_z", "threshold_window", "error_smoothing_window", "threshold_min_anomaly_len"}
+    {
+        "threshold_z",
+        "threshold_window",
+        "error_smoothing_window",
+        "threshold_min_anomaly_len",
+        "min_error_value",
+    }
 )
 
 

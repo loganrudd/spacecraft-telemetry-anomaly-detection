@@ -52,6 +52,12 @@ resource "google_cloud_run_v2_service" "mlflow" {
           cpu    = "1"
           memory = "2Gi"
         }
+        # cpu_idle=true: CPU is throttled outside request processing, so we pay
+        # request-based rates instead of the always-allocated rate. The v2 API
+        # defaults this to FALSE — leaving it unset billed the mlflow instance
+        # at $0.000018/vCPU-s continuously. Harmless here because the MLflow
+        # tracking server does no background work between requests.
+        cpu_idle          = true
         startup_cpu_boost = true
       }
 

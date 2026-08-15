@@ -152,6 +152,22 @@ class ModelConfig(BaseModel):
     # Hundman §3.3 false-positive pruning: minimum relative peak-error decrease
     # to treat a step as a real gap. 0.0 disables pruning (ablation baseline).
     prune_min_decrease: float = 0.13
+    # Absolute floor on the smoothed error, below which a window is never
+    # anomalous. This is what ESA-ADB calls "pruning" (Telemanom-ESA-Pruned):
+    # original Telemanom hardcodes 0.05 (telemanom/errors.py#L339); the paper
+    # removes the magic number for Telemanom-ESA (0.0) and reinstates it at
+    # 0.007 for -Pruned, taking their event-wise F0.5 from 0.178 to 0.786.
+    #
+    # Unlike prune_min_decrease (Hundman §3.3), this is pointwise and stateless,
+    # so the streaming serving path can apply it — it is a genuine online
+    # detector parameter, not a retrospective batch op.
+    #
+    # A purely relative threshold flags numerically tiny errors on quiet
+    # channels as "3-sigma events"; a floor suppresses those without touching large
+    # excursions, which raising threshold_z cannot do. 0.0 = disabled (default,
+    # preserving existing ESA and ISS behaviour). Scale-dependent: the paper's
+    # 0.007 is calibrated to their normalization and must not be copied blindly.
+    min_error_value: float = 0.0
 
     @field_validator(
         "hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",
@@ -190,6 +206,15 @@ class ModelConfig(BaseModel):
     def positive_float(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"must be > 0, got {v}")
+        return v
+
+    @field_validator("min_error_value")
+    @classmethod
+    def non_negative_float(cls, v: float) -> float:
+        # Not bounded above: this is an error magnitude in normalized units, not
+        # a fraction. 0.0 disables the floor.
+        if v < 0:
+            raise ValueError(f"min_error_value must be >= 0, got {v}")
         return v
 
 

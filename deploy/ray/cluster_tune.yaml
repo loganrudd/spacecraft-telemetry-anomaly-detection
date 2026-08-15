@@ -54,7 +54,7 @@ spec:
           serviceAccountName: ray-sa
           containers:
             - name: ray-head
-              image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
+              image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:${RAY_IMAGE_TAG}
               env:
                 - name: SPACECRAFT_ENV
                   value: cloud
@@ -118,7 +118,7 @@ spec:
             serviceAccountName: ray-sa
             containers:
               - name: ray-worker
-                image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
+                image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:${RAY_IMAGE_TAG}
                 env:
                   - name: SPACECRAFT_ENV
                     value: cloud

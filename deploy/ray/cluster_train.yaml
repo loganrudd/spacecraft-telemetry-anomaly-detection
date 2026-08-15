@@ -30,6 +30,41 @@ spec:
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
 
+  # The submitter pod calls `ray job submit` and then just tails logs — but if it
+  # dies, KubeRay retries it, and every retry fails with "Job with submission_id
+  # <id> already exists" because Ray derives the submission ID from the RayJob.
+  # Retries can therefore never succeed; the Job hits BackoffLimitExceeded, the
+  # RayJob goes Failed, and `shutdownAfterJobFinishes` then tears down the
+  # RayCluster — killing training that was running perfectly well. Observed
+  # twice on 2026-08-07 (~17-22 min in, both times mid-first-wave).
+  #
+  # On Autopilot a pod with no annotation is fair game for eviction during node
+  # consolidation. safe-to-evict=false marks it an extended-duration pod so the
+  # autoscaler leaves it alone.
+  #
+  # NOTE: `spec.submitterConfig.backoffLimit` (which would make a genuine
+  # submission failure surface immediately instead of behind a wall of
+  # misleading "already exists" retries) is NOT available in KubeRay 1.1.1 —
+  # the API rejects it as an unknown field. It landed in 1.2+. Revisit when the
+  # operator is upgraded; until then the eviction annotation is the real
+  # defence, since a submitter that is never evicted never retries.
+  submitterPodTemplate:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+
   rayClusterSpec:
     rayVersion: "2.31.0"
     enableInTreeAutoscaling: true
@@ -39,6 +74,11 @@ spec:
         dashboard-host: "0.0.0.0"
         num-cpus: "0"
       template:
+        metadata:
+          annotations:
+            # Long training runs (hours) must not be evicted by Autopilot node
+            # consolidation — losing the head kills every in-flight channel.
+            cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
         spec:
           serviceAccountName: ray-sa
           containers:
@@ -105,6 +145,11 @@ spec:
         maxReplicas: 1 # NVIDIA_L4_GPUS quota = 1
         rayStartParams: {}
         template:
+          metadata:
+            annotations:
+              # Same rationale as the head: a GPU worker evicted mid-epoch loses
+              # all channels packed onto it (NUM_GPUS=0.5 -> 2 channels).
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             serviceAccountName: ray-sa
             nodeSelector:

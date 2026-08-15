@@ -131,6 +131,21 @@ SEARCH_SPACE: dict[str, Any] = {
     # The nominal-FP penalty below is the principled fix; this floor is a backstop.
     "threshold_z":               tune.uniform(2.5, 5.0), # z-score multiplier
     "threshold_min_anomaly_len": tune.randint(1, 11),    # min run length: [1, 10]
+    # Absolute floor on the smoothed error — ESA-ADB's "pruning"
+    # (Telemanom-ESA-Pruned), which took their event-wise F0.5 from 0.178 to
+    # 0.786. Unlike prune_min_decrease this IS tunable here, because it is
+    # pointwise and stateless and the serving engine applies it identically
+    # (api/inference.py) — no train/serve parity problem.
+    #
+    # Range is empirical, from smoothed-error quantiles on ESA-Mission1
+    # channels 41-46: median ~0.06, p90 ~0.07-0.09, p99 ~0.09-0.16,
+    # p99.9 ~0.15-0.41, max ~0.44-1.03. [0, 0.3] therefore spans "no-op" to
+    # "keeps only the extreme tail". Including 0.0 lets the optimizer conclude
+    # the floor does not help — an honest ablation rather than a forced win.
+    #
+    # NOTE the paper's 0.007 is calibrated to THEIR normalization; on our scale
+    # that is ~1/10 of the median and would be a no-op. Do not copy it.
+    "min_error_value":           tune.uniform(0.0, 0.3),
 }
 
 # ISS-specific search space: threshold_window capped at _ISS_MAX_THRESHOLD_WINDOW
@@ -144,10 +159,51 @@ SEARCH_SPACE: dict[str, Any] = {
 # positives was pushing K to 7-10 — which also suppressed recall on the very
 # faults it was supposed to catch (see the module docstring's Baseline guard
 # section). Capping K at 4 keeps recall achievable.
+#
+# min_error_value is pinned to 0.0 (disabled) for ISS rather than inherited.
+# The ESA range is derived from ESA smoothed-error quantiles, and ISS channels
+# are normalized independently on a different scale, so inheriting it would
+# silently retune the live ISS detector against an unvalidated range. Give ISS
+# its own empirically-derived range before enabling it there.
 ISS_SEARCH_SPACE: dict[str, Any] = {
     **SEARCH_SPACE,
     "threshold_window": tune.randint(50, _ISS_MAX_THRESHOLD_WINDOW + 1),
     "threshold_min_anomaly_len": tune.randint(1, 5),  # [1, 4], vs ESA's [1, 10]
+    "min_error_value": 0.0,
+}
+
+# Widened space for ALL ESA-Mission1 missions — the plan-019 ablation arms
+# (`ESA-Mission1-ADB*`) and production `ESA-Mission1` alike. ISS keeps
+# ISS_SEARCH_SPACE.
+#
+# Why: the first sweep of both arms landed against the ceiling on a *different*
+# parameter each, so neither optimum was interior and the arms were not
+# comparable to each other:
+#   arm A (84 months): threshold_z      = 4.783 of 5.0 max  (96%)
+#   arm C (24 months): min_error_value  = 0.2955 of 0.3 max (98.5%)
+# A truncated search space is a confound with training length — arm C plausibly
+# wants a higher absolute floor precisely because 24 months of training yields
+# worse forecasts and therefore larger baseline errors. Widening both bounds for
+# both arms is what makes the A/C comparison mean what it claims to mean.
+#
+# Production was added (plan 019 next-step C) once the arms showed the widening
+# is what carried arm A from 0.0011 to 0.3759: production's own tuned configs
+# predate `min_error_value` entirely (all None) and two of four subsystems were
+# pinned at the old threshold_z 5.0 ceiling, so it was truncated on exactly the
+# two axes this widens. Re-tuning is scoring-only — no retraining — but it DOES
+# move what the live demo serves once the new configs are promoted, so promote
+# deliberately (and never with a bare `--mission ESA-Mission1`, which also
+# prefix-matches the ESA-Mission1-ADB* pseudo-missions; see plan 020).
+#
+# 0.6 stays consistent with the empirical basis documented on SEARCH_SPACE
+# above: smoothed-error p99.9 is ~0.15-0.41 and max ~0.44-1.03 on these
+# channels, so 0.6 still sits below the observed max while genuinely spanning
+# "keeps only the extreme tail". z to 8.0 is deliberately generous — the goal is
+# for the optimum to be interior, not to be tight.
+ESA_M1_SEARCH_SPACE: dict[str, Any] = {
+    **SEARCH_SPACE,
+    "threshold_z":     tune.uniform(2.5, 8.0),  # was (2.5, 5.0) — arm A pegged at 4.783
+    "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
 }
 
 
@@ -335,14 +391,22 @@ def _clamp_to_search_space(
     above _ISS_MAX_THRESHOLD_WINDOW) could otherwise "win" the baseline
     comparison with a value the search space deems invalid for live serving.
 
-    randint domains have an exclusive upper bound; uniform domains (only
-    threshold_z here) have an inclusive upper bound. Config values are float
-    only for threshold_z, so isinstance(value, float) is sufficient to select
-    the right bound without inspecting the Ray domain type.
+    randint domains have an exclusive upper bound; uniform domains (threshold_z
+    and min_error_value) have an inclusive upper bound. Config values are float
+    only for those, so isinstance(value, float) is sufficient to select the
+    right bound without inspecting the Ray domain type.
+
+    A search space may pin a key to a constant instead of a Ray domain (ISS
+    pins min_error_value to 0.0), in which case there is nothing to clamp
+    against — the constant IS the only legal value, so use it directly. Without
+    this branch the ``domain.lower`` access below raises AttributeError.
     """
     clamped: dict[str, Any] = {}
     for key, value in config.items():
         domain = search_space[key]
+        if not hasattr(domain, "lower"):
+            clamped[key] = domain
+            continue
         lower, upper = domain.lower, domain.upper
         if isinstance(value, float):
             clamped[key] = min(max(value, lower), upper)
@@ -406,7 +470,14 @@ def _scoring_trial(
             int(config["threshold_window"]),
             float(config["threshold_z"]),
         )
-        flags = flag_anomalies(smoothed, threshold, int(config["threshold_min_anomaly_len"]))
+        flags = flag_anomalies(
+            smoothed,
+            threshold,
+            int(config["threshold_min_anomaly_len"]),
+            # .get(): search spaces that omit the key (or older resumed runs)
+            # fall back to the disabled default rather than KeyError-ing.
+            float(config.get("min_error_value", 0.0)),
+        )
         f0_5_scores.append(evaluate(labels, flags)["f0_5"])
         seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
 
@@ -419,7 +490,10 @@ def _scoring_trial(
             float(config["threshold_z"]),
         )
         nom_flags = flag_anomalies(
-            nom_smoothed, nom_threshold, int(config["threshold_min_anomaly_len"])
+            nom_smoothed,
+            nom_threshold,
+            int(config["threshold_min_anomaly_len"]),
+            float(config.get("min_error_value", 0.0)),
         )
         fp_rates.append(float(nom_flags.mean()) if len(nom_flags) else 0.0)
 
@@ -639,6 +713,7 @@ def run_hpo_sweep(
             "threshold_window": cfg.threshold_window,
             "threshold_z": cfg.threshold_z,
             "threshold_min_anomaly_len": cfg.threshold_min_anomaly_len,
+            "min_error_value": cfg.min_error_value,
         },
         _search_space,
     )
@@ -823,12 +898,26 @@ def run_all_sweeps(
     # warm-start priming requirement) and threshold_min_anomaly_len capped
     # (short injected faults cannot sustain long consecutive-exceedance runs).
     # See the comments on _ISS_MAX_THRESHOLD_WINDOW / ISS_SEARCH_SPACE.
-    # ESA uses the default space.
-    _space = ISS_SEARCH_SPACE if mission.startswith("ISS") else SEARCH_SPACE
+    # Every ESA-Mission1 mission (production AND the ESA-Mission1-ADB* ablation
+    # arms, which share the prefix) uses the widened space so the optimum can be
+    # interior on threshold_z / min_error_value — see ESA_M1_SEARCH_SPACE.
+    # Other ESA missions keep the default space.
+    if mission.startswith("ISS"):
+        _space = ISS_SEARCH_SPACE
+    elif mission.startswith("ESA-Mission1"):
+        _space = ESA_M1_SEARCH_SPACE
+    else:
+        _space = SEARCH_SPACE
     if mission.startswith("ISS"):
         log.info(
             "tune.all_sweeps.iss_search_space",
             max_threshold_window=_ISS_MAX_THRESHOLD_WINDOW,
+        )
+    elif mission.startswith("ESA-Mission1"):
+        log.info(
+            "tune.all_sweeps.esa_m1_search_space",
+            threshold_z_max=8.0,
+            min_error_value_max=0.6,
         )
 
     def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:

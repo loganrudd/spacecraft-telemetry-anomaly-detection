@@ -22,7 +22,7 @@ deployment, and — for ISS — a real-time Lightstreamer → asyncio pump feedi
 Built as a portfolio project targeting ML Platform Engineer / ML Infrastructure roles.
 
 **Results (ESA):** on the held-out final 40% of ESA-Mission1, anomalies are flagged in
-**30 of 31** labeled channels (segment recall 0.56, precision 0.22 — see [Evaluation](#evaluation)
+**22 of 31** labeled channels (segment recall 0.51, precision 0.46 — see [Evaluation](#evaluation)
 for the leakage-free protocol and honest framing).
 
 **Deployment guide:** [docs/deployment.md](docs/deployment.md)
@@ -33,7 +33,7 @@ for the leakage-free protocol and honest framing).
   <br><em>ESA — interactive replay with real labeled anomalies (live at the URL above)</em>
 </p>
 
-**ISS live pump (recorded):** the gif below is a sped up live capture of real ISS telemetry streaming
+**ISS live pump (recorded):** the gif below is a sped up live capture of real ISS telemetry streaming with a manually injected anomaly
 through the pump. The always-on ISS service (`api-iss`, `min=1`, holds an open Lightstreamer
 session) is fully defined in Terraform and deployable on demand, but is kept **torn down
 between demos to control the ~$60/mo always-on cost** — the code, IaC, and recording stand in
@@ -204,40 +204,94 @@ point-adjust convention common in the SMAP/MSL literature, which inflates scores
 by crediting an entire anomaly segment for a single detected point.
 
 **Results (ESA-Mission1, held-out 40%, tuned).** Of 31 channels with labeled
-anomalies in the held-out window, **30 register detection** (segment-F0.5 > 0):
+anomalies in the held-out window, **22 register detection** (segment-F0.5 > 0):
 
 | metric (mean over detected channels) | value |
 |---|---|
-| segment recall | 0.56 |
-| segment precision | 0.22 |
-| segment F0.5 | 0.19 |
+| segment recall | 0.51 |
+| segment precision | 0.46 |
+| segment F0.5 | 0.41 |
 
-Detection is **precision-limited**: the forecaster recalls over half the true
-anomaly segments, but most predicted segments don't overlap a *labeled* one. On
-[ESA-ADB](https://arxiv.org/abs/2406.17826) — built specifically to be harder and
-more realistic than SMAP/MSL, where Telemanom reports ~0.7 — segment-F0.5 in the
-~0.2–0.4 range is in-family for this model class, and the low precision is
-consistent with the benchmark's known label sparsity (real-but-unlabeled
-anomalies counted as false positives). Three channels (41, 43, 45) reach
-segment-F0.5 ≥ 0.7 individually, consistent with Telemanom's reported ceiling on
-denser datasets; the fleet mean of 0.19 reflects label sparsity across the majority
-of channels rather than systematic detection failure. The number is reported as-is,
-not tuned upward against the held-out split.
+Precision and recall sit close together: the forecaster catches about half the
+labeled segments, and slightly under half of what it flags overlaps a labeled one.
+Nine of the 31 labeled channels produce no detection at all. Five channels reach
+segment-F0.5 ≥ 0.7 individually — channels 41–45, the subsystem the ESA-ADB
+comparison below examines — topping out at 0.855.
 
-**Why Telemanom is the wrong model for this dataset (and that's the point).** The
-ESA-ADB authors benchmarked ~40 algorithms — including both the original Telemanom
-and a `telemanom_esa` variant adapted to ESA's channel scale — and concluded bluntly
-that *"new approaches are necessary to address operators' needs"*: off-the-shelf
-forecasters like Telemanom do not clear the operational bar on this data. The dataset
-is genuinely harder than SMAP/MSL (irregular sampling, label sparsity, multivariate
-cross-channel anomalies that a univariate one-step forecaster cannot see), and the
-strongest result in the benchmark comes from the authors' own **DC-VAE** — a
-multivariate dilated-CNN variational autoencoder, not an LSTM forecaster. Telemanom
-is used here deliberately as a *known, well-understood baseline*: the value
-proposition of this repo is the platform wrapping the model (preprocessing fan-out,
-HPO, registry, drift monitoring, serving), which is model-agnostic. Swapping in a
-stronger detector is future work (see [Future Work](#future-work)), and the
-infrastructure is built so that swap is a model-module change, not a platform rewrite.
+These supersede an earlier reported F0.5 of 0.19 (recall 0.56, precision 0.22).
+Two independent changes separate those numbers from these, and both were measured
+in isolation rather than reported as one lump:
+
+| | segment F0.5 |
+|---|---:|
+| originally reported | 0.19 |
+| after re-tuning on a widened threshold search space | 0.43 |
+| after also correcting the ground truth | **0.41** |
+
+Essentially all of the gain is the re-tune. Correcting the ground truth moved the
+number slightly **down**, which is the honest direction: `label_timesteps` had been
+dropping zero-duration ("point") anomaly annotations — a half-open `[t, t)`
+interval matches nothing — so those events were silently absent from `is_anomaly`.
+Restoring them (channel 41 alone gained 5 true segments, 18 → 23) means the earlier
+figures were scored against an incomplete, easier target than the dataset actually
+poses.
+
+Where the remaining false positives go is visible in the benchmark run below: of
+its 33 mission-level detections, 18% hit a labeled anomaly and **30% hit a labeled
+Rare Event**, a real annotated phenomenon that the anomalies-only scope excludes
+by definition. The rest fire a median of 245 hours from the nearest real anomaly,
+so they are not near-misses on mislocated events. A duration filter would not
+separate them either: the shortest true-positive detection (2.27 min) is exactly
+as short as the shortest false positive, because real anomalies here have a median
+duration of 0.06 min — far shorter than the runs the scorer emits. The numbers are
+reported as-is, not tuned upward against the held-out split.
+
+### Head-to-head with the ESA-ADB benchmark
+
+The fleet number above uses this repo's own split and metric. A separate evaluation
+compares directly against the published benchmark on its own terms: channels 41–46,
+the paper's chronological 50/50 split, and detections OR-aggregated across channels
+under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric is
+**verified against the benchmark's reference scorer**
+([`kplabs-pl/ESA-ADB`](https://github.com/kplabs-pl/ESA-ADB), `timeeval/metrics/ESA_ADB_metrics.py`)
+— identical TP/FP/FN, TNR, precision, recall and F0.5 on both scopes.
+
+| all events, channels 41–46 | precision | recall | F0.5 |
+|---|---:|---:|---:|
+| ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
+| ours — tuned (per-subsystem Ray Tune HPO + error floor) | 0.370 | 0.400 | **0.376** |
+| paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
+| paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
+
+Only the **protocol-matched** row is like-for-like — neither side tuned, neither
+side using an error floor — and there we are far behind. The tuned row applies
+per-subsystem HPO the paper never ran, so its 0.376, though above the paper's
+un-pruned 0.178, is not a like-for-like win. Reported both ways deliberately.
+
+**What the ESA-ADB authors actually concluded.** They benchmarked ~40 algorithms,
+including a `telemanom_esa` variant adapted to ESA's channel scale, and found that
+**Telemanom-ESA-Pruned is the best algorithm for Mission1** — *"it achieves much
+higher corrected event-wise F0.5-scores than any other algorithm"* — while
+*"unsupervised algorithms perform very poorly for Mission1."* Their caveat is
+narrower than "forecasters don't work here": *"it is a highly parametrised approach
+and the selected thresholds may not be optimal for other missions."*
+
+That caveat is exactly what the HPO layer addresses. The paper's 0.786 rests on a
+`min_error_value` of 0.007 the authors describe as *"arbitrarily selected"* and
+*"highly subjective and probably not optimal"*; this repo searches the same
+parameter per subsystem with Ray Tune against a held-out portion. The platform is
+still the contribution — but it targets a named limitation of the benchmark's own
+best result, not a model nobody rates.
+
+The residual gap is model class — and it is narrower than it sounds. `telemanom_esa`
+is still a Telemanom LSTM, with the *same* 2×80 hidden layers this repo uses. On the
+lightweight subset it runs **6-in/6-out** (`input_channels` and `target_channels` both
+set to channels 41–46), forecasting all six channels jointly 10 steps ahead, where
+ours is 1-in/1-out one step ahead. Telecommands are *not* an input in that
+configuration — they enter only the full-set runs, which score 0.008. So the gap to
+close is joint multivariate forecasting over sibling channels, not a different
+architecture. Doing that is future work (see [Future Work](#future-work)); the
+infrastructure is built so the swap is a model-module change, not a platform rewrite.
 
 **Channel accounting.** A single fleet average hides the structure, so a
 diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
@@ -245,10 +299,10 @@ ground truth:
 
 | bucket | count | meaning |
 |---|---:|---|
-| detected | 30 | anomalies in held-out window, segment-F0.5 > 0 |
-| outside eval window | 23 | trained & serving, but labeled anomalies fall in the first-60% / pre-test era — not scoreable on the held-out split |
-| no labeled anomalies | 8 | nothing to detect in the dataset — excluded |
-| forecaster blind spot | 1 | forecasts the channel *and its anomalies* accurately, so the error never spikes — a known Telemanom limitation, confirmed with `scripts/inspect_channel.py` |
+| detected | 22 | labeled anomalies in the held-out window, segment-F0.5 > 0 |
+| labeled but missed | 9 | anomalies present in the held-out window, no overlapping detection. Includes the forecaster blind spot — channels predicted accurately *through* their own anomalies, so the error never spikes (`scripts/inspect_channel.py`) — plus channels silenced by the higher tuned thresholds |
+| no labeled anomalies in eval window | 23 | trained and scoreable, but labeled anomalies fall in the first-60% / pre-test era — nothing to detect on the held-out split |
+| never trained | 8 | no registered model (`channel_3`, `53`–`56`, `67`–`69`) — not scoreable at all |
 
 The live demo serves 8 validated subsystem_6 channels.
 
@@ -626,29 +680,86 @@ standing demonstration.
 | 8 | FastAPI serving layer | Complete |
 | 9 | React dashboard | Complete |
 | 10 | GCP deployment | Complete |
+| 11 | Documentation + polish | Complete |
 | 12 | ISS Live ingestion + collector | Complete |
 | 13 | ISS preprocessing (30 s grid, LOS detection) | Complete |
 | 14 | ISS training (`telemanom-ISS-*`, subsystem tags) | Complete |
 | 15 | Anomaly injection + injection-driven HPO | Complete |
 | 16 | Multi-mission serving (replay) | Complete |
 | 17 | Live telemetry pump | Complete |
-| 18 | ISS deployment + docs polish | Planned |
+| 18 | ISS deployment + docs polish | Complete |
+| 19 | ESA-ADB-comparable evaluation (paper metric + split) | Complete |
+| 20 | Experiment variant axis (separate mission from experiment config) | Planned |
+| 21 | 6-in/6-out multivariate Telemanom | Planned |
+
+Phases 19–21 are post-18 workstreams rather than new platform capabilities: 19 is
+evaluation credibility (implementing ESA-ADB's own corrected event-wise metric and
+replicating its 50/50 split, verified against the benchmark's reference scorer — see
+[Head-to-head with the ESA-ADB benchmark](#head-to-head-with-the-esa-adb-benchmark)),
+20 is the plumbing that lets an experiment configuration stop masquerading as a
+mission, and 21 is the first detector change aimed at the precision gap 19 measured.
+21 depends on 20 and is the step the [Future Work](#future-work) items build on.
 
 
 ## Future Work
 
-- **DC-VAE as a second baseline + ensemble.** Implement the
+The detector roadmap below is sequenced deliberately: each step builds the infrastructure the
+next one needs. The immediate step — a **6-in/6-out multivariate Telemanom**, matching the
+architecture the benchmark actually used — is what the three items here depend on.
+
+- **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
   Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
-  scoring, `T=128` window, no RNNs) as a new detector alongside Telemanom. DC-VAE is
-  multivariate by design — it can take a whole subsystem's channels as input context
-  while thresholding a target subset — so it should catch cross-channel anomalies the
-  univariate Telemanom forecaster structurally cannot, and it is the strongest model
-  in the ESA-ADB benchmark. The model is a drop-in behind the existing model module
-  interface; the platform (preprocessing, registry, drift, serving) is unchanged. Then
-  build an **ensemble** that combines both scorers and test whether Telemanom + DC-VAE
-  together beat DC-VAE alone on the held-out segment-F0.5. (DC-VAE is TensorFlow, so
-  this also exercises a second framework through the same serving path.)
+  scoring, `T=256` window on ESA-ADB, no RNNs) as a detector alongside Telemanom. It is
+  configured exactly like their multivariate Telemanom — one model over a channel group,
+  `input_channels = target_channels`, latent dimensionality scaling with channel count — so
+  once multivariate Telemanom exists, DC-VAE reuses the whole data path and genuinely becomes
+  a model-module swap.
+
+  The honest motivation is *not* "DC-VAE is the benchmark's best model" — it isn't. The paper
+  reports DC-VAE-ESA performing *"very poorly"* event-wise on Mission1, *"especially
+  disappointing for the former deep learning method,"* with *"a massive number of false
+  detections."* But it also reports DC-VAE-ESA has **the highest ADTQC and affiliation-based
+  scores**, concluding: *"This suggests that more advanced thresholding or postprocessing may
+  significantly improve the event-wise scores."* The paper's own diagnosis is that DC-VAE
+  localises anomalies well and thresholds them badly — and tuned per-subsystem thresholding
+  with an explicit nominal false-positive penalty is exactly this repo's HPO layer. Pairing
+  the two targets the gap the authors name rather than reimplementing their result.
+  (DC-VAE is TensorFlow, so this also exercises a second framework through the same serving path.)
+
+- **Ensemble — but measure overlap before choosing a fusion rule.** With three detectors
+  available (univariate Telemanom, multivariate Telemanom, DC-VAE), the combinations are not
+  equally worth building. Ensembles pay off from *decorrelated errors*, not from stacking
+  strong models:
+
+  | pairing | diversity | verdict |
+  |---|---|---|
+  | multivariate Telemanom + DC-VAE | forecast vs reconstruction, matched inputs | **build toward this** |
+  | univariate Telemanom + DC-VAE | adds an input-scope axis; costs nothing extra | worth a comparison row |
+  | all three | third member is highly correlated | report as an ablation |
+  | univariate + multivariate Telemanom | same objective, same blind spots | skip as an ensemble |
+
+  Forecasting and reconstruction fail differently by construction: a one-step forecaster is
+  structurally blind to slow drift and flatlines (it tracks the ramp; flat input → flat
+  prediction → ~0 residual — measured here on ISS injected faults), while a reconstruction
+  model sees the whole window and scores out-of-distribution shape. The benchmark's own metrics
+  corroborate the decorrelation — DC-VAE wins ADTQC and affiliation, Telemanom wins event-wise.
+
+  The fusion rule is **data-determined, not a design choice**: F0.5 weights precision, which
+  argues for AND-style fusion, but recall is currently 0.400–0.500, so AND is only correct if
+  the models catch the *same* anomalies. If they catch different ones, OR is the win and AND is
+  destructive. Measuring per-anomaly detection overlap must therefore gate the design.
+
+- **Discriminate anomalies from rare nominal events.** In the benchmark run, **30% of this
+  repo's detections land on labeled Rare Events** — real, annotated phenomena (commanded
+  resets and similar) that the anomalies-only scope discards by definition. The benchmark's
+  answer is to exclude the category; nobody attempts to *separate* the two. But labels exist
+  for both, and this repo's own diagnostic surfaced a candidate discriminating feature:
+  genuine false positives split cleanly into cross-channel (4 of 17 firing on all six channels
+  at once) and single-channel (13 of 17). Cross-channel signature plausibly separates
+  "expected, commanded" from "unexpected" — which is the distinction an operator actually acts
+  on, and it is only reachable once the detector is multivariate. This would be an original
+  contribution rather than a reimplementation.
 - **Vertex AI Pipelines for end-to-end orchestration.** Replace the
   make-target-driven cloud lifecycle (preprocess → train → score → tune → tuned score
   → promote → deploy) with a single Vertex AI Pipeline DAG — typed, cached, parameterized

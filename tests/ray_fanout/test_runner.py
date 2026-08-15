@@ -247,3 +247,21 @@ def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
     )
     assert result.model.artifacts_dir.is_absolute(), "artifacts_dir should be absolute"
     assert result.data.raw_data_dir.is_absolute(), "raw_data_dir should be absolute"
+
+
+def test_min_error_value_is_a_tunable_scoring_field() -> None:
+    """min_error_value must survive the tuned_configs whitelist.
+
+    It is filtered by _TUNABLE_SCORING_FIELDS before being applied to Settings.
+    If it were absent, a tuned config carrying an absolute error floor would be
+    silently dropped and the tuned scoring run would quietly score WITHOUT the
+    floor while reporting itself as tuned — invalidating any comparison against
+    ESA-ADB's Telemanom-ESA-Pruned. Guard the whitelist membership explicitly.
+
+    Its sibling prune_min_decrease must stay OUT: that one is Hundman §3.3,
+    retrospective and not reproducible in the streaming path.
+    """
+    from spacecraft_telemetry.ray_fanout.runner import _TUNABLE_SCORING_FIELDS
+
+    assert "min_error_value" in _TUNABLE_SCORING_FIELDS
+    assert "prune_min_decrease" not in _TUNABLE_SCORING_FIELDS

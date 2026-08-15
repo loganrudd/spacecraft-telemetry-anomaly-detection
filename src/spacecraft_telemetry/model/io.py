@@ -120,12 +120,43 @@ def find_latest_run_for_channel(
 # ---------------------------------------------------------------------------
 
 
+def read_artifact_bytes(path: str) -> bytes:
+    """Read a staged artifact's raw bytes from a local path or ``gs://`` URI.
+
+    The tracking-server-free counterpart to download_artifact_bytes: used when
+    scoring artifacts have been staged out of the MLflow artifact store and the
+    tracking backend is unavailable (see esa_adb/offline.py). Kept in this
+    module so all artifact byte reads stay funnelled through model.io.
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+    """
+    from spacecraft_telemetry.core.paths import to_upath
+
+    p = to_upath(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Artifact not found: {path}")
+    return p.read_bytes()
+
+
 def download_artifact_bytes(
     run_id: str,
     artifact_path: str,
     tracking_uri: str,
 ) -> bytes:
     """Download a named artifact from an MLflow run and return its raw bytes.
+
+    Reads directly from the run's artifact store when it resolves to a
+    ``gs://`` URI (``run.info.artifact_uri`` — the cloud MLflow server logs
+    this as the real bucket path, not a proxied ``mlflow-artifacts:`` scheme),
+    bypassing ``client.download_artifacts()``, which streams bytes through the
+    MLflow tracking server. Measured: errors.npy (~60MB) took 33-49s through
+    the proxy (~0.5-0.7 MB/s — a 1 vCPU Cloud Run instance is not built to
+    stream large binaries) vs. a direct GCS read.
+
+    Falls back to the tracking-server proxy for any other artifact store
+    scheme (e.g. local ``file://`` runs used in tests, or a genuinely proxied
+    store) — same behaviour as before this optimisation.
 
     Args:
         run_id:        MLflow run ID.
@@ -140,7 +171,14 @@ def download_artifact_bytes(
     """
     import mlflow
 
+    from spacecraft_telemetry.core.paths import to_upath
+
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    run = client.get_run(run_id)
+    artifact_uri = run.info.artifact_uri
+    if artifact_uri and artifact_uri.startswith("gs://"):
+        return to_upath(f"{artifact_uri.rstrip('/')}/{artifact_path}").read_bytes()
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_path = client.download_artifacts(run_id, artifact_path, tmp_dir)
         return Path(local_path).read_bytes()
@@ -253,6 +291,11 @@ class ScoringParams:
     threshold_z: float
     error_smoothing_window: int
     threshold_min_anomaly_len: int
+    # Absolute floor on the smoothed error (ESA-ADB's "pruning"). Pointwise and
+    # stateless, so the streaming engine applies it identically to batch
+    # scoring — see model.scoring.flag_anomalies. 0.0 = disabled, which is also
+    # the behaviour of any scoring run logged before this param existed.
+    min_error_value: float = 0.0
 
 
 def load_scoring_params(
@@ -297,6 +340,9 @@ def load_scoring_params(
             threshold_z=float(p["threshold_z"]),
             error_smoothing_window=int(p["error_smoothing_window"]),
             threshold_min_anomaly_len=int(p["threshold_min_anomaly_len"]),
+            # Optional via .get(): scoring runs predating the absolute error
+            # floor have no such param, and 0.0 reproduces their behaviour.
+            min_error_value=float(p.get("min_error_value", 0.0)),
         )
     except KeyError as exc:
         raise RuntimeError(
@@ -304,5 +350,3 @@ def load_scoring_params(
             f"param {exc.args[0]!r}. "
             "Re-run `spacecraft-telemetry ray score` for this channel."
         ) from exc
-
-

@@ -58,9 +58,17 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
+# Image tag to run the sweep with. Defaults to :latest; pin to a commit SHA to
+# reproduce a past sweep, or to run a controlled A/B where the only variable is
+# the code itself. Used for the Plan 019 min_error_value ablation: the sweep
+# with the error floor and the sweep without it differ ONLY by image SHA, so
+# neither needs a config switch.
+RAY_IMAGE_TAG="${RAY_IMAGE_TAG:-latest}"
 
-echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION})"
+export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE \
+  RAY_IMAGE_TAG
+
+echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION}, image tag=${RAY_IMAGE_TAG})"
 
 if kubectl get rayjob spacecraft-tune -n ray &>/dev/null; then
   echo "==> Deleting existing spacecraft-tune RayJob"

@@ -297,6 +297,141 @@ def test_run_all_sweeps_filters_and_runs(
     assert entry["_meta"]["seg_f0_5"] == pytest.approx(0.75)
 
 
+@pytest.mark.parametrize(
+    ("mission", "expected_space_name", "threshold_z_bounds"),
+    [
+        ("ESA-Mission1", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ESA-Mission1-ADB", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ISS", "ISS_SEARCH_SPACE", (2.5, 5.0)),
+        ("ESA-Mission2", "SEARCH_SPACE", (2.5, 5.0)),
+    ],
+)
+def test_run_all_sweeps_selects_search_space_by_mission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mission: str,
+    expected_space_name: str,
+    threshold_z_bounds: tuple[float, float],
+) -> None:
+    """The search-space selector must route each mission to the right space.
+
+    The ISS row is the valuable half: ISS_SEARCH_SPACE = {**SEARCH_SPACE, ...},
+    so the 2026-08-14 widening of the base SEARCH_SPACE for ESA-Mission1 would
+    silently widen ISS too if `mission.startswith("ISS")` were ever checked
+    after (or dropped in favour of) the ESA-Mission1 branch.
+    """
+    import ray
+
+    from spacecraft_telemetry.ray_fanout import tune as tune_module
+
+    expected_space = getattr(tune_module, expected_space_name)
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+        }
+    )
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_hpo_sweep(subsystem, channels, settings, mission, *, search_space=None):
+        captured["search_space"] = search_space
+        return {
+            "config": {
+                "error_smoothing_window": 10,
+                "threshold_window": 100,
+                "threshold_z": 2.5,
+                "threshold_min_anomaly_len": 2,
+            },
+            "seg_f0_5": 0.5,
+            "run_id": "fake-run-id",
+        }
+
+    monkeypatch.setattr(tune_module, "run_hpo_sweep", _fake_run_hpo_sweep)
+
+    tune_module.run_all_sweeps(settings, mission, ["channel_1"])
+
+    assert captured["search_space"] is expected_space
+    z = captured["search_space"]["threshold_z"]
+    assert (z.lower, z.upper) == threshold_z_bounds
+
+
+def _pinned_params(
+    config: dict[str, float], search_space: dict[str, object], epsilon: float = 0.05
+) -> list[str]:
+    """Return the names of any ``config`` params within ``epsilon`` of their search-space bound.
+
+    Skips params whose search-space entry is a fixed value rather than a Ray
+    Tune distribution (e.g. ISS_SEARCH_SPACE's ``min_error_value: 0.0``) —
+    those have no bound to pin against. A pinned optimum means the search
+    space is a confound rather than a genuine optimum (see ESA_M1_SEARCH_SPACE's
+    docstring) — this is a cheap assertion on a tuned-config fixture, not a
+    live-sweep test.
+    """
+    pinned = []
+    for name, value in config.items():
+        dist = search_space.get(name)
+        lower = getattr(dist, "lower", None)
+        upper = getattr(dist, "upper", None)
+        if lower is None or upper is None:
+            continue
+        if abs(value - lower) <= epsilon or abs(value - upper) <= epsilon:
+            pinned.append(name)
+    return pinned
+
+
+class TestPinnedParamDetection:
+    """Regression coverage for the 2026-08-15 evening re-tune finding.
+
+    subsystem_5's threshold_z landed at 2.511 against ESA_M1_SEARCH_SPACE's
+    lower bound of 2.5, and subsystem_3's min_error_value landed at 0.5685
+    against the upper bound of 0.6 (see docs/reviews/019-esa-adb-comparable-eval.md).
+    Both are cheap fixtures pinned here so a future re-discovery is a single
+    failing assertion instead of a fresh investigation.
+    """
+
+    def test_flags_param_pinned_to_lower_bound(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {"threshold_z": 2.511, "min_error_value": 0.1}
+        assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == ["threshold_z"]
+
+    def test_flags_param_pinned_to_upper_bound(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {"threshold_z": 4.0, "min_error_value": 0.5685}
+        assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == ["min_error_value"]
+
+    def test_interior_config_flags_nothing(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {"threshold_z": 4.0, "min_error_value": 0.3}
+        assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == []
+
+    def test_fixed_iss_min_error_value_is_not_flagged(self) -> None:
+        """ISS_SEARCH_SPACE pins min_error_value=0.0 (a fixed value, no distribution)."""
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        config = {"min_error_value": 0.0, "threshold_z": 2.5}
+        assert _pinned_params(config, ISS_SEARCH_SPACE) == ["threshold_z"]
+
+
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
     """_prepare_channel_data returns slices of length floor(N * hpo_eval_fraction)."""
     from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data

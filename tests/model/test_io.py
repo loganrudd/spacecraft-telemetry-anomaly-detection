@@ -32,6 +32,7 @@ from spacecraft_telemetry.model.io import (  # noqa: E402
     find_latest_run_for_channel,
     load_model_for_scoring,
     load_scoring_params,
+    read_artifact_bytes,
     threshold_to_bytes,
 )
 
@@ -59,6 +60,25 @@ def test_threshold_to_bytes_round_trip() -> None:
 def test_errors_to_bytes_returns_bytes() -> None:
     arr = np.zeros(5, dtype=np.float32)
     assert isinstance(errors_to_bytes(arr), bytes)
+
+
+# ---------------------------------------------------------------------------
+# read_artifact_bytes — tracking-server-free path (esa_adb offline mode)
+# ---------------------------------------------------------------------------
+
+
+def test_read_artifact_bytes_reads_local_file(tmp_path: Path) -> None:
+    path = tmp_path / "errors.npy"
+    original = np.array([1.0, 2.0, 3.0])
+    path.write_bytes(errors_to_bytes(original))
+
+    data = read_artifact_bytes(str(path))
+    np.testing.assert_array_equal(bytes_to_errors(data), original)
+
+
+def test_read_artifact_bytes_missing_file_raises() -> None:
+    with pytest.raises(FileNotFoundError, match="Artifact not found"):
+        read_artifact_bytes("/nonexistent/path/errors.npy")
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +119,89 @@ def test_download_artifact_bytes_retrieves_data(_mlflow_uri: str) -> None:
     run_id = _log_artifact_in_run(_mlflow_uri, "channel_1", "test.bin", payload)
     result = download_artifact_bytes(run_id, "test.bin", _mlflow_uri)
     assert result == payload
+
+
+def test_download_artifact_bytes_reads_directly_from_gs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gs:// run.info.artifact_uri must be read directly, bypassing the proxy.
+
+    P1: client.download_artifacts() streams bytes through the MLflow tracking
+    server (measured 33-49s for a ~60MB artifact); a direct GCS read is the
+    fix. The proxy path (download_artifacts) must not be called at all here.
+    """
+    import mlflow
+
+    class _FakeInfo:
+        artifact_uri = "gs://bucket/mlflow/1/run123/artifacts"
+
+    class _FakeRun:
+        info = _FakeInfo()
+
+    class _FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            del tracking_uri
+
+        def get_run(self, run_id: str) -> _FakeRun:
+            del run_id
+            return _FakeRun()
+
+        def download_artifacts(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError(
+                "proxy download must not be called when artifact_uri is gs://"
+            )
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
+
+    captured: dict[str, str] = {}
+
+    class _FakeUPath:
+        def read_bytes(self) -> bytes:
+            return b"gcs-bytes"
+
+    def _fake_to_upath(value: str) -> _FakeUPath:
+        captured["value"] = value
+        return _FakeUPath()
+
+    monkeypatch.setattr("spacecraft_telemetry.core.paths.to_upath", _fake_to_upath)
+
+    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+
+    assert result == b"gcs-bytes"
+    assert captured["value"] == "gs://bucket/mlflow/1/run123/artifacts/errors.npy"
+
+
+def test_download_artifact_bytes_falls_back_to_proxy_for_non_gs_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-gs:// artifact_uri (e.g. local file://) must use the proxy path."""
+    import mlflow
+
+    class _FakeInfo:
+        artifact_uri = "mlflow-artifacts:/1/run123/artifacts"
+
+    class _FakeRun:
+        info = _FakeInfo()
+
+    class _FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            del tracking_uri
+
+        def get_run(self, run_id: str) -> _FakeRun:
+            del run_id
+            return _FakeRun()
+
+        def download_artifacts(self, run_id: str, artifact_path: str, dst_path: str) -> str:
+            del run_id
+            local = Path(dst_path) / artifact_path
+            local.write_bytes(b"proxied-bytes")
+            return str(local)
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
+
+    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+
+    assert result == b"proxied-bytes"
 
 
 def test_find_latest_run_for_channel_returns_most_recent(_mlflow_uri: str) -> None:
@@ -149,7 +252,9 @@ def test_find_latest_run_for_channel_extra_filter_disambiguates_data_source(
         mlflow.log_metric("step", 2)
 
     found = find_latest_run_for_channel(
-        "test-scoring-3", "channel_1", _mlflow_uri,
+        "test-scoring-3",
+        "channel_1",
+        _mlflow_uri,
         extra_filter="tags.data_source = 'nominal'",
     )
     assert found is not None
@@ -185,9 +290,7 @@ def test_load_model_for_scoring_returns_model_and_window_size(_mlflow_uri: str) 
     loaded_model.eval()
     x = torch.zeros(2, cfg.window_size, 1)
     with torch.no_grad():
-        np.testing.assert_allclose(
-            model(x).numpy(), loaded_model(x).numpy(), rtol=1e-5
-        )
+        np.testing.assert_allclose(model(x).numpy(), loaded_model(x).numpy(), rtol=1e-5)
 
 
 def test_load_model_for_scoring_raises_when_no_version(_mlflow_uri: str) -> None:
@@ -360,6 +463,5 @@ def test_no_direct_filesystem_writes_in_training_or_scoring() -> None:
         if path.exists():
             violations.extend(_check_no_raw_io(path))
     assert not violations, (
-        "Raw filesystem writes found — use MLflow logging APIs instead:\n"
-        + "\n".join(violations)
+        "Raw filesystem writes found — use MLflow logging APIs instead:\n" + "\n".join(violations)
     )

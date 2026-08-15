@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from spacecraft_telemetry.preprocess.transforms import (
     detect_gaps,
@@ -310,6 +311,66 @@ class TestTemporalTrainTestSplit:
 
 
 class TestLabelTimesteps:
+    def test_point_label_marks_nearest_sample(self) -> None:
+        """Zero-duration (StartTime == EndTime) labels must mark a timestep.
+
+        A half-open [t, t) interval matches nothing, so point annotations were
+        silently absent from is_anomaly. Widening by 1 ns would not fix it:
+        ESA labels are second-resolution while telemetry timestamps carry
+        sub-second components, so exact matches essentially never occur — the
+        label must cover a sampling period around the instant.
+        """
+        df = _make_channel_df(n=20, freq="90s", start="2000-01-01")
+        # Instant deliberately BETWEEN samples (samples are at :00, :90, ...),
+        # and offset sub-second so it matches no timestamp exactly.
+        instant = pd.Timestamp("2000-01-01T00:04:35.250Z")
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        out = label_timesteps(df, labels)
+        assert out["is_anomaly"].sum() >= 1, "point label marked no timestep"
+        assert out["is_anomaly"].sum() <= 2, "point label over-marked"
+        marked = out.loc[out["is_anomaly"], "telemetry_timestamp"]
+        assert (marked - instant).abs().min() <= pd.Timedelta(seconds=90), (
+            "marked sample is not adjacent to the annotated instant"
+        )
+
+    def test_point_label_in_data_gap_marks_nothing(self) -> None:
+        """An instant inside a large gap has no sample to attribute it to."""
+        ts = list(pd.date_range("2000-01-01", periods=5, freq="90s", tz="UTC"))
+        ts += list(pd.date_range("2000-06-01", periods=5, freq="90s", tz="UTC"))
+        df = pd.DataFrame({
+            "telemetry_timestamp": ts,
+            "value": pd.array([1.0] * 10, dtype="float32"),
+            "channel_id": "channel_1",
+            "mission_id": "ESA-Mission1",
+        })
+        instant = pd.Timestamp("2000-03-15T00:00:00Z")  # deep inside the gap
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        out = label_timesteps(df, labels)
+        assert out["is_anomaly"].sum() == 0, "gap-interior instant should mark nothing"
+
+    def test_normal_interval_labels_unaffected_by_point_handling(self) -> None:
+        """Non-degenerate labels keep exact half-open semantics."""
+        df = _make_channel_df(n=20)
+        labels = _make_labels_df()
+        out = label_timesteps(df, labels)
+        ts = out["telemetry_timestamp"]
+        expected = (ts >= labels.loc[0, "start_time"]) & (ts < labels.loc[0, "end_time"])
+        assert (out["is_anomaly"] == expected).all()
+
     def test_adds_is_anomaly_column(self) -> None:
         df = _make_channel_df(n=20)
         labels = _make_labels_df()
@@ -360,6 +421,41 @@ class TestLabelTimesteps:
         assert out["is_anomaly"].sum() > 0
         # Timestamps well before either segment must be nominal.
         assert not out["is_anomaly"].iloc[0]
+
+    def test_single_row_channel_point_label_logs_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """len(ts) <= 1 keeps half_width at 0, so the point label matches nothing.
+
+        This is the same failure mode the point-label widening was built to
+        fix (a [t, t) interval matching nothing), just reproduced silently
+        through the other guard (len(ts) > 1). It must not raise — preprocessing
+        tolerates a degenerate channel — but it must be logged.
+
+        structlog emits to stdout via PrintLoggerFactory, and module-level
+        loggers are cached on first use (core/logging.py's
+        cache_logger_on_first_use=True) — by the time this runs inside the
+        full suite, this module's logger has typically already been realized
+        by an earlier test, which makes structlog.testing.capture_logs() miss
+        the event. Check capsys instead (see test_iss_io.py's precedent).
+        """
+        df = _make_channel_df(n=1)
+        instant = df["telemetry_timestamp"].iloc[0]
+        labels = pd.DataFrame(
+            [{
+                "anomaly_id": "id_point",
+                "channel_id": "channel_1",
+                "start_time": instant,
+                "end_time": instant,
+            }]
+        )
+        out = label_timesteps(df, labels)
+
+        assert not out["is_anomaly"].any(), "degenerate channel should mark nothing"
+        stdout = capsys.readouterr().out
+        assert "label_timesteps.point_labels_dropped" in stdout
+        assert "warning" in stdout
+        assert "n_point_labels=1" in stdout
 
     def test_empty_labels_returns_all_false(self) -> None:
         df = _make_channel_df(n=20)

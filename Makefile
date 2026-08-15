@@ -338,6 +338,7 @@ cloud-up: cloud-db-start  ## Start Cloud SQL + provision GKE. Run before cloud-p
 	terraform -chdir=infra apply \
 		-target=kubernetes_namespace.ray_system \
 		-target=kubernetes_namespace.ray \
+		-target=null_resource.kuberay_crds \
 		-target=helm_release.kuberay_operator \
 		-target=kubernetes_service_account.ray \
 		-auto-approve
