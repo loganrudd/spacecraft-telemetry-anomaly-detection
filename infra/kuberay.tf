@@ -72,6 +72,31 @@ resource "null_resource" "kuberay_crds" {
       set -euo pipefail
       gcloud container clusters get-credentials ${google_container_cluster.ray.name} \
         --region ${var.region} --project ${var.project_id}
+
+      # Force a node up BEFORE the heavy CRD writes. A freshly created Autopilot
+      # cluster has zero nodes, which leaves every GKE system Deployment
+      # (kube-dns, metrics-server, gmp-operator, ...) Pending — and those back
+      # the admission webhooks every write must traverse. With no endpoints
+      # behind them the apiserver waits out each webhook timeout, so writes crawl
+      # (measured: 3.5s for a ConfigMap, 17-27s per CRD) and large applies drop
+      # with "http2: client connection lost" mid-stream. Autopilot only
+      # provisions nodes on demand, so a throwaway pause Deployment is what
+      # breaks the deadlock; once a node is Ready the same ConfigMap write drops
+      # to 1.5s. The kuberay operator Deployment holds a node from here on.
+      # Namespace must be `default`: Autopilot Warden denies workload creation
+      # in the managed kube-system namespace.
+      kubectl create deployment kuberay-nodetrigger \
+        --image=registry.k8s.io/pause:3.9 -n default \
+        --dry-run=client -o yaml | kubectl apply -f -
+      echo "waiting for an Autopilot node to become Ready..."
+      for i in $(seq 1 60); do
+        if [ "$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" -gt 0 ]; then
+          echo "node Ready after $${i}0s"; break
+        fi
+        sleep 10
+      done
+      kubectl wait --for=condition=Ready nodes --all --timeout=300s
+
       tmp=$(mktemp -d)
       trap 'rm -rf "$tmp"' EXIT
       helm pull kuberay-operator \
@@ -79,8 +104,19 @@ resource "null_resource" "kuberay_crds" {
         --version ${local.kuberay_version} --untar --untardir "$tmp"
       # --server-side is required, not stylistic: client-side apply records the
       # object in a last-applied-configuration annotation, and these CRDs are far
-      # past the 256KB ceiling on annotation size.
-      kubectl apply --server-side --force-conflicts -f "$tmp/kuberay-operator/crds/"
+      # past the 256KB ceiling on annotation size. Retried because even with a
+      # node up these are multi-second writes on a cold control plane.
+      for attempt in 1 2 3; do
+        if kubectl apply --server-side --force-conflicts \
+             -f "$tmp/kuberay-operator/crds/"; then
+          break
+        fi
+        echo "CRD apply attempt $attempt failed; retrying in 15s..."
+        sleep 15
+      done
+      kubectl get crd rayclusters.ray.io rayjobs.ray.io rayservices.ray.io
+
+      kubectl delete deployment kuberay-nodetrigger -n default --ignore-not-found
     EOT
   }
 

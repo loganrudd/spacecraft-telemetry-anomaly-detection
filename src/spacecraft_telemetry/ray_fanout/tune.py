@@ -172,9 +172,9 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
     "min_error_value": 0.0,
 }
 
-# Widened space for the plan-019 ESA-ADB ablation arms ONLY (missions prefixed
-# `ESA-Mission1-ADB`). Production `ESA-Mission1` and ISS keep SEARCH_SPACE /
-# ISS_SEARCH_SPACE unchanged — this must not move the live demo's thresholds.
+# Widened space for ALL ESA-Mission1 missions — the plan-019 ablation arms
+# (`ESA-Mission1-ADB*`) and production `ESA-Mission1` alike. ISS keeps
+# ISS_SEARCH_SPACE.
 #
 # Why: the first sweep of both arms landed against the ceiling on a *different*
 # parameter each, so neither optimum was interior and the arms were not
@@ -186,12 +186,21 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
 # worse forecasts and therefore larger baseline errors. Widening both bounds for
 # both arms is what makes the A/C comparison mean what it claims to mean.
 #
+# Production was added (plan 019 next-step C) once the arms showed the widening
+# is what carried arm A from 0.0011 to 0.3759: production's own tuned configs
+# predate `min_error_value` entirely (all None) and two of four subsystems were
+# pinned at the old threshold_z 5.0 ceiling, so it was truncated on exactly the
+# two axes this widens. Re-tuning is scoring-only — no retraining — but it DOES
+# move what the live demo serves once the new configs are promoted, so promote
+# deliberately (and never with a bare `--mission ESA-Mission1`, which also
+# prefix-matches the ESA-Mission1-ADB* pseudo-missions; see plan 020).
+#
 # 0.6 stays consistent with the empirical basis documented on SEARCH_SPACE
 # above: smoothed-error p99.9 is ~0.15-0.41 and max ~0.44-1.03 on these
 # channels, so 0.6 still sits below the observed max while genuinely spanning
 # "keeps only the extreme tail". z to 8.0 is deliberately generous — the goal is
 # for the optimum to be interior, not to be tight.
-ESA_ADB_SEARCH_SPACE: dict[str, Any] = {
+ESA_M1_SEARCH_SPACE: dict[str, Any] = {
     **SEARCH_SPACE,
     "threshold_z":     tune.uniform(2.5, 8.0),  # was (2.5, 5.0) — arm A pegged at 4.783
     "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
@@ -889,14 +898,14 @@ def run_all_sweeps(
     # warm-start priming requirement) and threshold_min_anomaly_len capped
     # (short injected faults cannot sustain long consecutive-exceedance runs).
     # See the comments on _ISS_MAX_THRESHOLD_WINDOW / ISS_SEARCH_SPACE.
-    # ESA uses the default space.
-    # ESA-ADB ablation arms use a widened space so neither arm's optimum is
-    # pinned to a bound (see ESA_ADB_SEARCH_SPACE). Production ESA-Mission1 does
-    # NOT match this prefix and keeps the default space.
+    # Every ESA-Mission1 mission (production AND the ESA-Mission1-ADB* ablation
+    # arms, which share the prefix) uses the widened space so the optimum can be
+    # interior on threshold_z / min_error_value — see ESA_M1_SEARCH_SPACE.
+    # Other ESA missions keep the default space.
     if mission.startswith("ISS"):
         _space = ISS_SEARCH_SPACE
-    elif mission.startswith("ESA-Mission1-ADB"):
-        _space = ESA_ADB_SEARCH_SPACE
+    elif mission.startswith("ESA-Mission1"):
+        _space = ESA_M1_SEARCH_SPACE
     else:
         _space = SEARCH_SPACE
     if mission.startswith("ISS"):
@@ -904,9 +913,9 @@ def run_all_sweeps(
             "tune.all_sweeps.iss_search_space",
             max_threshold_window=_ISS_MAX_THRESHOLD_WINDOW,
         )
-    elif mission.startswith("ESA-Mission1-ADB"):
+    elif mission.startswith("ESA-Mission1"):
         log.info(
-            "tune.all_sweeps.esa_adb_search_space",
+            "tune.all_sweeps.esa_m1_search_space",
             threshold_z_max=8.0,
             min_error_value_max=0.6,
         )
