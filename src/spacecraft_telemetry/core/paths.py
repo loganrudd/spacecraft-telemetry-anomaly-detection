@@ -33,3 +33,39 @@ def absolutize_if_local(value: str | Path | UPath) -> UPath:
     if up.protocol in ("", "file"):
         return UPath(Path(str(up)).resolve())
     return up
+
+
+def output_path(
+    root: str | Path | UPath,
+    mission: str,
+    variant: str | None,
+    *parts: str,
+) -> UPath:
+    """Compose a mission + optional-variant OUTPUT path.
+
+    ``variant=None`` (the default everywhere today) reproduces the
+    pre-variant layout byte-for-byte::
+
+        {root}/{mission}/{*parts}
+
+    A non-null variant inserts one path segment between the mission and the
+    rest, giving an experiment/ablation config its own output namespace
+    without duplicating the mission's raw input data::
+
+        {root}/{mission}/{variant}/{*parts}
+
+    Use this for every WRITE and READ site keyed by
+    ``(preprocess.processed_data_dir, mission)`` or ``(model.artifacts_dir,
+    mission)`` — see docs/plans/020-experiment-variant-axis.md.
+
+    Do NOT use this for raw/sample INPUT reads (``data.raw_data_dir``,
+    ``data.sample_data_dir``, ``collect.raw_ticks_dir``) — those are keyed on
+    mission only. One copy of raw data serves every variant of a mission;
+    that is the duplication this axis exists to kill.
+    """
+    base = to_upath(root) / mission
+    if variant:
+        base = base / variant
+    for part in parts:
+        base = base / part
+    return base

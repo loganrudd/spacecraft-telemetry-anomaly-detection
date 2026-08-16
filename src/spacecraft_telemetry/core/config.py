@@ -26,6 +26,20 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 _REPO_ROOT = Path(__file__).parents[3]
 
 
+def _coerce_none_sentinel(v: object) -> object:
+    """Coerce the empty-string / "null" / "none" env-var spellings to None.
+
+    There is no way to spell None for a `str | None` pydantic field via an
+    env var: `SPACECRAFT_X=` yields `''` and `SPACECRAFT_X=null` yields the
+    string `'null'` — neither coerces to None on its own, both crashing
+    downstream code that branches on `is None` (e.g. pd.Timedelta(train_lookback)).
+    Shared by every `str | None` field that needs an env-settable None.
+    """
+    if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
+        return None
+    return v
+
+
 class DataConfig(BaseModel):
     raw_data_dir: str = "data/raw"
     sample_data_dir: str = "data/sample"
@@ -77,6 +91,11 @@ class PreprocessingConfig(BaseModel):
     @classmethod
     def coerce_path_to_str(cls, v: object) -> str:
         return str(v)
+
+    @field_validator("train_lookback", mode="before")
+    @classmethod
+    def coerce_train_lookback_none(cls, v: object) -> object:
+        return _coerce_none_sentinel(v)
 
     @field_validator("train_fraction")
     @classmethod
@@ -673,6 +692,11 @@ class Settings(BaseSettings):
     )
 
     env: str = "local"
+    # Identifies which experiment configuration produced these artifacts —
+    # separate from `mission` (which spacecraft the data came from). None
+    # reproduces today's paths/names byte for byte; see core/paths.py
+    # output_path() and docs/plans/020-experiment-variant-axis.md.
+    variant: str | None = None
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
     preprocess: PreprocessingConfig = PreprocessingConfig()
@@ -685,6 +709,11 @@ class Settings(BaseSettings):
     api: ApiConfig = ApiConfig()
     collect: CollectorConfig = CollectorConfig()
     injection: InjectionConfig = InjectionConfig()
+
+    @field_validator("variant", mode="before")
+    @classmethod
+    def coerce_variant_none(cls, v: object) -> object:
+        return _coerce_none_sentinel(v)
 
     @property
     def replay_dir(self) -> str:

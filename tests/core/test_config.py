@@ -156,6 +156,20 @@ class TestPreprocessingConfig:
         cfg = PreprocessingConfig(feature_windows=[5, 20])
         assert cfg.feature_windows == [5, 20]
 
+    def test_train_lookback_default_is_none(self) -> None:
+        assert PreprocessingConfig().train_lookback is None
+
+    def test_train_lookback_accepts_offset_alias(self) -> None:
+        cfg = PreprocessingConfig(train_lookback="730D")
+        assert cfg.train_lookback == "730D"
+
+    @pytest.mark.parametrize("sentinel", ["", "null", "none", "NULL", "None", "  "])
+    def test_train_lookback_none_sentinels_coerce_to_none(self, sentinel: str) -> None:
+        # No env-var spelling of None exists for a str | None field: "" and
+        # "null" both fail to coerce without this validator (see config.py
+        # _coerce_none_sentinel and docs/plans/020-experiment-variant-axis.md).
+        assert PreprocessingConfig(train_lookback=sentinel).train_lookback is None
+
 
 # ---------------------------------------------------------------------------
 # load_settings / Settings
@@ -266,6 +280,52 @@ class TestLoadSettings:
     def test_model_type_default(self) -> None:
         settings = Settings()
         assert settings.model.model_type == "telemanom"
+
+
+# ---------------------------------------------------------------------------
+# Settings.variant (Plan 020 — experiment variant axis)
+# ---------------------------------------------------------------------------
+
+
+class TestVariantField:
+    def test_default_is_none(self) -> None:
+        assert Settings().variant is None
+
+    def test_accepts_kebab_case_slug(self) -> None:
+        settings = Settings(variant="adb-24m")
+        assert settings.variant == "adb-24m"
+
+    @pytest.mark.parametrize("sentinel", ["", "null", "none", "NULL", "  "])
+    def test_none_sentinels_coerce_to_none(self, sentinel: str) -> None:
+        assert Settings(variant=sentinel).variant is None
+
+    def test_env_var_sets_variant(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text("env: local\n")
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("SPACECRAFT_VARIANT", "adb-24m")
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.variant == "adb-24m"
+
+    def test_env_var_empty_string_coerces_to_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "local.yaml").write_text("env: local\n")
+        monkeypatch.setenv("SPACECRAFT_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("SPACECRAFT_VARIANT", "")
+        monkeypatch.delenv("SPACECRAFT_ENV", raising=False)
+
+        settings = load_settings("local")
+
+        assert settings.variant is None
 
 
 # ---------------------------------------------------------------------------
