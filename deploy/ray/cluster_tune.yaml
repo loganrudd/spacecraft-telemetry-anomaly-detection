@@ -64,6 +64,10 @@ spec:
                   value: ${PROCESSED_DATA_DIR}
                 - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                   value: gs://${PROJECT_ID}-sample-data
+                # Experiment variant axis (plan 020) — empty string coerces to
+                # None (Settings.variant), reproducing today's output layout.
+                - name: SPACECRAFT_VARIANT
+                  value: "${VARIANT}"
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -71,13 +75,34 @@ spec:
                 # ISS=128, ESA=250 — set by cloud_tune.sh (LOS segment constraint).
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                # Sweeps run one subsystem at a time, overriding tune.max_parallel_subsystems=2
+                # from configs/cloud.yaml. That setting's own comment records that 2 concurrent
+                # sweeps need ~8GB of head — which is exactly what the head requests below, i.e.
+                # no headroom at all. ESA-Mission1 OOM-killed the head at 8.26GB of 8GiB on
+                # 2026-08-15; subsystem_6 alone carries 41 of the 62 channels, so pairing it with
+                # any second sweep is what pushes it over. Sequential sweeps roughly halve peak
+                # head memory at the cost of wall-clock.
+                #
+                # Set here rather than in configs/cloud.yaml so it takes effect without an image
+                # rebuild — cloud_tune.sh re-applies this YAML on every submit.
+                #
+                # HEAD ONLY, deliberately. run_all_sweeps reads this in the driver (the RayJob
+                # entrypoint runs there) to decide how many sweeps to run at once; worker tasks
+                # never read it. This is the documented exception to the "thread env vars to both
+                # head and worker" rule, which exists for settings consumed inside @ray.remote
+                # tasks — putting it on the worker would be dead config.
+                - name: SPACECRAFT_TUNE__MAX_PARALLEL_SUBSYSTEMS
+                  value: "1"
               resources:
                 requests:
+                  # 12Gi, not 8: headroom above the ~8GB a sweep actually needs. Do NOT raise
+                  # past 13Gi without also raising cpu — GKE Autopilot caps memory at 6.5GiB per
+                  # vCPU, so 2 vCPU / 16Gi is rejected (4 vCPU would be required).
                   cpu: "2"
-                  memory: "8Gi"
+                  memory: "12Gi"
                 limits:
                   cpu: "2"
-                  memory: "8Gi"
+                  memory: "12Gi"
               livenessProbe:
                 exec:
                   command:
@@ -128,6 +153,10 @@ spec:
                     value: ${PROCESSED_DATA_DIR}
                   - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
                     value: gs://${PROJECT_ID}-sample-data
+                  # Must match the head's value — the @ray.remote fan-out
+                  # splits inside worker tasks (plan 019 B2).
+                  - name: SPACECRAFT_VARIANT
+                    value: "${VARIANT}"
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
@@ -137,8 +166,18 @@ spec:
                     value: "${WINDOW_SIZE_OVERRIDE}"
                 resources:
                   requests:
+                    # 16Gi, up from 4Gi. run_hpo_sweep ray.put()s the whole subsystem's
+                    # channel_data AND nominal_errors via tune.with_parameters, so the worker's
+                    # object store must hold every channel in the sweep at once. subsystem_6 is
+                    # 41 of ESA-Mission1's 62 channels at ~30MB each (errors.npy measured at
+                    # 23.6MB + per-window labels) — roughly 2.4GB of shared arrays. Ray sizes the
+                    # object store at ~30% of node memory, so 4Gi gave it ~1.2GB and the sweep
+                    # OOM-killed the worker on 2026-08-15 with 4 concurrent trials running.
+                    # 16Gi leaves ~4.8GB of object store plus headroom for the trials themselves.
+                    #
+                    # Ratio is 4.0 GiB/vCPU, within Autopilot's 6.5 cap (4 vCPU allows 26Gi).
                     cpu: "4"
-                    memory: "4Gi"
+                    memory: "16Gi"
                   limits:
                     cpu: "4"
-                    memory: "4Gi"
+                    memory: "16Gi"

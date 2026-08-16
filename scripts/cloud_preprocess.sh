@@ -2,7 +2,7 @@
 # Submit a spacecraft-preprocess RayJob to the GKE cluster and tail its logs.
 #
 # Usage:
-#   ./scripts/cloud_preprocess.sh [--mission MISSION] [--no-wait] [--delete-after]
+#   ./scripts/cloud_preprocess.sh [--mission MISSION] [--variant VARIANT] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -18,21 +18,26 @@
 #                   and 'null' yields 'null', neither of which pydantic coerces
 #                   to None. Pass a span longer than the mission instead
 #                   (e.g. 36500D), which is provably equivalent to None.
+#   VARIANT         Experiment variant (default: unset = None; see
+#                   docs/plans/020-experiment-variant-axis.md). Writes output
+#                   under {processed}/{mission}/{variant}/ instead of
+#                   {processed}/{mission}/, without touching raw input data.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
 #   export REGION=us-central1
 #   ./scripts/cloud_preprocess.sh --mission ESA-Mission1
 #
-#   # ESA-ADB replication (Plan 019 Stage B) — the paper's chronological
-#   # 50/50 halves, training on the full first half:
+#   # An ESA-Mission1 experiment arm, output-isolated via the variant axis
+#   # instead of a pseudo-mission — one copy of raw data serves every variant:
 #   TRAIN_FRACTION=0.5 TRAIN_LOOKBACK=36500D \
-#     ./scripts/cloud_preprocess.sh --mission ESA-Mission1-ADB \
+#     ./scripts/cloud_preprocess.sh --mission ESA-Mission1 --variant adb-24m \
 #       --channels channel_41,channel_42,channel_43,channel_44,channel_45,channel_46
 
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission1}"
+VARIANT="${VARIANT:-}"
 CHANNELS="${CHANNELS:-}"   # optional comma-separated list, e.g. S1000003,P1000003
 # Defaults mirror configs/cloud.yaml. Resolved here rather than in the YAML
 # because envsubst has no default-value syntax (same reason as CHANNELS_ARG).
@@ -44,6 +49,7 @@ DELETE_AFTER=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2";   shift 2 ;;
+    --variant)      VARIANT="$2";   shift 2 ;;
     --channels)     CHANNELS="$2";  shift 2 ;;
     --no-wait)      NO_WAIT=true;   shift ;;
     --delete-after) DELETE_AFTER=true; shift ;;
@@ -63,9 +69,9 @@ else
   CHANNELS_ARG=""
 fi
 
-export PROJECT_ID REGION MISSION CHANNELS_ARG TRAIN_FRACTION TRAIN_LOOKBACK
+export PROJECT_ID REGION MISSION VARIANT CHANNELS_ARG TRAIN_FRACTION TRAIN_LOOKBACK
 
-echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${CHANNELS:+, channels=${CHANNELS}})"
+echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${CHANNELS:+, channels=${CHANNELS}})"
 echo "    train_fraction=${TRAIN_FRACTION}  train_lookback=${TRAIN_LOOKBACK}"
 
 if kubectl get rayjob spacecraft-preprocess -n ray &>/dev/null; then
