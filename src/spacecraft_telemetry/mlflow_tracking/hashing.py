@@ -17,7 +17,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path
 
 
 def partition_hash(
@@ -25,6 +25,7 @@ def partition_hash(
     mission: str,
     channel: str,
     split: str,
+    variant: str | None = None,
 ) -> str:
     """Return a hex-digest fingerprint of a channel's Parquet partition.
 
@@ -37,6 +38,9 @@ def partition_hash(
         mission:            Mission ID, e.g. "ESA-Mission1".
         channel:            Channel ID, e.g. "channel_1".
         split:              Partition name, e.g. "train" or "test".
+        variant:            Experiment variant, e.g. "adb-24m". Defaults to
+                             None (today's layout, unchanged) — see
+                             core/paths.output_path.
 
     Returns:
         64-character lowercase hex string (SHA-256).
@@ -44,14 +48,11 @@ def partition_hash(
     Raises:
         ValueError: If the partition directory does not exist.
     """
-    # to_upath so gs:// URIs resolve in the cloud (plain pathlib mangles
+    # output_path so gs:// URIs resolve in the cloud (plain pathlib mangles
     # gs:// → gs:/ and reports the partition as missing).
-    part_dir = (
-        to_upath(processed_data_dir)
-        / mission
-        / split
-        / f"mission_id={mission}"
-        / f"channel_id={channel}"
+    part_dir = output_path(
+        processed_data_dir, mission, variant,
+        split, f"mission_id={mission}", f"channel_id={channel}",
     )
     if not part_dir.exists():
         raise ValueError(
@@ -71,6 +72,7 @@ def training_data_hash(
     processed_data_dir: Path | str,
     mission: str,
     channel: str,
+    variant: str | None = None,
 ) -> str:
     """Return a hex-digest fingerprint of the channel's train Parquet partition.
 
@@ -82,6 +84,7 @@ def training_data_hash(
         processed_data_dir: Root of preprocessed output (e.g. "data/processed").
         mission:            Mission ID, e.g. "ESA-Mission1".
         channel:            Channel ID, e.g. "channel_1".
+        variant:            Experiment variant. Defaults to None (unchanged).
 
     Returns:
         64-character lowercase hex string (SHA-256).
@@ -89,4 +92,4 @@ def training_data_hash(
     Raises:
         ValueError: If the train partition directory does not exist.
     """
-    return partition_hash(processed_data_dir, mission, channel, "train")
+    return partition_hash(processed_data_dir, mission, channel, "train", variant=variant)

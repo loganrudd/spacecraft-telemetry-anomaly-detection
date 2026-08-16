@@ -29,7 +29,7 @@ import pandas as pd
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -501,7 +501,8 @@ def score_channel(
     _eval_hash: str | None = None
     with suppress(Exception):
         _eval_hash = partition_hash(
-            settings.preprocess.processed_data_dir, mission, channel, "test"
+            settings.preprocess.processed_data_dir, mission, channel, "test",
+            variant=settings.variant,
         )
 
     # The CPU forward pass above can run tens of minutes for a large channel —
@@ -515,10 +516,10 @@ def score_channel(
         # column in the MLflow UI records which data produced these scores.
         log_input_dataset(
             source=str(
-                to_upath(settings.preprocess.processed_data_dir)
-                / mission / "test"
-                / f"mission_id={mission}"
-                / f"channel_id={channel}"
+                output_path(
+                    settings.preprocess.processed_data_dir, mission, settings.variant,
+                    "test", f"mission_id={mission}", f"channel_id={channel}",
+                )
             ),
             name=f"{mission}-{channel}-test",
             digest=_eval_hash,

@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path, to_upath
 from spacecraft_telemetry.features.definitions import _DEFAULT_WINDOWS, FEATURE_DEFINITIONS
 
 # ---------------------------------------------------------------------------
@@ -144,12 +144,9 @@ def _load_channel_series(
     Raises:
         FileNotFoundError: If the partition directory does not exist.
     """
-    partition_dir = (
-        to_upath(settings.preprocess.processed_data_dir)
-        / mission
-        / split
-        / f"mission_id={mission}"
-        / f"channel_id={channel}"
+    partition_dir = output_path(
+        settings.preprocess.processed_data_dir, mission, settings.variant,
+        split, f"mission_id={mission}", f"channel_id={channel}",
     )
     if not partition_dir.exists():
         raise FileNotFoundError(

@@ -21,7 +21,7 @@ from functools import lru_cache
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path, to_upath
 
 log = get_logger(__name__)
 
@@ -31,9 +31,10 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
 
     Lookup order:
     1) Processed metadata file:
-       {preprocess.processed_data_dir}/{mission}/metadata/channel_subsystems.json
+       {preprocess.processed_data_dir}/{mission}/[{variant}/]metadata/channel_subsystems.json
     2) CSV fallback (channels.csv) tried in BOTH the sample and raw dirs — in
-       cloud only the sample bucket exists; locally only raw has it.
+       cloud only the sample bucket exists; locally only raw has it. Raw/sample
+       reads never take the variant (input data is keyed on mission only).
 
     The processed metadata path keeps training/scoring metadata colocated with
     processed artifacts. CSV fallback is retained for backward compatibility.
@@ -44,21 +45,22 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
     All paths go through to_upath so gs:// URIs resolve in the cloud (plain
     pathlib mangles gs:// → gs:/ and cannot read GCS).
 
-    The mapping is cached per (processed_dir, sample_dir, raw_dir, mission)
-    tuple inside each process.  Under Ray fan-out each worker process caches its
-    own copy, so reads are bounded to one per file per process.
+    The mapping is cached per (processed_dir, sample_dir, raw_dir, mission,
+    variant) tuple inside each process.  Under Ray fan-out each worker process
+    caches its own copy, so reads are bounded to one per file per process.
     """
     return _load_cached(
         str(settings.preprocess.processed_data_dir),
         str(settings.data.sample_data_dir),
         str(settings.data.raw_data_dir),
         mission,
+        settings.variant,
     )
 
 
 @lru_cache(maxsize=32)
 def _load_cached(
-    processed_dir: str, sample_dir: str, raw_dir: str, mission: str
+    processed_dir: str, sample_dir: str, raw_dir: str, mission: str, variant: str | None
 ) -> dict[str, str]:
     # When running against an injected test split (_injected subdirectory), the
     # channel_subsystems.json lives in the nominal processed bucket, not under
@@ -73,8 +75,8 @@ def _load_cached(
         candidate_dirs.append(nominal)
 
     for _dir in candidate_dirs:
-        processed_map_path = (
-            to_upath(_dir) / mission / "metadata" / "channel_subsystems.json"
+        processed_map_path = output_path(
+            _dir, mission, variant, "metadata", "channel_subsystems.json"
         )
         if not processed_map_path.exists():
             continue

@@ -41,7 +41,7 @@ from typing import Any
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
-from spacecraft_telemetry.core.paths import absolutize_if_local, to_upath
+from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 
 log = get_logger(__name__)
 
@@ -86,11 +86,9 @@ def discover_channels(settings: Settings, mission: str) -> list[str]:
     Returns:
         Sorted list of channel ID strings.
     """
-    base = (
-        to_upath(settings.preprocess.processed_data_dir)
-        / mission
-        / "train"
-        / f"mission_id={mission}"
+    base = output_path(
+        settings.preprocess.processed_data_dir, mission, settings.variant,
+        "train", f"mission_id={mission}",
     )
     if not base.exists():
         return []
@@ -278,11 +276,12 @@ def score_all_channels(
     if tuned_configs:
         ch_to_sub = load_channel_subsystem_map(abs_settings, mission)
         if not ch_to_sub:
-            processed_map_path = (
-                to_upath(abs_settings.preprocess.processed_data_dir)
-                / mission
-                / "metadata"
-                / "channel_subsystems.json"
+            processed_map_path = output_path(
+                abs_settings.preprocess.processed_data_dir,
+                mission,
+                abs_settings.variant,
+                "metadata",
+                "channel_subsystems.json",
             )
             raw_map_path = to_upath(abs_settings.data.raw_data_dir) / mission / "channels.csv"
             raise ValueError(

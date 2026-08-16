@@ -27,7 +27,7 @@ import torch.nn as nn
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -137,7 +137,9 @@ def train_channel(
 
     _data_hash: str | None = None
     with suppress(Exception):
-        _data_hash = training_data_hash(settings.preprocess.processed_data_dir, mission, channel)
+        _data_hash = training_data_hash(
+            settings.preprocess.processed_data_dir, mission, channel, variant=settings.variant
+        )
 
     _exp = experiment_name(cfg.model_type, "training", mission)
     _tags = common_tags(
@@ -154,10 +156,10 @@ def train_channel(
         # column in the MLflow UI shows which data produced this model.
         log_input_dataset(
             source=str(
-                to_upath(settings.preprocess.processed_data_dir)
-                / mission / "train"
-                / f"mission_id={mission}"
-                / f"channel_id={channel}"
+                output_path(
+                    settings.preprocess.processed_data_dir, mission, settings.variant,
+                    "train", f"mission_id={mission}", f"channel_id={channel}",
+                )
             ),
             name=f"{mission}-{channel}-train",
             digest=_data_hash,
@@ -253,9 +255,9 @@ def train_channel(
         })
 
         # Log normalization params for this channel.
-        _norm_src = (
-            to_upath(settings.preprocess.processed_data_dir)
-            / mission / "normalization_params.json"
+        _norm_src = output_path(
+            settings.preprocess.processed_data_dir, mission, settings.variant,
+            "normalization_params.json",
         )
         _all_norm = json.loads(_norm_src.read_bytes())
         log_dict(_all_norm[channel], "normalization_params.json")
