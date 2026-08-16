@@ -415,7 +415,7 @@ def score_channel(
     # require_champion=False: scoring is a training-pipeline step, not serving;
     # we need to score a model before deciding whether to promote it.
     log.info("model.score.start", channel=channel, mission=mission, device=str(device))
-    name = registered_model_name(cfg.model_type, mission, channel)
+    name = registered_model_name(cfg.model_type, mission, channel, settings.variant)
     model, saved_window_size = load_model_for_scoring(
         name, device, settings.mlflow.tracking_uri, require_champion=False
     )
@@ -486,11 +486,12 @@ def score_channel(
     if parent_hpo_run_id is not None:
         _extra["tuned_from_run"] = parent_hpo_run_id
 
-    _exp = experiment_name(cfg.model_type, "scoring", mission)
+    _exp = experiment_name(cfg.model_type, "scoring", mission, settings.variant)
     _tags = common_tags(
         model_type=cfg.model_type,
         mission=mission,
         phase="scoring",
+        variant=settings.variant,
         channel=channel,
         subsystem=_subsystem,
         extra=_extra,

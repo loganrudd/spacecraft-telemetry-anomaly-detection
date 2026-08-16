@@ -29,6 +29,16 @@ class TestExperimentName:
         result = experiment_name("transformer", "training", "ESA-Mission1")
         assert result.startswith("transformer-")
 
+    def test_variant_default_is_none_and_unchanged(self) -> None:
+        assert experiment_name("telemanom", "training", "ESA-Mission1", None) == (
+            "telemanom-training-ESA-Mission1"
+        )
+
+    def test_variant_appended_when_set(self) -> None:
+        assert experiment_name("telemanom", "training", "ESA-Mission1", "adb-24m") == (
+            "telemanom-training-ESA-Mission1-adb-24m"
+        )
+
 
 class TestRegisteredModelName:
     def test_telemanom_per_channel(self) -> None:
@@ -44,6 +54,16 @@ class TestRegisteredModelName:
     def test_key_is_arbitrary_string(self) -> None:
         name = registered_model_name("telemanom", "ESA-Mission1", "some-group_42")
         assert "some-group_42" in name
+
+    def test_variant_default_is_none_and_unchanged(self) -> None:
+        assert registered_model_name("telemanom", "ESA-Mission1", "channel_1", None) == (
+            "telemanom-ESA-Mission1-channel_1"
+        )
+
+    def test_variant_inserted_before_key(self) -> None:
+        assert registered_model_name(
+            "telemanom", "ESA-Mission1", "channel_41", "adb-24m"
+        ) == "telemanom-ESA-Mission1-adb-24m-channel_41"
 
 
 class TestCommonTags:
@@ -110,3 +130,14 @@ class TestCommonTags:
         # extra merges after standard keys — extra wins in dict.update semantics;
         # document this so callers are aware.
         assert tags["model_type"] == "impostor"
+
+    def test_variant_omitted_by_default(self) -> None:
+        tags = common_tags(model_type="telemanom", mission="ESA-Mission1", phase="training")
+        assert "variant" not in tags
+
+    def test_variant_tag_kept_separate_from_mission_id(self) -> None:
+        tags = common_tags(
+            model_type="telemanom", mission="ESA-Mission1", phase="training", variant="adb-24m"
+        )
+        assert tags["variant"] == "adb-24m"
+        assert tags["mission_id"] == "ESA-Mission1"

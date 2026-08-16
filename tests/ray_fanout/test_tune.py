@@ -298,22 +298,31 @@ def test_run_all_sweeps_filters_and_runs(
 
 
 @pytest.mark.parametrize(
-    ("mission", "expected_space_name", "threshold_z_bounds"),
+    ("mission", "variant", "expected_space_name", "threshold_z_bounds"),
     [
-        ("ESA-Mission1", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
-        ("ESA-Mission1-ADB", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
-        ("ISS", "ISS_SEARCH_SPACE", (2.5, 5.0)),
-        ("ESA-Mission2", "SEARCH_SPACE", (2.5, 5.0)),
+        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        # A real ESA-Mission1 variant (mission unchanged, variant set) keeps
+        # the widened space — the selector is mission-keyed, not name-keyed.
+        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        # A legacy un-migrated ESA-Mission1-ADB* pseudo-mission is a DIFFERENT
+        # `mission` string entirely and correctly falls through to the default
+        # space — this is the plan 020 fix (was `mission.startswith(...)`, a
+        # pseudo-mission prefix test); migrate via plan 020 stage 020.5 to
+        # regain the widened space under mission=ESA-Mission1 + a variant.
+        ("ESA-Mission1-ADB", None, "SEARCH_SPACE", (2.5, 5.0)),
+        ("ISS", None, "ISS_SEARCH_SPACE", (2.5, 5.0)),
+        ("ESA-Mission2", None, "SEARCH_SPACE", (2.5, 5.0)),
     ],
 )
 def test_run_all_sweeps_selects_search_space_by_mission(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mission: str,
+    variant: str | None,
     expected_space_name: str,
     threshold_z_bounds: tuple[float, float],
 ) -> None:
-    """The search-space selector must route each mission to the right space.
+    """The search-space selector must route each (mission, variant) to the right space.
 
     The ISS row is the valuable half: ISS_SEARCH_SPACE = {**SEARCH_SPACE, ...},
     so the 2026-08-14 widening of the base SEARCH_SPACE for ESA-Mission1 would
@@ -331,6 +340,7 @@ def test_run_all_sweeps_selects_search_space_by_mission(
         update={
             "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
             "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+            "variant": variant,
         }
     )
 

@@ -969,17 +969,26 @@ class TestMlflowCli:
             }
         )
 
-        def make_version(name: str, ver: str) -> MagicMock:
+        def make_version(
+            name: str, ver: str, *, mission_id: str = "", channel_id: str = "",
+            variant: str | None = None,
+        ) -> MagicMock:
             mv = MagicMock()
             mv.name = name
             mv.version = ver
             mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            if variant:
+                mv.tags["variant"] = variant
             return mv
 
         channel_ids = ["channel_1", "channel_10", "channel_11"]
         mission = "ESA-Mission1"
         prefix = f"telemanom-{mission}-"
-        discovery_versions = [make_version(f"{prefix}{ch}", "1") for ch in channel_ids]
+        discovery_versions = [
+            make_version(f"{prefix}{ch}", "1", mission_id=mission, channel_id=ch)
+            for ch in channel_ids
+        ]
 
         with (
             patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
@@ -1007,6 +1016,163 @@ class TestMlflowCli:
         assert result.exit_code == 0, result.output
         assert f"Promoted      : {len(channel_ids)}/{len(channel_ids)}" in result.output
         assert mock_registry_client.set_registered_model_alias.call_count == len(channel_ids)
+
+    def test_mlflow_promote_all_excludes_pseudo_mission_arms(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission ESA-Mission1 (no --variant) must not sweep in ADB pseudo-mission models.
+
+        Regression test for the plan 020 registry hazard: `telemanom-ESA-Mission1-`
+        is a string prefix of `telemanom-ESA-Mission1-ADB-24m-channel_41`, so a
+        name-prefix-only discovery query incorrectly matches both. This must fail
+        against the pre-020 cli.py, which filtered on name prefix alone.
+        """
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        def make_version(name: str, ver: str, *, mission_id: str, channel_id: str) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            return mv
+
+        mission = "ESA-Mission1"
+        real_versions = [
+            make_version(
+                f"telemanom-{mission}-channel_1", "1", mission_id=mission, channel_id="channel_1"
+            ),
+        ]
+        # A legacy pseudo-mission arm: registered under mission="ESA-Mission1-ADB-24m",
+        # so its name shares the "telemanom-ESA-Mission1-" prefix but its mission_id
+        # tag reflects the pseudo-mission, not the real one.
+        pseudo_mission_versions = [
+            make_version(
+                "telemanom-ESA-Mission1-ADB-24m-channel_41", "1",
+                mission_id="ESA-Mission1-ADB-24m", channel_id="channel_41",
+            ),
+        ]
+        all_versions = real_versions + pseudo_mission_versions
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            # search_model_versions is mocked at the client level, so it can't
+            # actually apply the `tags.mission_id = ...` filter string cli.py
+            # sends — return everything and let _discover_registered_channels'
+            # Python-side tag filtering do the real work being tested here.
+            mock_discovery_client.search_model_versions.return_value = all_versions
+            mock_registry_client.search_model_versions.return_value = [make_version(
+                "", "1", mission_id="", channel_id="",
+            )]
+            mock_registry_client.set_registered_model_alias.return_value = None
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", mission],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Promoted      : 1/1" in result.output
+        promoted_names = [
+            call.args[0] for call in mock_registry_client.set_registered_model_alias.call_args_list
+        ]
+        assert "telemanom-ESA-Mission1-channel_1" in promoted_names
+        # If the mission_id tag filter were missing, channel_41 (from the
+        # pseudo-mission arm) would leak in and be promoted under this name.
+        assert "telemanom-ESA-Mission1-channel_41" not in promoted_names
+
+    def test_mlflow_promote_variant_discovers_only_that_variant(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission ESA-Mission1 --variant adb-24m discovers only that variant's models."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        def make_version(
+            name: str, ver: str, *, mission_id: str, channel_id: str,
+            variant: str | None = None,
+        ) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            if variant:
+                mv.tags["variant"] = variant
+            return mv
+
+        mission = "ESA-Mission1"
+        base_version = make_version(
+            f"telemanom-{mission}-channel_1", "1", mission_id=mission, channel_id="channel_1"
+        )
+        variant_version = make_version(
+            f"telemanom-{mission}-adb-24m-channel_41", "1",
+            mission_id=mission, channel_id="channel_41", variant="adb-24m",
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            mock_discovery_client.search_model_versions.return_value = [
+                base_version, variant_version,
+            ]
+            mock_registry_client.search_model_versions.return_value = [make_version(
+                "", "1", mission_id="", channel_id="",
+            )]
+            mock_registry_client.set_registered_model_alias.return_value = None
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", mission, "--variant", "adb-24m"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Promoted      : 1/1" in result.output
+        promoted_names = [
+            call.args[0] for call in mock_registry_client.set_registered_model_alias.call_args_list
+        ]
+        assert promoted_names == ["telemanom-ESA-Mission1-adb-24m-channel_41"]
+
+    def test_mlflow_promote_variant_requires_mission(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            main, ["--env=test", "mlflow", "promote", "--variant", "adb-24m"]
+        )
+        assert result.exit_code != 0
+        assert "--variant requires --mission" in result.output
 
     def test_mlflow_promote_all_no_registered_models_errors(
         self, runner: CliRunner, tmp_path: Path
@@ -1037,6 +1203,74 @@ class TestMlflowCli:
 
         assert result.exit_code != 0
         assert "No registered models found" in result.output
+
+    def test_mlflow_demote_all_excludes_pseudo_mission_arms(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission ESA-Mission1 (no --variant) must not demote ADB pseudo-mission models."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        def make_version(name: str, ver: str, *, mission_id: str, channel_id: str) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            return mv
+
+        mission = "ESA-Mission1"
+        all_versions = [
+            make_version(
+                f"telemanom-{mission}-channel_1", "1", mission_id=mission, channel_id="channel_1"
+            ),
+            make_version(
+                "telemanom-ESA-Mission1-ADB-24m-channel_41", "1",
+                mission_id="ESA-Mission1-ADB-24m", channel_id="channel_41",
+            ),
+        ]
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            mock_discovery_client.search_model_versions.return_value = all_versions
+            mock_registered_model = MagicMock()
+            mock_registered_model.aliases = {"champion": "1"}
+            mock_registry_client.get_registered_model.return_value = mock_registered_model
+            mock_registry_client.delete_registered_model_alias.return_value = None
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "demote", "--mission", mission],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Demoted       : 1/1" in result.output
+        demoted_names = [
+            call.args[0] for call in mock_registry_client.get_registered_model.call_args_list
+        ]
+        assert demoted_names == ["telemanom-ESA-Mission1-channel_1"]
+
+    def test_mlflow_demote_variant_requires_mission(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["--env=test", "mlflow", "demote", "--variant", "adb-24m"])
+        assert result.exit_code != 0
+        assert "--variant requires --mission" in result.output
 
 
 # ---------------------------------------------------------------------------

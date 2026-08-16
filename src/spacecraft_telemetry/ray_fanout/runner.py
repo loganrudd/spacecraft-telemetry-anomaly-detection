@@ -158,7 +158,7 @@ def _ensure_mlflow_experiments(settings: Settings, mission: str, phases: list[st
     with suppress(Exception):
         configure_mlflow(settings)
     for phase in phases:
-        name = experiment_name("telemanom", phase, mission)
+        name = experiment_name("telemanom", phase, mission, settings.variant)
         with suppress(Exception):
             mlflow.set_experiment(name)
             log.debug("mlflow.experiment.ensured", name=name)

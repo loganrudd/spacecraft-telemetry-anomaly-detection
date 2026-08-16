@@ -60,11 +60,12 @@ def log_drift_report(
     """
     configure_mlflow(settings)
 
-    exp = experiment_name("telemanom", "monitoring", mission)
+    exp = experiment_name("telemanom", "monitoring", mission, settings.variant)
     tags = common_tags(
         model_type="telemanom",
         mission=mission,
         phase="monitoring",
+        variant=settings.variant,
         channel=channel,
     )
 

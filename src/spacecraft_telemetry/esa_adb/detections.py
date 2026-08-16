@@ -325,7 +325,7 @@ def per_channel_detection_intervals(
         except Exception as exc:
             log.warning("esa_adb.detections.configure_mlflow_failed", error=str(exc))
         tracking_uri = settings.mlflow.tracking_uri
-        exp = experiment_name(settings.model.model_type, "scoring", mission)
+        exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
 
     result: dict[str, list[Interval]] = {}
     for channel in channels:

@@ -141,11 +141,12 @@ def train_channel(
             settings.preprocess.processed_data_dir, mission, channel, variant=settings.variant
         )
 
-    _exp = experiment_name(cfg.model_type, "training", mission)
+    _exp = experiment_name(cfg.model_type, "training", mission, settings.variant)
     _tags = common_tags(
         model_type=cfg.model_type,
         mission=mission,
         phase="training",
+        variant=settings.variant,
         channel=channel,
         subsystem=_subsystem,
         training_data_hash=_data_hash,
@@ -280,11 +281,17 @@ def train_channel(
                 "mission_id": mission,
                 "channel_id": channel,
             }
+            if settings.variant is not None:
+                # Lets promote/demote (cli.py) discover models by this tag
+                # instead of string-slicing the registered name — the name
+                # itself can't disambiguate "variant" from "channel" segments
+                # (see docs/plans/020-experiment-variant-axis.md registry hazard).
+                _vtags["variant"] = settings.variant
             if _data_hash is not None:
                 _vtags["training_data_hash"] = _data_hash
             register_pytorch_model(
                 model=model,
-                name=registered_model_name(cfg.model_type, mission, channel),
+                name=registered_model_name(cfg.model_type, mission, channel, settings.variant),
                 run_id=_run.info.run_id,
                 source_run_model_name=channel,
                 version_tags=_vtags,

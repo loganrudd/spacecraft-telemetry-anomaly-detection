@@ -66,10 +66,12 @@ from typing import Any
 import numpy as np
 import ray
 from ray import tune
+from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
 )
@@ -234,7 +236,9 @@ def _prepare_channel_data(
     prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]] = {}
     scoring_run_ids: dict[str, str | None] = {}
 
-    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
+    _scoring_exp = _mlflow_experiment_name(
+        settings.model.model_type, "scoring", mission, settings.variant
+    )
 
     for channel in channels:
         # Find the most recent scoring run for this channel in MLflow.
@@ -344,7 +348,9 @@ def _load_nominal_errors(
     expected the first time a mission's HPO runs after this penalty shipped;
     a baseline ``ray score --mission <mission>`` (no --injected) backfills it.
     """
-    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
+    _scoring_exp = _mlflow_experiment_name(
+        settings.model.model_type, "scoring", mission, settings.variant
+    )
     out: dict[str, np.ndarray[Any, Any]] = {}
     missing: list[str] = []
 
@@ -627,7 +633,7 @@ def run_hpo_sweep(
         )
 
     cfg = settings.model
-    _exp_name = _mlflow_experiment_name(cfg.model_type, "hpo", mission)
+    _exp_name = _mlflow_experiment_name(cfg.model_type, "hpo", mission, settings.variant)
 
     log.info(
         "tune.sweep.start",
@@ -683,6 +689,7 @@ def run_hpo_sweep(
                         "model_type": cfg.model_type,
                         "mission_id": mission,
                         "phase": "hpo",
+                        **({"variant": settings.variant} if settings.variant else {}),
                     },
                     save_artifact=False,
                 ),
@@ -835,7 +842,7 @@ def run_all_sweeps(
     settings: Settings,
     mission: str,
     channels: list[str],
-) -> Path:
+) -> Path | UPath:
     """Group channels by subsystem, run HPO for each, write tuned_configs.json.
 
     Subsystems where no channel has an errors.npy artifact are skipped. This
@@ -868,7 +875,9 @@ def run_all_sweeps(
         by_subsystem.setdefault(sub, []).append(ch)
 
     # Retain only subsystems that have ≥1 scored channel (scoring run in MLflow).
-    _scoring_exp = _mlflow_experiment_name(settings.model.model_type, "scoring", mission)
+    _scoring_exp = _mlflow_experiment_name(
+        settings.model.model_type, "scoring", mission, settings.variant
+    )
     eligible: dict[str, list[str]] = {}
     for sub, sub_channels in by_subsystem.items():
         scored = [
@@ -887,7 +896,9 @@ def run_all_sweeps(
                 reason="no scoring run found in MLflow",
             )
 
-    output = Path(settings.model.artifacts_dir) / mission / "tuned_configs.json"
+    output = output_path(
+        settings.model.artifacts_dir, mission, settings.variant, "tuned_configs.json"
+    )
 
     if not eligible:
         log.warning("tune.all_sweeps.no_eligible_subsystems", mission=mission)
@@ -898,13 +909,26 @@ def run_all_sweeps(
     # warm-start priming requirement) and threshold_min_anomaly_len capped
     # (short injected faults cannot sustain long consecutive-exceedance runs).
     # See the comments on _ISS_MAX_THRESHOLD_WINDOW / ISS_SEARCH_SPACE.
-    # Every ESA-Mission1 mission (production AND the ESA-Mission1-ADB* ablation
-    # arms, which share the prefix) uses the widened space so the optimum can be
-    # interior on threshold_z / min_error_value — see ESA_M1_SEARCH_SPACE.
-    # Other ESA missions keep the default space.
+    # Every ESA-Mission1 sweep (production AND any variant — the plan-019
+    # ablation arms included, once expressed as mission=ESA-Mission1 with a
+    # variant slug instead of the old ESA-Mission1-ADB* pseudo-mission) uses
+    # the widened space so the optimum can be interior on threshold_z /
+    # min_error_value — see ESA_M1_SEARCH_SPACE. Other ESA missions keep the
+    # default space.
+    #
+    # This used to be `mission.startswith("ESA-Mission1")` — a pseudo-mission
+    # prefix test that is exactly the smell docs/plans/020-experiment-variant-axis.md
+    # removes. Exact equality means the selector no longer needs to know
+    # anything about variant naming: production and every ESA-Mission1
+    # variant share the real mission id, while a legacy un-migrated
+    # ESA-Mission1-ADB* pseudo-mission (a different `mission` string
+    # entirely) correctly falls through to the default space — migrate it
+    # via plan 020 stage 020.5 to regain the widened space under its real
+    # identity. The ISS branch was already genuinely mission-keyed and is
+    # unchanged.
     if mission.startswith("ISS"):
         _space = ISS_SEARCH_SPACE
-    elif mission.startswith("ESA-Mission1"):
+    elif mission == "ESA-Mission1":
         _space = ESA_M1_SEARCH_SPACE
     else:
         _space = SEARCH_SPACE
@@ -913,9 +937,10 @@ def run_all_sweeps(
             "tune.all_sweeps.iss_search_space",
             max_threshold_window=_ISS_MAX_THRESHOLD_WINDOW,
         )
-    elif mission.startswith("ESA-Mission1"):
+    elif mission == "ESA-Mission1":
         log.info(
             "tune.all_sweeps.esa_m1_search_space",
+            variant=settings.variant,
             threshold_z_max=8.0,
             min_error_value_max=0.6,
         )
@@ -968,7 +993,9 @@ def run_all_sweeps(
     # here must not abort the pipeline.
     with suppress(Exception):
         _configure_mlflow(settings)
-        _hpo_exp = _mlflow_experiment_name(settings.model.model_type, "hpo", mission)
+        _hpo_exp = _mlflow_experiment_name(
+            settings.model.model_type, "hpo", mission, settings.variant
+        )
         with _open_run(
             experiment=_hpo_exp,
             run_name="tuned-configs-summary",
@@ -976,6 +1003,7 @@ def run_all_sweeps(
                 "model_type": settings.model.model_type,
                 "mission_id": mission,
                 "phase": "hpo",
+                **({"variant": settings.variant} if settings.variant else {}),
             },
         ):
             _log_artifact_bytes(output.read_bytes(), "tuned_configs.json")
@@ -985,7 +1013,7 @@ def run_all_sweeps(
 
 def write_tuned_configs(
     results: dict[str, dict[str, Any]],
-    output_path: Path,
+    output_path: Path | UPath,
 ) -> None:
     """Write subsystem → config mapping as JSON.
 
