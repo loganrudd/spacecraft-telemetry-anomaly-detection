@@ -684,6 +684,7 @@ def _discover_registered_channels(mission: str, variant: str | None) -> list[str
     """
     from mlflow.tracking.client import MlflowClient
 
+    log = get_logger(__name__)
     prefix = f"telemanom-{mission}-"
     client = MlflowClient()
     # The tags.mission_id server-side filter is the primary defense; it is
@@ -702,9 +703,26 @@ def _discover_registered_channels(mission: str, variant: str | None) -> list[str
         v for v in all_versions
         if _version_tag(v, "mission_id") == mission and _version_tag(v, "variant") == variant
     ]
-    return sorted(
-        {(v.tags or {}).get("channel_id") or v.name.removeprefix(prefix) for v in matching}
-    )
+
+    channel_ids: set[str] = set()
+    for v in matching:
+        channel_id = _version_tag(v, "channel_id")
+        if channel_id is None:
+            # No name-derived fallback: matching is already filtered to
+            # mission_id == mission, and training.py sets mission_id and
+            # channel_id in the same dict literal, so a version with one but
+            # not the other should not exist. If it does, deriving a channel
+            # from the name via removeprefix(prefix) would be wrong under a
+            # variant — it would yield "{variant}-{channel}" instead of
+            # "{channel}", which registered_model_name() would then re-expand
+            # into a name that does not exist. Log and skip instead.
+            log.warning(
+                "cli.discover_registered_channels.missing_channel_id_tag",
+                name=v.name, mission=mission, variant=variant,
+            )
+            continue
+        channel_ids.add(channel_id)
+    return sorted(channel_ids)
 
 
 def _resolve_ray_channels(
@@ -1137,30 +1155,30 @@ def ray_tune(
         )
 
         if subsystem is None:
-            output_path = run_all_sweeps(tune_settings, mission, channel_list)
+            tuned_configs_path = run_all_sweeps(tune_settings, mission, channel_list)
             click.echo(f"Mission       : {mission}")
             click.echo(f"Channels      : {len(channel_list)}")
             click.echo("Subsystems    : all")
             click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
-            click.echo(f"Output        : {output_path}")
+            click.echo(f"Output        : {tuned_configs_path}")
             return
 
         subsystem_channels = _filter_channels_by_subsystem(
             tune_settings, mission, channel_list, subsystem
         )
 
-        from spacecraft_telemetry.core.paths import output_path as _compose_output_path
+        from spacecraft_telemetry.core.paths import output_path
 
         best = run_hpo_sweep(subsystem, subsystem_channels, tune_settings, mission)
-        output_path = _compose_output_path(
+        tuned_configs_path = output_path(
             tune_settings.model.artifacts_dir, mission, tune_settings.variant,
             "tuned_configs.json",
         )
 
         existing: dict[str, dict[str, Any]] = {}
-        if output_path.exists():
+        if tuned_configs_path.exists():
             try:
-                loaded = json.loads(output_path.read_text())
+                loaded = json.loads(tuned_configs_path.read_text())
                 if isinstance(loaded, dict):
                     existing = {
                         str(k): v for k, v in loaded.items() if isinstance(v, dict)
@@ -1171,7 +1189,9 @@ def ray_tune(
                         "Existing tuned config file contains invalid JSON. "
                         "Fix/remove the file, or re-run with --overwrite-existing."
                     ) from err
-                log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
+                log.warning(
+                    "ray.tune.output.invalid_json.overwriting", path=str(tuned_configs_path)
+                )
 
         entry: dict[str, Any] = {
             **best.get("config", {}),
@@ -1181,14 +1201,14 @@ def ray_tune(
             },
         }
         existing[subsystem] = entry
-        write_tuned_configs(existing, output_path)
+        write_tuned_configs(existing, tuned_configs_path)
 
     click.echo(f"Mission       : {mission}")
     click.echo(f"Channels      : {len(subsystem_channels)}")
     click.echo(f"Subsystem     : {subsystem}")
     click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
     click.echo(f"Best config   : {best.get('config', best)}")
-    click.echo(f"Output        : {output_path}")
+    click.echo(f"Output        : {tuned_configs_path}")
 
 
 main.add_command(ray_group, name="ray")

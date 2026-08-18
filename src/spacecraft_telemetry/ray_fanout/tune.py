@@ -1013,7 +1013,7 @@ def run_all_sweeps(
 
 def write_tuned_configs(
     results: dict[str, dict[str, Any]],
-    output_path: Path | UPath,
+    destination: Path | UPath,
 ) -> None:
     """Write subsystem → config mapping as JSON.
 
@@ -1036,12 +1036,14 @@ def write_tuned_configs(
 
     Args:
         results:     Dict keyed by subsystem name → entry dict (params + _meta).
-        output_path: Destination path for tuned_configs.json.
+        destination: Destination path for tuned_configs.json. Named
+            ``destination`` rather than ``output_path`` so it doesn't shadow
+            the module-level core.paths.output_path() helper imported above.
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(results, indent=2))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(results, indent=2))
     log.info(
         "tune.configs.written",
-        path=str(output_path),
+        path=str(destination),
         n_subsystems=len(results),
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -863,8 +864,55 @@ class TestRayScoreCommand:
 
 
 # ---------------------------------------------------------------------------
-# mlflow group
+# _discover_registered_channels (unit-level, no CLI invocation)
 # ---------------------------------------------------------------------------
+
+
+class TestDiscoverRegisteredChannels:
+    """docs/reviews/020-experiment-variant-axis.md item C4: the previous
+    fallback (`v.name.removeprefix(prefix)`) is dead in the common case
+    (matching is already filtered to mission_id == mission, and
+    model/training.py sets mission_id and channel_id together) and WRONG in
+    the one case it could fire under a variant, where removeprefix leaves
+    the variant slug glued to the front of the channel id. Replaced with a
+    log-and-skip; these tests pin that a version missing the channel_id tag
+    is dropped, not fabricated into a bad channel id.
+    """
+
+    @staticmethod
+    def _make_version(name: str, *, mission_id: str, variant: str | None = None) -> Any:
+        mv = MagicMock()
+        mv.name = name
+        mv.tags = {"mission_id": mission_id}
+        if variant:
+            mv.tags["variant"] = variant
+        return mv
+
+    def test_missing_channel_id_tag_is_skipped_not_fabricated(self) -> None:
+        from spacecraft_telemetry.cli import _discover_registered_channels
+
+        mission, variant = "ESA-Mission1", "adb-24m"
+        # No channel_id tag. Under the old fallback,
+        # "telemanom-ESA-Mission1-adb-24m-channel_41".removeprefix(
+        # "telemanom-ESA-Mission1-") would wrongly yield "adb-24m-channel_41"
+        # (the variant slug glued to the channel id) instead of being skipped.
+        untagged = self._make_version(
+            f"telemanom-{mission}-{variant}-channel_41", mission_id=mission, variant=variant
+        )
+        tagged = self._make_version(
+            f"telemanom-{mission}-{variant}-channel_1", mission_id=mission, variant=variant
+        )
+        tagged.tags["channel_id"] = "channel_1"
+
+        with patch("mlflow.tracking.client.MlflowClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.return_value = [untagged, tagged]
+
+            result = _discover_registered_channels(mission, variant)
+
+        assert result == ["channel_1"]
+        assert "adb-24m-channel_41" not in result
 
 
 class TestMlflowCli:
