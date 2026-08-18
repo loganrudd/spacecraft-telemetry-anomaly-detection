@@ -5,6 +5,9 @@
 #   REGION       GCP region (e.g. us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
 #   MISSION      Mission name (e.g. ESA-Mission2)
+#   VARIANT_SEG  Optional "/{variant}" path segment (empty when VARIANT is
+#                unset), resolved by cloud_tune.sh — envsubst has no
+#                conditional-expansion syntax of its own.
 #   PROCESSED_DATA_DIR  Base dir for the hpo_portion split. cloud_tune.sh sets the
 #                nominal bucket by default, or the _injected dir when INJECTED=1.
 #   CHANNELS_ARG Channel selector. Nominal: --channels-from <bucket>/channels.txt;
@@ -35,8 +38,8 @@ spec:
     --mission ${MISSION}
     ${CHANNELS_ARG}
     && python -c "import gcsfs;
-    gcsfs.GCSFileSystem().put(\"models/${MISSION}/tuned_configs.json\",
-    \"gs://${PROJECT_ID}-artifacts/${MISSION}/tuned_configs.json\")"'
+    gcsfs.GCSFileSystem().put(\"models/${MISSION}${VARIANT_SEG}/tuned_configs.json\",
+    \"gs://${PROJECT_ID}-artifacts/${MISSION}${VARIANT_SEG}/tuned_configs.json\")"'
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
