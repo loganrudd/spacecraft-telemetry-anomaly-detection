@@ -1303,6 +1303,13 @@ def mlflow_promote(
 
     if variant is not None and mission is None:
         raise click.ClickException("--variant requires --mission.")
+    # Fall back to SPACECRAFT_VARIANT when --variant isn't given explicitly.
+    # Without this, a train -> score -> tune session run under an exported
+    # SPACECRAFT_VARIANT (the pattern scripts/cloud_*.sh's docs encourage)
+    # silently promotes/demotes the BASE production models on this step,
+    # since --variant is otherwise the only source of scope here.
+    if variant is None:
+        variant = settings.variant
 
     # Resolve channel list from --channels, --channels-from, or registry discovery.
     channel_list: list[str] | None = None
@@ -1361,8 +1368,11 @@ def mlflow_promote(
                 failed.append((channel, str(exc)))
 
         click.echo(f"Mission       : {mission}")
-        if variant:
-            click.echo(f"Variant       : {variant}")
+        # Printed unconditionally (not only "if variant") — this command
+        # mutates registry aliases, and the resolved scope (which may have
+        # come from SPACECRAFT_VARIANT rather than an explicit flag) must be
+        # visible in the output of a command that can move @champion.
+        click.echo(f"Variant       : {variant if variant else '(none)'}")
         if subsystem:
             click.echo(f"Subsystem     : {subsystem}")
         click.echo(f"Promoted      : {ok}/{len(channel_list)}")
@@ -1466,6 +1476,13 @@ def mlflow_demote(
         raise click.ClickException("--channels and --channels-from are mutually exclusive.")
     if variant is not None and mission is None:
         raise click.ClickException("--variant requires --mission.")
+    # Fall back to SPACECRAFT_VARIANT when --variant isn't given explicitly —
+    # see the matching comment in mlflow_promote. Demote is the more
+    # destructive of the two commands (it clears @champion aliases), so
+    # resolving scope silently from settings.variant matters at least as much
+    # here.
+    if variant is None:
+        variant = settings.variant
 
     channel_list: list[str] | None = None
     if channels is not None:
@@ -1508,8 +1525,7 @@ def mlflow_demote(
                 absent += 1
 
         click.echo(f"Mission       : {mission}")
-        if variant:
-            click.echo(f"Variant       : {variant}")
+        click.echo(f"Variant       : {variant if variant else '(none)'}")
         if subsystem:
             click.echo(f"Subsystem     : {subsystem}")
         click.echo(f"Demoted       : {removed}/{len(channel_list)} "

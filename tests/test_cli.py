@@ -1265,6 +1265,163 @@ class TestMlflowCli:
         assert result.exit_code != 0
         assert "--variant requires --mission" in result.output
 
+    def test_mlflow_promote_resolves_variant_from_settings_when_flag_absent(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A --mission-only invocation must scope to settings.variant (e.g.
+        from an exported SPACECRAFT_VARIANT) rather than silently falling
+        through to the base production models — the hazard docs/reviews/
+        020-experiment-variant-axis.md item A4 exists to close: a train ->
+        score -> tune session run under SPACECRAFT_VARIANT would otherwise
+        promote base models at the promote step.
+        """
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "variant": "adb-24m",
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                ),
+            }
+        )
+
+        def make_version(
+            name: str, ver: str, *, mission_id: str, channel_id: str,
+            variant: str | None = None,
+        ) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            if variant:
+                mv.tags["variant"] = variant
+            return mv
+
+        mission = "ESA-Mission1"
+        base_version = make_version(
+            f"telemanom-{mission}-channel_1", "1", mission_id=mission, channel_id="channel_1"
+        )
+        variant_version = make_version(
+            f"telemanom-{mission}-adb-24m-channel_41", "1",
+            mission_id=mission, channel_id="channel_41", variant="adb-24m",
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            mock_discovery_client.search_model_versions.return_value = [
+                base_version, variant_version,
+            ]
+            mock_registry_client.search_model_versions.return_value = [make_version(
+                "", "1", mission_id="", channel_id="",
+            )]
+            mock_registry_client.set_registered_model_alias.return_value = None
+
+            # No --variant flag — must resolve from settings.variant.
+            result = runner.invoke(
+                main, ["--env=test", "mlflow", "promote", "--mission", mission],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Variant       : adb-24m" in result.output
+        promoted_names = [
+            call.args[0] for call in mock_registry_client.set_registered_model_alias.call_args_list
+        ]
+        assert promoted_names == ["telemanom-ESA-Mission1-adb-24m-channel_41"]
+
+    def test_mlflow_promote_explicit_variant_overrides_settings(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """An explicit --variant flag wins over settings.variant.
+
+        Uses two distinct non-empty variants (rather than --variant "" to
+        mean "override back to base") because "" and settings.variant=None
+        are not the same thing to _discover_registered_channels: an
+        untagged model's variant tag resolves to None (see _version_tag's
+        falsy-to-None normalization), which "" would not equal. That
+        asymmetry is a separate, narrower question from what this test — the
+        explicit-flag-wins precedence — is checking.
+        """
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "variant": "adb-24m",
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                ),
+            }
+        )
+
+        def make_version(
+            name: str, ver: str, *, mission_id: str, channel_id: str,
+            variant: str | None = None,
+        ) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            if variant:
+                mv.tags["variant"] = variant
+            return mv
+
+        mission = "ESA-Mission1"
+        env_variant_version = make_version(
+            f"telemanom-{mission}-adb-24m-channel_41", "1",
+            mission_id=mission, channel_id="channel_41", variant="adb-24m",
+        )
+        flag_variant_version = make_version(
+            f"telemanom-{mission}-other-arm-channel_42", "1",
+            mission_id=mission, channel_id="channel_42", variant="other-arm",
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            mock_discovery_client.search_model_versions.return_value = [
+                env_variant_version, flag_variant_version,
+            ]
+            mock_registry_client.search_model_versions.return_value = [make_version(
+                "", "1", mission_id="", channel_id="",
+            )]
+            mock_registry_client.set_registered_model_alias.return_value = None
+
+            # settings.variant is "adb-24m"; --variant explicitly says
+            # "other-arm" and must win.
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", mission,
+                 "--variant", "other-arm"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Variant       : other-arm" in result.output
+        promoted_names = [
+            call.args[0] for call in mock_registry_client.set_registered_model_alias.call_args_list
+        ]
+        assert promoted_names == ["telemanom-ESA-Mission1-other-arm-channel_42"]
+
     def test_mlflow_promote_all_no_registered_models_errors(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
