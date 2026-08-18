@@ -55,3 +55,55 @@ def test_build_model_forward_shape() -> None:
     model = build_model(cfg)
     x = torch.zeros(3, 10, 1)
     assert model(x).shape == (3, 1)
+
+
+# ---------------------------------------------------------------------------
+# Multivariate (docs/plans/021-multivariate-telemanom.md)
+# ---------------------------------------------------------------------------
+
+
+def test_n_channels_default_matches_univariate() -> None:
+    """n_channels=1 (the default) is the pre-021 architecture exactly."""
+    m1 = TelemanomLSTM(hidden_dim=16, num_layers=2)
+    m2 = TelemanomLSTM(hidden_dim=16, num_layers=2, n_channels=1)
+    assert m1.lstm.input_size == m2.lstm.input_size == 1
+    assert m1.fc.out_features == m2.fc.out_features == 1
+
+
+def test_forward_shape_multivariate() -> None:
+    model = TelemanomLSTM(hidden_dim=16, num_layers=2, n_channels=6)
+    x = torch.zeros(4, 250, 6)
+    out = model(x)
+    assert out.shape == (4, 6)
+
+
+def test_param_count_scales_with_n_channels() -> None:
+    """Only input_size and the output Linear widen with C — hidden_dim is fixed,
+    so growth is linear in C via the LSTM's first-layer input weights + fc."""
+    uni = TelemanomLSTM(hidden_dim=80, num_layers=2)
+    multi = TelemanomLSTM(hidden_dim=80, num_layers=2, n_channels=6)
+    n_uni = sum(p.numel() for p in uni.parameters())
+    n_multi = sum(p.numel() for p in multi.parameters())
+    assert n_multi > n_uni
+    # hidden_dim/num_layers are Hundman-locked (.claude/rules/pytorch.md) —
+    # the multivariate model must not silently drift into a bigger LSTM.
+    assert multi.hidden_dim == uni.hidden_dim == 80
+    assert multi.num_layers == uni.num_layers == 2
+
+
+def test_build_model_derives_n_channels_from_input_channels() -> None:
+    cfg = ModelConfig(
+        hidden_dim=16, num_layers=1,
+        input_channels=["channel_41", "channel_42", "channel_43"],
+        target_channels=["channel_41", "channel_42", "channel_43"],
+    )
+    model = build_model(cfg)
+    assert model.n_channels == 3
+    x = torch.zeros(2, 10, 3)
+    assert model(x).shape == (2, 3)
+
+
+def test_build_model_input_channels_none_is_univariate() -> None:
+    cfg = ModelConfig(hidden_dim=16, num_layers=1)
+    model = build_model(cfg)
+    assert model.n_channels == 1

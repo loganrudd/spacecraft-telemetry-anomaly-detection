@@ -32,6 +32,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
     experiment_name,
+    group_partition_hash,
     log_dict,
     log_input_dataset,
     log_metrics_final,
@@ -92,6 +93,12 @@ def train_channel(
 
     device = resolve_device(settings.model.device)
     cfg = settings.model
+    # Multivariate (docs/plans/021-multivariate-telemanom.md): None (default)
+    # means `channel` is a real channel_id and the group is just [channel] —
+    # byte-identical to pre-021. A non-None input_channels makes `channel` the
+    # model's registry/experiment key (e.g. a subsystem name).
+    _is_multivariate = cfg.input_channels is not None
+    _channel_group = list(cfg.input_channels) if cfg.input_channels else [channel]
 
     # configure_mlflow mutates process-global state; guard so a misconfigured
     # tracking URI never aborts the training loop (open_run is also guarded).
@@ -102,6 +109,7 @@ def train_channel(
         "model.train.start",
         mission=mission,
         channel=channel,
+        n_channels=len(_channel_group),
         device=str(device),
         epochs=cfg.epochs,
         hidden_dim=cfg.hidden_dim,
@@ -131,15 +139,24 @@ def train_channel(
 
     # Subsystem lookup — best-effort metadata; never breaks training on failure.
     # load_channel_subsystem_map is in core.metadata (no ray_fanout dep).
-    _subsystem: str | None = None
-    with suppress(Exception):
-        _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    # Multivariate: `channel` already IS the subsystem key (021.4 fans out per
+    # subsystem), so there is nothing to look up.
+    _subsystem: str | None = channel if _is_multivariate else None
+    if not _is_multivariate:
+        with suppress(Exception):
+            _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
 
     _data_hash: str | None = None
     with suppress(Exception):
-        _data_hash = training_data_hash(
-            settings.preprocess.processed_data_dir, mission, channel, variant=settings.variant
-        )
+        if _is_multivariate:
+            _data_hash = group_partition_hash(
+                settings.preprocess.processed_data_dir, mission, _channel_group, "train",
+                variant=settings.variant,
+            )
+        else:
+            _data_hash = training_data_hash(
+                settings.preprocess.processed_data_dir, mission, channel, variant=settings.variant
+            )
 
     _exp = experiment_name(cfg.model_type, "training", mission, settings.variant)
     _tags = common_tags(
@@ -147,21 +164,38 @@ def train_channel(
         mission=mission,
         phase="training",
         variant=settings.variant,
-        channel=channel,
+        # A multivariate run's `channel` is a subsystem key, not a real
+        # channel_id — the channel_id tag stays reserved for the univariate
+        # meaning consumers (cli.py promote/demote discovery) rely on.
+        channel=None if _is_multivariate else channel,
         subsystem=_subsystem,
         training_data_hash=_data_hash,
+        extra={"channels": ",".join(_channel_group)} if _is_multivariate else None,
     )
 
     with open_run(experiment=_exp, run_name=channel, tags=_tags) as _run:
-        # Log the train partition as the run's input dataset so the Dataset
-        # column in the MLflow UI shows which data produced this model.
-        log_input_dataset(
-            source=str(
+        # Log the train partition(s) as the run's input dataset so the
+        # Dataset column in the MLflow UI shows which data produced this
+        # model. Multivariate: one source string per channel in the group.
+        if _is_multivariate:
+            _train_source = "; ".join(
+                str(
+                    output_path(
+                        settings.preprocess.processed_data_dir, mission, settings.variant,
+                        "train", f"mission_id={mission}", f"channel_id={ch}",
+                    )
+                )
+                for ch in _channel_group
+            )
+        else:
+            _train_source = str(
                 output_path(
                     settings.preprocess.processed_data_dir, mission, settings.variant,
                     "train", f"mission_id={mission}", f"channel_id={channel}",
                 )
-            ),
+            )
+        log_input_dataset(
+            source=_train_source,
             name=f"{mission}-{channel}-train",
             digest=_data_hash,
             context="training",
@@ -255,13 +289,22 @@ def train_channel(
             "epochs_run": len(train_losses),
         })
 
-        # Log normalization params for this channel.
+        # Log normalization params. Each channel keeps its own z-score (never
+        # group-wide — see .claude/rules/pytorch.md and the Design section of
+        # docs/plans/021-multivariate-telemanom.md), so a multivariate run
+        # logs the {channel_id: {mean, std}} subset for every channel in the
+        # group instead of one channel's {mean, std}.
         _norm_src = output_path(
             settings.preprocess.processed_data_dir, mission, settings.variant,
             "normalization_params.json",
         )
         _all_norm = json.loads(_norm_src.read_bytes())
-        log_dict(_all_norm[channel], "normalization_params.json")
+        if _is_multivariate:
+            log_dict(
+                {ch: _all_norm[ch] for ch in _channel_group}, "normalization_params.json"
+            )
+        else:
+            log_dict(_all_norm[channel], "normalization_params.json")
 
         # Log per-epoch loss history.
         log_dict(
@@ -279,8 +322,17 @@ def train_channel(
             _vtags: dict[str, str] = {
                 "window_size": str(cfg.window_size),
                 "mission_id": mission,
-                "channel_id": channel,
             }
+            if _is_multivariate:
+                # No real channel_id for a multivariate model — cli.py
+                # promote/demote discovery (docs/reviews/020...) filters on
+                # that tag for the univariate registry, and a fabricated
+                # value here would falsely enrol this version in it. Record
+                # the group explicitly instead; see docs/plans/021.
+                _vtags["subsystem_id"] = channel
+                _vtags["channels"] = ",".join(_channel_group)
+            else:
+                _vtags["channel_id"] = channel
             if settings.variant is not None:
                 # Lets promote/demote (cli.py) discover models by this tag
                 # instead of string-slicing the registered name — the name

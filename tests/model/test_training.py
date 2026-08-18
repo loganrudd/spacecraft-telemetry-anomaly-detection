@@ -337,6 +337,81 @@ def test_train_channel_subsystem_tag_with_metadata(
 
 
 @pytest.mark.slow
+def test_train_channel_multivariate(
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """A multivariate group trains a joint model and tags it distinctly from
+    a univariate one — no channel_id (not a real channel_id), subsystem_id
+    and the ordered channels list instead. See docs/plans/021."""
+    import json as _json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import (
+        experiment_name,
+        registered_model_name,
+    )
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    window_size = 10
+    n = 40
+    channels = ["channel_41", "channel_42"]
+    for i, ch in enumerate(channels):
+        _write_const_parquet(
+            processed_dir, mission, ch, n=n, window_size=window_size, value=float(i)
+        )
+
+    norm_file = processed_dir / mission / "normalization_params.json"
+    norm_file.parent.mkdir(parents=True, exist_ok=True)
+    norm_file.write_text(_json.dumps({ch: {"mean": 0.0, "std": 1.0} for ch in channels}))
+
+    settings = _override_settings(
+        load_settings("test").model_copy(
+            update={"mlflow": load_settings("test").mlflow.model_copy(
+                update={"tracking_uri": mlflow_uri}
+            )}
+        ),
+        processed_dir=processed_dir,
+        artifacts_dir=tmp_path / "models",
+        model_overrides={
+            "window_size": window_size,
+            "input_channels": channels,
+            "target_channels": channels,
+            "hidden_dim": 4,
+            "batch_size": 4,
+        },
+    )
+
+    subsystem_key = "subsystem_1"
+    result = train_channel(settings, mission, subsystem_key)
+    assert isinstance(result, TrainingResult)
+
+    client = mlflow.tracking.MlflowClient()
+    exp_name = experiment_name(settings.model.model_type, "training", mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert "channel_id" not in tags
+    assert tags.get("subsystem") == subsystem_key
+    assert tags.get("channels") == ",".join(channels)
+
+    model_name = registered_model_name(settings.model.model_type, mission, subsystem_key)
+    versions = list(client.search_model_versions(f"name='{model_name}'"))
+    assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
+    mv = versions[0]
+    assert mv.tags.get("subsystem_id") == subsystem_key
+    assert mv.tags.get("channels") == ",".join(channels)
+    assert "channel_id" not in mv.tags
+
+    artifacts = client.list_artifacts(runs[0].info.run_id)
+    artifact_names = {a.path for a in artifacts}
+    assert "normalization_params.json" in artifact_names
+
+
+@pytest.mark.slow
 def test_train_channel_survives_broken_mlflow_uri(
     tiny_series_parquet: SeriesParquetFixture,
     tmp_path: Path,
