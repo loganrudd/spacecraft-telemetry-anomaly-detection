@@ -13,6 +13,7 @@ Priority (highest → lowest):
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +39,15 @@ def _coerce_none_sentinel(v: object) -> object:
     if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
         return None
     return v
+
+
+# docs/plans/020-experiment-variant-axis.md Open Question 1 answered "flat,
+# kebab-case" — it survives both GCS paths (core/paths.py output_path()) and
+# MLflow model/experiment names (mlflow_tracking/conventions.py), which
+# disallow some characters. Enforced here so a bad slug fails at settings-load
+# with a clear message instead of hours later, mid-registration or after a
+# destructive preprocess clear has already run against the wrong tree.
+_VARIANT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 class DataConfig(BaseModel):
@@ -714,6 +724,20 @@ class Settings(BaseSettings):
     @classmethod
     def coerce_variant_none(cls, v: object) -> object:
         return _coerce_none_sentinel(v)
+
+    @field_validator("variant", mode="after")
+    @classmethod
+    def validate_variant_slug(cls, v: str | None) -> str | None:
+        if v is not None and not _VARIANT_SLUG_RE.match(v):
+            raise ValueError(
+                f"variant {v!r} must be a flat, kebab-case slug matching "
+                f"{_VARIANT_SLUG_RE.pattern!r} (lowercase alphanumeric, "
+                "hyphen-separated, e.g. 'adb-24m') — it becomes a GCS path "
+                "segment (core/paths.output_path) and part of an MLflow "
+                "model/experiment name (mlflow_tracking/conventions.py), "
+                "both of which reject other characters."
+            )
+        return v
 
     @property
     def replay_dir(self) -> str:

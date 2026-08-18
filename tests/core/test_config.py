@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from spacecraft_telemetry.core.config import (
     ApiConfig,
@@ -298,6 +299,24 @@ class TestVariantField:
     @pytest.mark.parametrize("sentinel", ["", "null", "none", "NULL", "  "])
     def test_none_sentinels_coerce_to_none(self, sentinel: str) -> None:
         assert Settings(variant=sentinel).variant is None
+
+    @pytest.mark.parametrize("slug", ["adb-24m", "arm-a", "a", "adb24m", "x-y-z"])
+    def test_accepts_valid_slugs(self, slug: str) -> None:
+        assert Settings(variant=slug).variant == slug
+
+    @pytest.mark.parametrize(
+        "bad_slug",
+        [
+            "adb/24m",  # nested path segment — escapes the intended single dir
+            "../ESA-Mission2",  # path traversal — escapes the mission namespace
+            "ADB24M",  # uppercase — disallowed in some MLflow name contexts
+            "adb_24m",  # underscore — plan OQ1 chose kebab-case, not snake_case
+            "-leading-hyphen",
+        ],
+    )
+    def test_rejects_invalid_slugs(self, bad_slug: str) -> None:
+        with pytest.raises(ValidationError, match="kebab-case slug"):
+            Settings(variant=bad_slug)
 
     def test_env_var_sets_variant(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
