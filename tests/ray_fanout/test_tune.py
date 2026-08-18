@@ -52,6 +52,126 @@ def test_write_tuned_configs_roundtrips_meta(tmp_path: Path) -> None:
     assert loaded["subsystem_1"]["_meta"]["f0_5"] == pytest.approx(0.72)
 
 
+# ---------------------------------------------------------------------------
+# _find_channel_errors_run / _find_multivariate_scoring_run (docs/plans/021)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRun:
+    def __init__(self, run_id: str, tags: dict[str, str] | None = None) -> None:
+        class _Info:
+            def __init__(self, rid: str) -> None:
+                self.run_id = rid
+
+        class _Data:
+            def __init__(self, t: dict[str, str]) -> None:
+                self.tags = t
+
+        self.info = _Info(run_id)
+        self.data = _Data(tags or {})
+
+
+def test_find_channel_errors_run_prefers_univariate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The univariate per-channel run wins when one exists — no fallback call."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: _FakeRun("uni-run"),
+    )
+
+    def _fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("multivariate fallback should not be called")
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune._find_multivariate_scoring_run", _fail
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_1", "exp")
+    assert found is not None
+    run, artifact_path = found
+    assert run.info.run_id == "uni-run"
+    assert artifact_path == "errors.npy"
+
+
+def test_find_channel_errors_run_falls_back_to_multivariate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No univariate run -> the multivariate subsystem run is used instead,
+    reading its per-channel errors/{channel}.npy artifact."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_a, **_k: {"channel_41": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag",
+        lambda *_a, **_k: _FakeRun("mv-run", tags={"channels": "channel_41,channel_42"}),
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_41", "exp")
+    assert found is not None
+    run, artifact_path = found
+    assert run.info.run_id == "mv-run"
+    assert artifact_path == "errors/channel_41.npy"
+
+
+def test_find_multivariate_scoring_run_rejects_non_member_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subsystem-tagged run that doesn't actually list this channel must
+    not be trusted — same subsystem name, different (or narrower) group."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_a, **_k: {"channel_99": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag",
+        lambda *_a, **_k: _FakeRun("mv-run", tags={"channels": "channel_41,channel_42"}),
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_99", "exp")
+    assert found is None
+
+
+def test_find_channel_errors_run_swallows_fallback_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken subsystem-map/tracking-backend lookup degrades to 'not found',
+    same as a genuine absence — never propagates and aborts the caller."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+
+    def _raise(*_a: object, **_k: object) -> None:
+        raise RuntimeError("tracking backend unreachable")
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map", _raise
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_1", "exp")
+    assert found is None
+
+
 def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Preparation should fail fast on labels/errors shape mismatch."""
     from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
@@ -306,7 +426,7 @@ def test_run_all_sweeps_filters_and_runs(
         class info:
             run_id = "fake-scored-run-id"
 
-    def _fake_find_latest_run(exp: str, ch: str, uri: str):
+    def _fake_find_latest_run(exp: str, ch: str, uri: str, extra_filter: str | None = None):
         return _FakeRun() if ch == "channel_1" else None
 
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
@@ -634,3 +754,45 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert 1.5 <= config["threshold_z"] <= 5.0
     assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)
+
+
+@pytest.mark.slow
+def test_run_hpo_sweep_finds_multivariate_errors(
+    ray_local, ray_series_parquet_multichannel, tmp_path: Path
+) -> None:
+    """run_hpo_sweep finds a channel's errors even when it was scored as part
+    of a multivariate subsystem group, not individually (docs/plans/021).
+
+    Without the fallback in _find_channel_errors_run, this would raise
+    "run_hpo_sweep has no usable channels" — no channel in a multivariate
+    group has an individual channel_id-tagged scoring run.
+    """
+    pytest.importorskip("ray")
+
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+
+    mission = "ESA-Mission1"
+    channels = ["channel_41", "channel_42"]
+
+    settings = ray_series_parquet_multichannel.model_copy(
+        update={
+            "tune": ray_series_parquet_multichannel.tune.model_copy(
+                update={"num_samples": 2, "max_concurrent_trials": 1}
+            ),
+            "mlflow": ray_series_parquet_multichannel.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        }
+    )
+
+    train_all_subsystems(settings, mission, channels)
+    score_all_subsystems(settings, mission, channels)
+
+    best = run_hpo_sweep("subsystem_1", channels, settings, mission)
+    assert isinstance(best["seg_f0_5"], float)
+    config = best["config"]
+    assert set(config.keys()) == {
+        "error_smoothing_window", "threshold_window",
+        "threshold_z", "threshold_min_anomaly_len", "min_error_value",
+    }

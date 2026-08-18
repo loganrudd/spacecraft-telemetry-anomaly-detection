@@ -93,6 +93,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
+    find_latest_run_by_tag,
     find_latest_run_for_channel,
 )
 from spacecraft_telemetry.ray_fanout.runner import _with_abs_paths
@@ -212,6 +213,78 @@ ESA_M1_SEARCH_SPACE: dict[str, Any] = {
 }
 
 
+def _find_multivariate_scoring_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    scoring_exp: str,
+    extra_filter: str | None = None,
+) -> Any:
+    """Fallback scoring-run lookup for a channel scored inside a multivariate
+    subsystem group (docs/plans/021-multivariate-telemanom.md).
+
+    A multivariate scoring run carries no ``channel_id`` tag (model/scoring.py
+    — it isn't a real channel), so ``find_latest_run_for_channel`` can never
+    find it. This resolves the channel's subsystem, finds the latest run
+    tagged with that subsystem, and confirms the channel is actually listed
+    in that run's ``channels`` tag before trusting it — a shared subsystem
+    name alone does not guarantee this exact channel was in the scored
+    group (a different variant, or a narrower channel subset, could reuse
+    the same subsystem name).
+
+    Returns the run, or None if no matching multivariate run exists —
+    callers already treat a missing channel as an ordinary "not scored yet"
+    case, so this adds no new failure mode.
+    """
+    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    if subsystem is None:
+        return None
+    run = find_latest_run_by_tag(
+        scoring_exp, "subsystem", subsystem, settings.mlflow.tracking_uri, extra_filter
+    )
+    if run is None:
+        return None
+    member_channels = (run.data.tags.get("channels") or "").split(",")
+    if channel not in member_channels:
+        return None
+    return run
+
+
+def _find_channel_errors_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    scoring_exp: str,
+    extra_filter: str | None = None,
+) -> tuple[Any, str] | None:
+    """Locate a channel's scoring run and the errors artifact path within it.
+
+    Tries the univariate per-channel lookup first (unchanged, and the common
+    case); falls back to the multivariate subsystem lookup, which reads a
+    per-channel artifact (``errors/{channel}.npy``) instead of the
+    univariate ``errors.npy`` at the run root.
+
+    Returns (run, artifact_path), or None if neither lookup finds a run. The
+    multivariate fallback is best-effort (like the subsystem-tag lookups
+    elsewhere — model/training.py, model/scoring.py): a lookup failure
+    (metadata missing, tracking backend unreachable) degrades to "no run
+    found", the same outcome as a genuine absence, rather than aborting the
+    (possibly univariate-only) caller.
+    """
+    run = find_latest_run_for_channel(
+        scoring_exp, channel, settings.mlflow.tracking_uri, extra_filter
+    )
+    if run is not None:
+        return run, "errors.npy"
+    with suppress(Exception):
+        run = _find_multivariate_scoring_run(
+            settings, mission, channel, scoring_exp, extra_filter
+        )
+        if run is not None:
+            return run, f"errors/{channel}.npy"
+    return None
+
+
 def _prepare_channel_data(
     settings: Settings,
     mission: str,
@@ -244,16 +317,17 @@ def _prepare_channel_data(
     )
 
     for channel in channels:
-        # Find the most recent scoring run for this channel in MLflow.
-        _run = find_latest_run_for_channel(
-            _scoring_exp, channel, settings.mlflow.tracking_uri
-        )
-        if _run is None:
+        # Find the most recent scoring run for this channel in MLflow — the
+        # univariate per-channel run, or (docs/plans/021) a multivariate
+        # subsystem run this channel was scored as part of.
+        _found = _find_channel_errors_run(settings, mission, channel, _scoring_exp)
+        if _found is None:
             missing_errors.append(channel)
             continue
+        _run, _artifact_path = _found
         try:
             raw = download_artifact_bytes(
-                _run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+                _run.info.run_id, _artifact_path, settings.mlflow.tracking_uri
             )
         except (OSError, Exception):
             missing_errors.append(channel)
@@ -358,18 +432,17 @@ def _load_nominal_errors(
     missing: list[str] = []
 
     for channel in channels:
-        run = find_latest_run_for_channel(
-            _scoring_exp,
-            channel,
-            settings.mlflow.tracking_uri,
+        _found = _find_channel_errors_run(
+            settings, mission, channel, _scoring_exp,
             extra_filter="tags.data_source = 'nominal'",
         )
-        if run is None:
+        if _found is None:
             missing.append(channel)
             continue
+        run, artifact_path = _found
         try:
             raw = download_artifact_bytes(
-                run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+                run.info.run_id, artifact_path, settings.mlflow.tracking_uri
             )
         except (OSError, Exception):
             missing.append(channel)
@@ -877,7 +950,9 @@ def run_all_sweeps(
             continue
         by_subsystem.setdefault(sub, []).append(ch)
 
-    # Retain only subsystems that have ≥1 scored channel (scoring run in MLflow).
+    # Retain only subsystems that have ≥1 scored channel (scoring run in
+    # MLflow) — a channel counts whether it was scored individually
+    # (univariate) or as part of a multivariate subsystem group (021).
     _scoring_exp = _mlflow_experiment_name(
         settings.model.model_type, "scoring", mission, settings.variant
     )
@@ -886,9 +961,7 @@ def run_all_sweeps(
         scored = [
             ch
             for ch in sub_channels
-            if find_latest_run_for_channel(
-                _scoring_exp, ch, settings.mlflow.tracking_uri
-            ) is not None
+            if _find_channel_errors_run(settings, mission, ch, _scoring_exp) is not None
         ]
         if scored:
             eligible[sub] = scored

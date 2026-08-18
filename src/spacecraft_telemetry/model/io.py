@@ -7,6 +7,7 @@ training.py and scoring.py.  This module provides the read-path helpers:
 - load_model_for_scoring: load the latest registered PyTorch model + window_size.
 - download_artifact_bytes: fetch a named artifact from a specific run.
 - find_latest_run_for_channel: locate the most recent run for a channel in an experiment.
+- find_latest_run_by_tag: same, generalised to any tag (e.g. "subsystem").
 - errors_to_bytes / threshold_to_bytes: serialise numpy arrays for log_artifact_bytes.
 - bytes_to_errors: deserialise errors bytes back to a numpy array.
 
@@ -77,6 +78,53 @@ def bytes_to_errors(data: bytes) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def find_latest_run_by_tag(
+    experiment_name: str,
+    tag_name: str,
+    tag_value: str,
+    tracking_uri: str,
+    extra_filter: str | None = None,
+) -> Any:
+    """Return the most recent MLflow run matching one tag in an experiment, or None.
+
+    General form of find_latest_run_for_channel, which is channel_id-specific
+    only because it predates this generalisation and is the overwhelmingly
+    common case; that function is now a thin wrapper around this one so its
+    existing call sites and mocks are unaffected. Added for the multivariate
+    lookup (docs/plans/021-multivariate-telemanom.md): a multivariate scoring
+    run carries a ``subsystem`` tag instead of ``channel_id`` (see
+    model/scoring.py — it isn't a real channel), so ray_fanout/tune.py needs
+    to search on that tag instead.
+
+    Args:
+        experiment_name: MLflow experiment name to search within.
+        tag_name:        Tag key to filter by, e.g. "channel_id", "subsystem".
+        tag_value:        Tag value to match.
+        tracking_uri:     MLflow tracking server URI.
+        extra_filter:     Optional additional MLflow filter clause, ANDed onto
+                          the tag filter (e.g. "tags.data_source = 'nominal'").
+
+    Returns:
+        An ``mlflow.entities.Run`` or ``None`` if no matching run is found.
+    """
+    import mlflow
+
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    exp = client.get_experiment_by_name(experiment_name)
+    if exp is None:
+        return None
+    filter_string = f"tags.{tag_name} = '{tag_value}'"
+    if extra_filter:
+        filter_string += f" and {extra_filter}"
+    runs = client.search_runs(
+        [exp.experiment_id],
+        filter_string=filter_string,
+        order_by=["attributes.start_time DESC"],
+        max_results=1,
+    )
+    return runs[0] if runs else None
+
+
 def find_latest_run_for_channel(
     experiment_name: str,
     channel: str,
@@ -97,22 +145,9 @@ def find_latest_run_for_channel(
     Returns:
         An ``mlflow.entities.Run`` or ``None`` if no matching run is found.
     """
-    import mlflow
-
-    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
-    exp = client.get_experiment_by_name(experiment_name)
-    if exp is None:
-        return None
-    filter_string = f"tags.channel_id = '{channel}'"
-    if extra_filter:
-        filter_string += f" and {extra_filter}"
-    runs = client.search_runs(
-        [exp.experiment_id],
-        filter_string=filter_string,
-        order_by=["attributes.start_time DESC"],
-        max_results=1,
+    return find_latest_run_by_tag(
+        experiment_name, "channel_id", channel, tracking_uri, extra_filter
     )
-    return runs[0] if runs else None
 
 
 # ---------------------------------------------------------------------------
