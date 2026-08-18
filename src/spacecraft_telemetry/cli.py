@@ -668,8 +668,12 @@ def _discover_registered_channels(mission: str, variant: str | None) -> list[str
 
     Used by ``mlflow promote``/``demote`` bulk-mission discovery. Filters on
     the ``tags.mission_id`` model-version tag (set unconditionally at
-    registration — see model/training.py) in addition to the ``name LIKE``
-    prefix, so a pseudo-mission like ``ESA-Mission1-ADB-24m`` — whose model
+    registration since 2026-06-03 — see model/training.py; versions
+    registered before that date have no ``mission_id`` tag and are invisible
+    to this filter even though their name matches — see
+    ``_untagged_registry_hint`` for the diagnostic that surfaces this) in
+    addition to the ``name LIKE`` prefix, so a pseudo-mission like
+    ``ESA-Mission1-ADB-24m`` — whose model
     names also match the ``telemanom-ESA-Mission1-`` prefix — is correctly
     excluded from ``--mission ESA-Mission1`` (no --variant): its mission_id
     tag is the pseudo-mission string, not "ESA-Mission1". This is the fix for
@@ -723,6 +727,40 @@ def _discover_registered_channels(mission: str, variant: str | None) -> list[str
             continue
         channel_ids.add(channel_id)
     return sorted(channel_ids)
+
+
+def _untagged_registry_hint(mission: str) -> str:
+    """Return a diagnostic suffix if models exist but predate the mission_id tag.
+
+    ``_discover_registered_channels`` filters server-side on the
+    ``mission_id`` version tag, added 2026-06-03 (model/training.py). A
+    version registered before that date has no such tag and is invisible to
+    that filter even though its name matches — so "no registered models
+    found" is misleading in that case: something IS registered, it is just
+    not discoverable by tag. Runs a second, unfiltered name-prefix query
+    (only reached when the tag-filtered discovery came back empty) to
+    distinguish the two cases and name the actual remedy.
+
+    Returns "" when nothing matches the name prefix either (the ordinary
+    "train something first" case) or when every match is properly tagged
+    (an empty discovery result then means the mission/variant truly has no
+    models, not a tagging gap).
+    """
+    from mlflow.tracking.client import MlflowClient
+
+    prefix = f"telemanom-{mission}-"
+    client = MlflowClient()
+    all_named = client.search_model_versions(f"name LIKE '{prefix}%'")
+    untagged = [v for v in all_named if not (v.tags or {}).get("mission_id")]
+    if not untagged:
+        return ""
+    n_models = len({v.name for v in untagged})
+    return (
+        f" {len(untagged)} version(s) across {n_models} model(s) match the name prefix "
+        f"'{prefix}' but predate the mission_id tag (registered before 2026-06-03) and "
+        "are not discoverable by --mission/--variant — pass --channels explicitly, "
+        "or re-register to pick up the tag."
+    )
 
 
 def _resolve_ray_channels(
@@ -1361,6 +1399,7 @@ def mlflow_promote(
             raise click.ClickException(
                 f"No registered models found for {_scope}. "
                 "Train at least one channel before promoting."
+                f"{_untagged_registry_hint(mission)}"
             )
         channel_list = discovered
 
@@ -1520,7 +1559,10 @@ def mlflow_demote(
         channel_list = _discover_registered_channels(mission, variant)
         if not channel_list:
             _scope = f"mission={mission!r} variant={variant!r}"
-            raise click.ClickException(f"No registered models found for {_scope}.")
+            raise click.ClickException(
+                f"No registered models found for {_scope}."
+                f"{_untagged_registry_hint(mission)}"
+            )
 
     if channel_list is not None:
         if mission is None:

@@ -1499,6 +1499,61 @@ class TestMlflowCli:
 
         assert result.exit_code != 0
         assert "No registered models found" in result.output
+        # No untagged legacy versions exist in this mock, so no hint is appended.
+        assert "predate the mission_id tag" not in result.output
+
+    def test_mlflow_promote_all_untagged_legacy_models_hint(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A name-prefix match with no mission_id tag (pre-2026-06-03) gets a diagnostic hint.
+
+        _discover_registered_channels's tag-filtered query finds nothing, but a
+        model matching the name prefix does exist — just registered before the
+        mission_id tag was added. The blanket "no registered models found"
+        message would misreport this as "nothing is trained"; the hint must
+        name the real cause and remedy instead.
+        """
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        legacy_version = MagicMock()
+        legacy_version.name = "telemanom-ESA-Mission1-channel_22"
+        legacy_version.version = "1"
+        legacy_version.tags = {"window_size": "250"}  # no mission_id tag at all
+
+        def _search(filter_string: str) -> list[MagicMock]:
+            # The tag-filtered discovery query (the primary lookup) finds
+            # nothing tagged; only the unfiltered name-prefix query run by
+            # _untagged_registry_hint sees the legacy version — a real server
+            # applying `tags.mission_id = ...` would behave identically.
+            if "tags.mission_id" in filter_string:
+                return []
+            return [legacy_version]
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.side_effect = _search
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "promote", "--mission", "ESA-Mission1"],
+            )
+
+        assert result.exit_code != 0
+        assert "1 version(s) across 1 model(s)" in result.output
+        assert "predate the mission_id tag" in result.output
+        assert "registered before 2026-06-03" in result.output
 
     def test_mlflow_demote_all_excludes_pseudo_mission_arms(
         self, runner: CliRunner, tmp_path: Path
@@ -1562,6 +1617,48 @@ class TestMlflowCli:
             call.args[0] for call in mock_registry_client.get_registered_model.call_args_list
         ]
         assert demoted_names == ["telemanom-ESA-Mission1-channel_1"]
+
+    def test_mlflow_demote_all_untagged_legacy_models_hint(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Mirrors the promote-side hint test: demote's "no models found" error
+        must also distinguish a tagging gap from nothing being registered."""
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        legacy_version = MagicMock()
+        legacy_version.name = "telemanom-ESA-Mission1-channel_22"
+        legacy_version.version = "1"
+        legacy_version.tags = {"window_size": "250"}
+
+        def _search(filter_string: str) -> list[MagicMock]:
+            if "tags.mission_id" in filter_string:
+                return []
+            return [legacy_version]
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.search_model_versions.side_effect = _search
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "demote", "--mission", "ESA-Mission1"],
+            )
+
+        assert result.exit_code != 0
+        assert "1 version(s) across 1 model(s)" in result.output
+        assert "predate the mission_id tag" in result.output
 
     def test_mlflow_demote_variant_requires_mission(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["--env=test", "mlflow", "demote", "--variant", "adb-24m"])
