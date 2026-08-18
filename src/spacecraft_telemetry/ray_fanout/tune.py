@@ -507,6 +507,9 @@ def _scoring_trial(
     channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
     nominal_errors: dict[str, np.ndarray[Any, Any]],
     fp_penalty_weight: float,
+    channel_timestamps: dict[str, np.ndarray[Any, Any]] | None = None,
+    mission_events: list[Any] | None = None,
+    mission_timeline_hpo: list[Any] | None = None,
 ) -> dict[str, float]:
     """Ray Tune trial: score all channels in a subsystem group with config params.
 
@@ -520,6 +523,19 @@ def _scoring_trial(
     body has no ray imports. Ray Tune 2.x records a function trainable's return
     value as the trial's final metrics, so get_best_result() works correctly.
 
+    Mission-level metric (docs/plans/021-multivariate-telemanom.md, stage
+    021.4b): when ``channel_timestamps``/``mission_events``/
+    ``mission_timeline_hpo`` are all supplied (run_hpo_sweep loads them once,
+    trial-invariant), each channel's flags are ALSO converted to time
+    intervals and OR-aggregated into one mission-level detection set, scored
+    with esa_adb.metrics.corrected_event_wise against the same HPO-portion
+    timeline — added to the result as mission_precision/mission_recall/
+    mission_f0_5. This is purely observational: it is never folded into
+    "objective", which stays seg_f0_5-based (risk 6 — the two can diverge
+    sharply, and this is what makes that visible per trial rather than only
+    after the fact). Omitting the three args (the default) reproduces the
+    pre-021.4b return-key set exactly — every existing caller is unaffected.
+
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
         channel_data: Mapping channel -> (errors, labels), pre-validated and
@@ -530,6 +546,12 @@ def _scoring_trial(
             (no nominal-tagged run yet) contribute no penalty term.
         fp_penalty_weight: Weight on mean nominal false-positive rate,
             subtracted from mean seg_f0_5 to form "objective".
+        channel_timestamps: Mapping channel -> HPO-portion target timestamps,
+            index-aligned with that channel's errors/labels in channel_data.
+        mission_events: Ground-truth esa_adb.events.Event list, grouped
+            against mission_timeline_hpo (esa_adb.events.group_events).
+        mission_timeline_hpo: The HPO-portion observed timeline (esa_adb.
+            timeline), i.e. the complement of esa_adb.report.tuned_eval_window.
     """
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,
@@ -541,7 +563,8 @@ def _scoring_trial(
 
     f0_5_scores: list[float] = []
     seg_f0_5_scores: list[float] = []
-    for errors, labels in channel_data.values():
+    channel_flags: dict[str, np.ndarray[Any, Any]] = {}
+    for channel, (errors, labels) in channel_data.items():
 
         # Un-pruned pipeline — identical to the headline path in score_channel()
         # and to what the online serving engine produces. No prune step here:
@@ -562,6 +585,7 @@ def _scoring_trial(
         )
         f0_5_scores.append(evaluate(labels, flags)["f0_5"])
         seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
+        channel_flags[channel] = flags
 
     fp_rates: list[float] = []
     for nom_errors in nominal_errors.values():
@@ -589,12 +613,42 @@ def _scoring_trial(
     mean_seg_f0_5 = float(np.mean(seg_f0_5_scores)) if seg_f0_5_scores else 0.0
     mean_fp_rate = float(np.mean(fp_rates)) if fp_rates else 0.0
     objective = mean_seg_f0_5 - fp_penalty_weight * mean_fp_rate
-    return {
+    result: dict[str, float] = {
         "f0_5": mean_f0_5,
         "seg_f0_5": mean_seg_f0_5,
         "nominal_fp_rate": mean_fp_rate,
         "objective": objective,
     }
+
+    if (
+        channel_timestamps is not None
+        and mission_events is not None
+        and mission_timeline_hpo is not None
+    ):
+        from spacecraft_telemetry.esa_adb.detections import (
+            _flags_to_intervals,
+            mission_intervals_from_per_channel,
+        )
+        from spacecraft_telemetry.esa_adb.metrics import corrected_event_wise
+
+        per_channel_intervals = {
+            channel: _flags_to_intervals(flags, channel_timestamps[channel])
+            for channel, flags in channel_flags.items()
+            if channel in channel_timestamps
+        }
+        mission_detections = mission_intervals_from_per_channel(per_channel_intervals)
+        # "all_events" scope (excludes only Communication Gap) — the paper's
+        # primary comparison table (esa_adb/report.py Table 2), matching the
+        # scope risk 6's production measurement used.
+        cew = corrected_event_wise(
+            mission_events, mission_detections, mission_timeline_hpo,
+            excluded_categories=frozenset({"Communication Gap"}),
+        )
+        result["mission_precision"] = cew["precision"]
+        result["mission_recall"] = cew["recall"]
+        result["mission_f0_5"] = cew["f_beta"]
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +752,13 @@ def run_hpo_sweep(
           Settings.model defaults instead of the sweep's best trial (see
           module docstring) — in that case ``"config"`` holds the defaults
           and no MLflow trial backs them.
+
+        Every trial (021.4b) also logs mission_precision/mission_recall/
+        mission_f0_5 to MLflow when ESA-ADB ground truth is available for
+        ``mission`` — see _scoring_trial. Not present in this function's own
+        return dict (the baseline/sweep selection stays seg_f0_5-based);
+        read them from the per-trial MLflow runs this sweep's
+        _resilient_mlflow_callback logs.
     """
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
@@ -728,11 +789,53 @@ def run_hpo_sweep(
     channel_data, scoring_run_ids = _prepare_channel_data(settings_abs, mission, channels)
     nominal_errors = _load_nominal_errors(settings_abs, mission, channels)
 
+    # Mission-level metric prep (021.4b) — trial-invariant, loaded once here
+    # rather than per-trial. Best-effort: ESA-ADB ground truth (labels.csv /
+    # anomaly_types.csv via load_events) doesn't exist for every mission —
+    # ISS has none by design (no real anomaly labels; see .claude/rules/iss.md)
+    # — so any failure here just means the trial-level mission metric is
+    # omitted, not that the sweep aborts. Atomic: either all three end up
+    # set, or none do (a partial state would silently mis-score channels
+    # missing from channel_timestamps).
+    channel_timestamps: dict[str, np.ndarray[Any, Any]] | None = None
+    mission_events: list[Any] | None = None
+    mission_timeline_hpo: list[Any] | None = None
+    with suppress(Exception):
+        import pandas as pd
+
+        from spacecraft_telemetry.esa_adb.events import group_events, load_events
+        from spacecraft_telemetry.esa_adb.intervals import intersect as _intersect
+        from spacecraft_telemetry.esa_adb.report import _hpo_cutoff
+        from spacecraft_telemetry.esa_adb.timeline import mission_timeline as _mission_timeline
+        from spacecraft_telemetry.model.dataset import (
+            window_target_timestamps as _window_target_timestamps,
+        )
+
+        _timeline_full = _mission_timeline(settings_abs, mission, channels)
+        _cutoff = _hpo_cutoff(settings_abs, mission, channels)
+        _far_past = pd.Timestamp.min.tz_localize("UTC")
+        _timeline_hpo = _intersect(_timeline_full, [(_far_past, _cutoff)])
+        _events_df = load_events(settings_abs, mission)
+        _events_hpo = group_events(_events_df, channels, _timeline_hpo)
+
+        _ts_by_channel: dict[str, np.ndarray[Any, Any]] = {}
+        for _channel in channel_data:
+            _ts = _window_target_timestamps(settings_abs, mission, _channel)
+            _n_hpo = int(len(_ts) * settings.tune.hpo_eval_fraction)
+            _ts_by_channel[_channel] = _ts[:_n_hpo]
+
+        channel_timestamps = _ts_by_channel
+        mission_events = _events_hpo
+        mission_timeline_hpo = _timeline_hpo
+
     trial_fn = tune.with_parameters(
         _scoring_trial,
         channel_data=channel_data,
         nominal_errors=nominal_errors,
         fp_penalty_weight=settings.tune.fp_penalty_weight,
+        channel_timestamps=channel_timestamps,
+        mission_events=mission_events,
+        mission_timeline_hpo=mission_timeline_hpo,
     )
 
     # Capture the wall-clock time just before launching the sweep.  Used below

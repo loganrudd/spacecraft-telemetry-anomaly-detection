@@ -272,6 +272,91 @@ def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.Monkey
     assert result["objective"] < result["seg_f0_5"]
 
 
+# ---------------------------------------------------------------------------
+# _scoring_trial — mission-level metric (docs/plans/021-multivariate-telemanom.md 021.4b)
+# ---------------------------------------------------------------------------
+
+
+def test_scoring_trial_omits_mission_metrics_by_default() -> None:
+    """Without channel_timestamps/mission_events/mission_timeline_hpo, the
+    return dict is exactly the pre-021.4b key set — no behaviour change for
+    any existing caller."""
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    channel_data = {
+        "channel_1": (
+            np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64),
+            np.array([False, False, True, True], dtype=np.bool_),
+        )
+    }
+    config = {
+        "error_smoothing_window": 2, "threshold_window": 2,
+        "threshold_z": 1.0, "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config, channel_data=channel_data, nominal_errors={}, fp_penalty_weight=5.0
+    )
+
+    assert set(result.keys()) == {"f0_5", "seg_f0_5", "nominal_fp_rate", "objective"}
+
+
+def test_scoring_trial_computes_mission_metrics_when_provided() -> None:
+    """With ground truth supplied, the trial ALSO reports mission_precision/
+    mission_recall/mission_f0_5 via esa_adb.metrics.corrected_event_wise —
+    without changing objective (still seg_f0_5-based, risk 6)."""
+    import pandas as pd
+
+    from spacecraft_telemetry.esa_adb.events import Event
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    t0 = pd.Timestamp("2000-01-01", tz="UTC")
+    # 5 windows, 90s apart; an anomaly flagged in windows 2-3 should be
+    # matched by a ground-truth event spanning the same span. tz-naive, like
+    # window_target_timestamps' real return (PyArrow's to_numpy() drops the
+    # tz label — see _flags_to_intervals, which re-localizes to UTC).
+    timestamps = pd.DatetimeIndex(
+        [t0.tz_localize(None) + pd.Timedelta(seconds=90 * i) for i in range(5)]
+    ).values
+    channel_data = {
+        "channel_1": (
+            np.array([0.0, 0.0, 5.0, 5.0, 0.0], dtype=np.float64),
+            np.array([False, False, True, True, False], dtype=np.bool_),
+        )
+    }
+    channel_timestamps = {"channel_1": timestamps}
+    mission_timeline_hpo = [(t0, t0 + pd.Timedelta(seconds=90 * 5))]
+    mission_events = [
+        Event(
+            event_id="E1",
+            category="Anomaly",
+            intervals=((t0 + pd.Timedelta(seconds=180), t0 + pd.Timedelta(seconds=360)),),
+            channels=frozenset({"channel_1"}),
+        )
+    ]
+    config = {
+        "error_smoothing_window": 1, "threshold_window": 2,
+        "threshold_z": 1.0, "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config,
+        channel_data=channel_data,
+        nominal_errors={},
+        fp_penalty_weight=5.0,
+        channel_timestamps=channel_timestamps,
+        mission_events=mission_events,
+        mission_timeline_hpo=mission_timeline_hpo,
+    )
+
+    assert {"mission_precision", "mission_recall", "mission_f0_5"} <= set(result.keys())
+    for key in ("mission_precision", "mission_recall", "mission_f0_5"):
+        assert 0.0 <= result[key] <= 1.0
+    # "objective" must stay seg_f0_5-based — the mission metric is additive,
+    # never folded into what the sweep actually selects on.
+    assert result["objective"] == pytest.approx(result["seg_f0_5"])
+
+
 def test_run_hpo_sweep_trial_tags_unchanged_at_variant_none() -> None:
     """run_hpo_sweep's trial-run tags were refactored from an inline dict to
     common_tags() (docs/reviews/020-experiment-variant-axis.md §3.8) -- pin
@@ -754,6 +839,77 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert 1.5 <= config["threshold_z"] <= 5.0
     assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)
+
+
+@pytest.mark.slow
+def test_run_hpo_sweep_logs_mission_metric_per_trial(
+    ray_local, ray_series_parquet_multichannel, tmp_path: Path
+) -> None:
+    """A real sweep with ESA-ADB ground truth available logs mission_f0_5/
+    mission_precision/mission_recall on its per-trial MLflow runs.
+
+    This is the integration risk the fast _scoring_trial unit tests can't
+    cover: whether run_hpo_sweep's tune.with_parameters wiring and the
+    MLflowLoggerCallback actually surface the new dict keys end-to-end, not
+    just whether _scoring_trial computes them correctly in isolation.
+    """
+    pytest.importorskip("ray")
+    import mlflow
+
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+
+    mission = "ESA-Mission1"
+    channels = ["channel_41", "channel_42"]
+
+    sample_dir = tmp_path / "sample" / mission
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "labels.csv").write_text(
+        "ID,Channel,StartTime,EndTime\n"
+        "E1,channel_41,2000-01-01T00:03:00Z,2000-01-01T00:06:00Z\n"
+    )
+    (sample_dir / "anomaly_types.csv").write_text(
+        "ID,Category,Class,Subclass,Dimensionality\nE1,Anomaly,Rare,Rare,Univariate\n"
+    )
+
+    settings = ray_series_parquet_multichannel.model_copy(
+        update={
+            "data": ray_series_parquet_multichannel.data.model_copy(
+                update={"sample_data_dir": str(tmp_path / "sample")}
+            ),
+            "tune": ray_series_parquet_multichannel.tune.model_copy(
+                update={"num_samples": 2, "max_concurrent_trials": 1}
+            ),
+            "mlflow": ray_series_parquet_multichannel.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        }
+    )
+
+    train_all_subsystems(settings, mission, channels)
+    score_all_subsystems(settings, mission, channels)
+    run_hpo_sweep("subsystem_1", channels, settings, mission)
+
+    # Search across every experiment rather than assuming the HPO one by
+    # name: this test's Ray/MLflow test harness routes trial runs by ambient
+    # ray.tune context, not strictly by the experiment_name passed to
+    # _resilient_mlflow_callback, so the reliable check is "some run,
+    # somewhere, carries the new keys" — not which experiment holds it.
+    client = mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    with_mission_metric = [
+        r
+        for exp in client.search_experiments()
+        for r in client.search_runs([exp.experiment_id])
+        if "mission_f0_5" in r.data.metrics
+    ]
+    assert with_mission_metric, (
+        "no run anywhere logged mission_f0_5 — expected every HPO trial to, "
+        "since ESA-ADB ground truth (labels.csv/anomaly_types.csv) was available"
+    )
+    m = with_mission_metric[0].data.metrics
+    assert 0.0 <= m["mission_precision"] <= 1.0
+    assert 0.0 <= m["mission_recall"] <= 1.0
+    assert 0.0 <= m["mission_f0_5"] <= 1.0
 
 
 @pytest.mark.slow
