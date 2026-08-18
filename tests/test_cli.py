@@ -375,6 +375,34 @@ class TestRayTuneCommand:
         assert result.exit_code != 0
         assert "No preprocessed channels found" in result.output
 
+    def test_tune_errors_when_no_channels_discovered_names_the_variant(
+        self, runner: CliRunner
+    ) -> None:
+        """A variant whose processed tree doesn't exist (e.g. a typo) must name
+
+        the variant and the expected path in the error, not just the mission --
+        the base mission's channels are likely present and preprocess run would
+        be the wrong remedy to suggest.
+        """
+        settings = load_settings("test").model_copy(update={"variant": "adb-42m"})
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = None
+        mock_cm.__exit__.return_value = None
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=mock_cm),
+            patch("spacecraft_telemetry.ray_fanout.discover_channels", return_value=[]),
+        ):
+            result = runner.invoke(
+                main,
+                ["--env=test", "ray", "tune", "--mission=ESA-Mission1"],
+            )
+
+        assert result.exit_code != 0
+        assert "variant='adb-42m'" in result.output
+        assert "ESA-Mission1/adb-42m/train" in result.output
+
     def test_tune_errors_when_subsystem_map_missing(self, runner: CliRunner) -> None:
         settings = load_settings("test")
         mock_cm = MagicMock()
@@ -1659,6 +1687,83 @@ class TestMlflowCli:
         assert result.exit_code != 0
         assert "1 version(s) across 1 model(s)" in result.output
         assert "predate the mission_id tag" in result.output
+
+    def test_mlflow_demote_variant_discovers_only_that_variant(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """--mission ESA-Mission1 --variant adb-24m demotes only that variant's champions.
+
+        Mirrors test_mlflow_promote_variant_discovers_only_that_variant. Demote
+        is the more destructive command -- it clears @champion aliases, and the
+        bulk "--mission with no filter" form is its documented full-reset
+        purpose -- so registered_model_name(..., variant) at the demote call
+        site deserves the same variant-discrimination coverage as promote, not
+        less.
+        """
+        from unittest.mock import MagicMock
+
+        settings = load_settings("test").model_copy(
+            update={
+                "mlflow": load_settings("test").mlflow.model_copy(
+                    update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+                )
+            }
+        )
+
+        def make_version(
+            name: str, ver: str, *, mission_id: str, channel_id: str,
+            variant: str | None = None,
+        ) -> MagicMock:
+            mv = MagicMock()
+            mv.name = name
+            mv.version = ver
+            mv.aliases = []
+            mv.tags = {"mission_id": mission_id, "channel_id": channel_id}
+            if variant:
+                mv.tags["variant"] = variant
+            return mv
+
+        mission = "ESA-Mission1"
+        base_version = make_version(
+            f"telemanom-{mission}-channel_1", "1", mission_id=mission, channel_id="channel_1"
+        )
+        variant_version = make_version(
+            f"telemanom-{mission}-adb-24m-channel_41", "1",
+            mission_id=mission, channel_id="channel_41", variant="adb-24m",
+        )
+
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("mlflow.tracking.client.MlflowClient") as mock_discovery_client_cls,
+            patch(
+                "spacecraft_telemetry.mlflow_tracking.registry.MlflowClient"
+            ) as mock_registry_client_cls,
+        ):
+            mock_discovery_client = MagicMock()
+            mock_registry_client = MagicMock()
+            mock_discovery_client_cls.return_value = mock_discovery_client
+            mock_registry_client_cls.return_value = mock_registry_client
+
+            mock_discovery_client.search_model_versions.return_value = [
+                base_version, variant_version,
+            ]
+            mock_registered_model = MagicMock()
+            mock_registered_model.aliases = {"champion": "1"}
+            mock_registry_client.get_registered_model.return_value = mock_registered_model
+            mock_registry_client.delete_registered_model_alias.return_value = None
+
+            result = runner.invoke(
+                main,
+                ["--env=test", "mlflow", "demote", "--mission", mission, "--variant", "adb-24m"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "Variant       : adb-24m" in result.output
+        assert "Demoted       : 1/1" in result.output
+        demoted_names = [
+            call.args[0] for call in mock_registry_client.get_registered_model.call_args_list
+        ]
+        assert demoted_names == ["telemanom-ESA-Mission1-adb-24m-channel_41"]
 
     def test_mlflow_demote_variant_requires_mission(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["--env=test", "mlflow", "demote", "--variant", "adb-24m"])

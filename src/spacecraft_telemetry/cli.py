@@ -801,10 +801,16 @@ def _resolve_ray_channels(
 
     channel_list = discover_channels(settings, mission)
     if not channel_list:
+        from spacecraft_telemetry.core.paths import output_path as _compose_output_path
+
+        _variant_note = f", variant={settings.variant!r}" if settings.variant else ""
+        _expected_dir = _compose_output_path(
+            settings.preprocess.processed_data_dir, mission, settings.variant, "train",
+        )
         raise click.ClickException(
-            f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry preprocess run` first, "
-            "or pass --channels / --channels-from explicitly."
+            f"No preprocessed channels found for {mission}{_variant_note} "
+            f"at {_expected_dir}. Run `spacecraft-telemetry preprocess run` "
+            "first, or pass --channels / --channels-from explicitly."
         )
     if subsystem is not None:
         channel_list = _filter_channels_by_subsystem(
