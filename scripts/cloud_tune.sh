@@ -43,6 +43,11 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 
 # INJECTED=1 tunes against the manufactured-label dataset (ISS injection-driven
 # HPO). `inject run` writes no channels.txt, so fall back to the base channels.txt
@@ -55,11 +60,11 @@ if [[ "${INJECTED}" = "1" ]]; then
   if [[ -n "${CHANNELS:-}" ]]; then
     CHANNELS_ARG="--channels ${CHANNELS}"
   else
-    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT:+/${VARIANT}}/channels.txt"
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
   fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT:+/${VARIANT}}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 # ISS W=128 override — see cloud_train.sh for rationale.
 if [[ "${MISSION}" = "ISS" ]]; then
@@ -74,8 +79,8 @@ fi
 # neither needs a config switch.
 RAY_IMAGE_TAG="${RAY_IMAGE_TAG:-latest}"
 
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT PROCESSED_DATA_DIR CHANNELS_ARG \
-  WINDOW_SIZE_OVERRIDE RAY_IMAGE_TAG
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG PROCESSED_DATA_DIR \
+  CHANNELS_ARG WINDOW_SIZE_OVERRIDE RAY_IMAGE_TAG
 
 echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, image tag=${RAY_IMAGE_TAG})"
 

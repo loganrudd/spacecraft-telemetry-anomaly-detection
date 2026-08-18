@@ -68,8 +68,13 @@ if [[ -n "${CHANNELS:-}" ]]; then
 else
   CHANNELS_ARG=""
 fi
+# Same reasoning as CHANNELS_ARG above — resolved here so any YAML site can
+# interpolate the optional "/{variant}" path segment verbatim. This script has
+# no channels.txt path of its own; exported for symmetry with the other
+# cloud_*.sh scripts and for any future YAML site that needs it.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 
-export PROJECT_ID REGION MISSION VARIANT CHANNELS_ARG TRAIN_FRACTION TRAIN_LOOKBACK
+export PROJECT_ID REGION MISSION VARIANT VARIANT_SEG CHANNELS_ARG TRAIN_FRACTION TRAIN_LOOKBACK
 
 echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${CHANNELS:+, channels=${CHANNELS}})"
 echo "    train_fraction=${TRAIN_FRACTION}  train_lookback=${TRAIN_LOOKBACK}"

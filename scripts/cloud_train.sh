@@ -47,6 +47,11 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 # ISS: 6-way L4 packing (floor(1/0.16)=6). ESA: 8-way (floor(1/0.125)=8).
 # 0.167 rounds to floor(5.99)=5 under floating point; 0.16 is the safe 6-way value.
 # Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption issues).
@@ -65,7 +70,7 @@ if [[ -n "${CHANNELS:-}" ]]; then
 elif [[ -n "${CHANNELS_FROM:-}" ]]; then
   CHANNELS_ARG="--channels-from ${CHANNELS_FROM}"
 else
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT:+/${VARIANT}}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 
 # ISS LOS fragmentation limits contiguous segments to <240 rows on the 30 s grid.
@@ -76,7 +81,8 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT CHANNELS_ARG NUM_GPUS WINDOW_SIZE_OVERRIDE
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
+  WINDOW_SIZE_OVERRIDE
 
 echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}})"
 

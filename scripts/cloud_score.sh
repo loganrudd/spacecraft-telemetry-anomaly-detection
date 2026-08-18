@@ -73,6 +73,11 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 
 # INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO)
 # and tags the run data_source=injected (see model/scoring.py, cli.py
@@ -87,12 +92,12 @@ if [[ "${INJECTED}" = "1" ]]; then
   if [[ -n "${CHANNELS:-}" ]]; then
     CHANNELS_ARG="--channels ${CHANNELS}"
   else
-    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT:+/${VARIANT}}/channels.txt"
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
   fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
   INJECTED_FLAG=""
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT:+/${VARIANT}}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 # GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
 # Packing is bounded by GPU MEMORY, not vCPUs: each task is a separate process
@@ -110,8 +115,8 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT TUNED INJECTED_FLAG NUM_GPUS EVAL_SPLIT \
-  PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG TUNED INJECTED_FLAG NUM_GPUS \
+  EVAL_SPLIT PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, mode=tuned)"
