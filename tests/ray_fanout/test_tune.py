@@ -152,6 +152,65 @@ def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.Monkey
     assert result["objective"] < result["seg_f0_5"]
 
 
+def test_run_hpo_sweep_trial_tags_unchanged_at_variant_none() -> None:
+    """run_hpo_sweep's trial-run tags were refactored from an inline dict to
+    common_tags() (docs/reviews/020-experiment-variant-axis.md §3.8) -- pin
+    that the emitted tag set at variant=None is byte-identical to the
+    pre-refactor dict, since run_hpo_sweep itself is too heavy (a real Tune
+    loop) to assert on directly in a unit test.
+    """
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(
+        model_type="telemanom",
+        mission="ESA-Mission1",
+        phase="hpo",
+        variant=None,
+        subsystem="subsystem_1",
+        extra={"eval_split": "hpo_portion"},
+    )
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+        "subsystem": "subsystem_1",
+        "eval_split": "hpo_portion",
+    }
+
+
+def test_run_hpo_sweep_trial_tags_include_variant_when_set() -> None:
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(
+        model_type="telemanom",
+        mission="ESA-Mission1",
+        phase="hpo",
+        variant="adb-24m",
+        subsystem="subsystem_1",
+        extra={"eval_split": "hpo_portion"},
+    )
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+        "subsystem": "subsystem_1",
+        "eval_split": "hpo_portion",
+        "variant": "adb-24m",
+    }
+
+
+def test_run_all_sweeps_summary_run_tags_unchanged_at_variant_none() -> None:
+    """Same pin as above for run_all_sweeps's tuned-configs-summary run tags."""
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(model_type="telemanom", mission="ESA-Mission1", phase="hpo", variant=None)
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+    }
+
+
 def test_resilient_mlflow_callback_swallows_unregistered_trial() -> None:
     """The resilient callback must not raise when a trial was never registered.
 

@@ -101,7 +101,7 @@ def common_tags(
         "mission_id": mission,
         "phase": phase,
     }
-    if variant is not None:
+    if variant:
         tags["variant"] = variant
     if training_data_hash is not None:
         tags["training_data_hash"] = training_data_hash

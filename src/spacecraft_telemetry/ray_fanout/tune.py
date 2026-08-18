@@ -73,6 +73,9 @@ from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking.conventions import (
+    common_tags as _common_tags,
+)
+from spacecraft_telemetry.mlflow_tracking.conventions import (
     experiment_name as _mlflow_experiment_name,
 )
 from spacecraft_telemetry.mlflow_tracking.runs import (
@@ -683,14 +686,14 @@ def run_hpo_sweep(
                 _resilient_mlflow_callback(
                     experiment_name=_exp_name,
                     tracking_uri=settings.mlflow.tracking_uri,
-                    tags={
-                        "subsystem": subsystem,
-                        "eval_split": "hpo_portion",
-                        "model_type": cfg.model_type,
-                        "mission_id": mission,
-                        "phase": "hpo",
-                        **({"variant": settings.variant} if settings.variant else {}),
-                    },
+                    tags=_common_tags(
+                        model_type=cfg.model_type,
+                        mission=mission,
+                        phase="hpo",
+                        variant=settings.variant,
+                        subsystem=subsystem,
+                        extra={"eval_split": "hpo_portion"},
+                    ),
                     save_artifact=False,
                 ),
             ],
@@ -999,12 +1002,12 @@ def run_all_sweeps(
         with _open_run(
             experiment=_hpo_exp,
             run_name="tuned-configs-summary",
-            tags={
-                "model_type": settings.model.model_type,
-                "mission_id": mission,
-                "phase": "hpo",
-                **({"variant": settings.variant} if settings.variant else {}),
-            },
+            tags=_common_tags(
+                model_type=settings.model.model_type,
+                mission=mission,
+                phase="hpo",
+                variant=settings.variant,
+            ),
         ):
             _log_artifact_bytes(output.read_bytes(), "tuned_configs.json")
 
