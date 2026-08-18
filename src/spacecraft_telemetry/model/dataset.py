@@ -10,6 +10,13 @@ Public API:
                                                          window_is_anomaly)
     load_window_labels(settings, mission, channel)   -> window_is_anomaly (no torch)
     window_target_timestamps(settings, mission, channel) -> target_timestamps (no torch)
+
+Multivariate (docs/plans/021-multivariate-telemanom.md): every function above
+resolves its channel group from ``settings.model.input_channels`` (None ->
+``[channel]``, the byte-identical univariate default). A non-None group joins
+channels on ``telemetry_timestamp`` via load_multichannel_series_parquet /
+load_multichannel_series_metadata and ``channel`` becomes the model's
+registry/experiment key rather than a literal channel to load.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
@@ -26,7 +34,25 @@ from torch.utils.data import Dataset as _TorchDataset
 from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.paths import output_path
+
+log = get_logger(__name__)
+
+
+def _resolve_channel_group(settings: Settings, channel: str) -> list[str]:
+    """Return the ordered list of channel_ids to load for one model.
+
+    None (default) -> [channel]: the univariate path, byte-identical to
+    pre-021 behaviour. A non-None ``settings.model.input_channels`` makes
+    ``channel`` the model's registry/experiment key (e.g. a subsystem name)
+    while this list supplies the channels to load and forecast jointly.
+
+    Order is significant and is exactly the order downstream (architecture,
+    save/load) assumes — see docs/plans/021-multivariate-telemanom.md.
+    """
+    group = settings.model.input_channels
+    return list(group) if group is not None else [channel]
 
 
 def _read_partition_table(
@@ -162,6 +188,195 @@ def load_series_metadata(
     return segment_ids, is_anomaly, timestamps
 
 
+# Alignment loss above this fraction is logged as a warning, not just info —
+# see docs/plans/021-multivariate-telemanom.md Design: "Verify alignment
+# loss — if the intersection is materially smaller than any single channel,
+# that is a finding, not a detail."
+_ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
+
+
+def _joint_segment_ids(
+    per_channel_segment_ids: np.ndarray[Any, np.dtype[np.int32]],
+) -> np.ndarray[Any, np.dtype[np.int32]]:
+    """Derive one monotonic segment id from per-channel segment ids.
+
+    ``per_channel_segment_ids``: (N, C) int32, already aligned on a common
+    timestamp index. Each channel's own segment id was assigned independently
+    by preprocessing's per-channel gap detection, so two channels can each be
+    internally gap-free over a span while disagreeing about where their own
+    boundaries fall. A joint window must not cross *either* channel's
+    boundary, so a boundary exists at row t iff ANY channel's segment id
+    changed between t-1 and t.
+
+    Returns an (N,) int32 array usable directly by ``_build_window_index``
+    (which only checks equality across a span, not the numeric values) —
+    this keeps the existing, tested window-index logic untouched for the
+    multivariate path.
+    """
+    n = per_channel_segment_ids.shape[0]
+    joint = np.zeros(n, dtype=np.int32)
+    if n <= 1:
+        return joint
+    boundary = (np.diff(per_channel_segment_ids, axis=0) != 0).any(axis=1)
+    joint[1:] = np.cumsum(boundary)
+    return joint
+
+
+def _align_multi_channel(
+    per_channel: list[
+        tuple[
+            np.ndarray[Any, np.dtype[np.float32]],
+            np.ndarray[Any, np.dtype[np.int32]],
+            np.ndarray[Any, np.dtype[np.bool_]],
+            np.ndarray[Any, Any],
+        ]
+    ],
+    channels: list[str],
+) -> tuple[
+    np.ndarray[Any, np.dtype[np.float32]],
+    np.ndarray[Any, np.dtype[np.int32]],
+    np.ndarray[Any, np.dtype[np.bool_]],
+    np.ndarray[Any, Any],
+]:
+    """Inner-join per-channel series on ``telemetry_timestamp``.
+
+    Each element of ``per_channel`` is one channel's
+    ``(values, segment_ids, is_anomaly, timestamps)`` as returned by
+    ``load_series_parquet``, already sorted by timestamp. The intersection of
+    all channels' timestamps is the defensible default alignment (Design,
+    docs/plans/021-multivariate-telemanom.md) — a row that any channel is
+    missing cannot be forecast jointly.
+
+    Returns:
+        values:      (N, C) float32 — column i is channels[i]'s normalized value.
+        segment_ids: (N,) int32     — joint segment id, see _joint_segment_ids.
+        is_anomaly:  (N, C) bool    — per-channel flag, preserved (not OR'd)
+                                       so callers can report per-channel recall.
+        timestamps:  (N,) datetime64[ns] — the aligned, sorted timestamp index.
+
+    Raises:
+        ValueError: If the intersection is empty.
+    """
+    indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
+    common = indices[0]
+    for idx in indices[1:]:
+        common = common.intersection(idx)
+    common = common.sort_values()
+
+    min_channel_rows = min(len(idx) for idx in indices)
+    n_aligned = len(common)
+    if n_aligned == 0:
+        raise ValueError(
+            f"No overlapping timestamps across channels {channels!r} — cannot "
+            "align a multivariate window. Check that all channels were "
+            "preprocessed over the same time range."
+        )
+    loss_frac = 1.0 - n_aligned / min_channel_rows
+    log_fn = log.warning if loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
+    log_fn(
+        "model.dataset.multichannel_align",
+        channels=channels,
+        n_aligned=n_aligned,
+        min_channel_rows=min_channel_rows,
+        loss_frac=round(loss_frac, 4),
+    )
+
+    n, c = n_aligned, len(channels)
+    values = np.empty((n, c), dtype=np.float32)
+    segment_ids_2d = np.empty((n, c), dtype=np.int32)
+    is_anomaly = np.empty((n, c), dtype=bool)
+    zipped = zip(per_channel, indices, strict=True)
+    for i, ((vals, seg_ids, is_anom, _ts), idx) in enumerate(zipped):
+        pos = idx.get_indexer(common)
+        if (pos < 0).any():
+            raise AssertionError(
+                f"common index is not a subset of channel {channels[i]!r}'s "
+                "timestamps — intersection() invariant violated"
+            )
+        values[:, i] = vals[pos]
+        segment_ids_2d[:, i] = seg_ids[pos]
+        is_anomaly[:, i] = is_anom[pos]
+
+    return values, _joint_segment_ids(segment_ids_2d), is_anomaly, common.to_numpy()
+
+
+def load_multichannel_series_parquet(
+    processed_dir: Path | UPath | str,
+    mission: str,
+    channels: list[str],
+    split: Literal["train", "test"],
+    variant: str | None = None,
+) -> tuple[
+    np.ndarray[Any, np.dtype[np.float32]],
+    np.ndarray[Any, np.dtype[np.int32]],
+    np.ndarray[Any, np.dtype[np.bool_]],
+    np.ndarray[Any, Any],
+]:
+    """Read + align per-timestep series for a group of channels, jointly.
+
+    Reads each channel via ``load_series_parquet`` (same partition layout,
+    same normalization — each channel keeps its own z-score) and inner-joins
+    them on ``telemetry_timestamp`` via ``_align_multi_channel``.
+
+    For ``len(channels) == 1`` this still goes through the join path (a
+    trivial one-channel join), unlike ``make_dataloaders``/
+    ``make_test_dataloader`` which special-case that call site to bypass this
+    function entirely — see their docstrings for why that distinction matters.
+
+    Returns:
+        values:      (N, C) float32 — column i is channels[i]'s normalized value.
+        segment_ids: (N,) int32     — joint segment id (see _joint_segment_ids).
+        is_anomaly:  (N, C) bool    — per-channel anomaly flag, not OR'd.
+        timestamps:  (N,) datetime64[ns] — aligned, sorted timestamps.
+
+    Raises:
+        FileNotFoundError: If any channel's partition is missing (propagated
+            from load_series_parquet).
+        ValueError: If the channels share no common timestamps.
+    """
+    per_channel = [
+        load_series_parquet(processed_dir, mission, ch, split, variant=variant)
+        for ch in channels
+    ]
+    return _align_multi_channel(per_channel, channels)
+
+
+def load_multichannel_series_metadata(
+    processed_dir: Path | UPath | str,
+    mission: str,
+    channels: list[str],
+    split: Literal["train", "test"],
+    variant: str | None = None,
+) -> tuple[
+    np.ndarray[Any, np.dtype[np.int32]],
+    np.ndarray[Any, np.dtype[np.bool_]],
+    np.ndarray[Any, Any],
+]:
+    """Metadata-only counterpart to load_multichannel_series_parquet.
+
+    Skips ``value_normalized`` for every channel — see load_series_metadata's
+    docstring for the single-channel rationale, which applies identically here.
+
+    Returns:
+        segment_ids: (N,) int32  — joint segment id.
+        is_anomaly:  (N, C) bool — per-channel anomaly flag, not OR'd.
+        timestamps:  (N,) datetime64[ns] — aligned, sorted timestamps.
+    """
+    per_channel_meta = [
+        load_series_metadata(processed_dir, mission, ch, split, variant=variant)
+        for ch in channels
+    ]
+    # _align_multi_channel expects a values column; synthesize a dummy one so
+    # the exact same alignment code path (and its logging) is reused rather
+    # than duplicated for the metadata-only case.
+    per_channel = [
+        (np.empty(len(seg_ids), dtype=np.float32), seg_ids, is_anom, ts)
+        for seg_ids, is_anom, ts in per_channel_meta
+    ]
+    _values, segment_ids, is_anomaly, timestamps = _align_multi_channel(per_channel, channels)
+    return segment_ids, is_anomaly, timestamps
+
+
 def _build_window_index(
     segment_ids: np.ndarray[Any, np.dtype[np.int32]],
     is_anomaly: np.ndarray[Any, np.dtype[np.bool_]],
@@ -220,9 +435,19 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
     Stores the full values tensor once and slices windows lazily in
     ``__getitem__``, so memory use is O(N) not O(N x W).
 
-    Each item: (x, y) where:
-        x: (W, 1) float32 tensor — window values, unsqueezed for LSTM input
+    Accepts either a univariate ``(N,)`` array (the pre-021 shape) or a
+    multivariate ``(N, C)`` array (docs/plans/021-multivariate-telemanom.md).
+    The univariate case is a distinct branch, not C=1 of the general one —
+    output shapes match pre-021 exactly (y is a 0-d scalar tensor, not a
+    length-1 vector), so every existing caller is untouched byte-for-byte:
+
+        x: (W, 1) float32 tensor — window values
         y: ()     float32 tensor — target value at index s + W + H - 1
+
+    For a multivariate ``(N, C)`` input:
+
+        x: (W, C) float32 tensor — window values, channel order preserved
+        y: (C,)   float32 tensor — target vector at index s + W + H - 1
     """
 
     def __init__(
@@ -233,9 +458,13 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
         prediction_horizon: int,
     ) -> None:
         super().__init__()
+        arr = np.ascontiguousarray(values)
+        if arr.ndim not in (1, 2):
+            raise ValueError(f"values must be 1-D or 2-D, got shape {arr.shape}")
+        self._univariate = arr.ndim == 1
         # Contiguous tensor for fast slice in __getitem__.
-        self._values = torch.from_numpy(np.ascontiguousarray(values))  # (N,) float32
-        self._starts = start_indices                                    # (M,) int32
+        self._values = torch.from_numpy(arr)  # (N,) or (N, C) float32
+        self._starts = start_indices           # (M,) int32
         self._W = window_size
         self._H = prediction_horizon
 
@@ -244,8 +473,12 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         s = int(self._starts[idx])
-        x = self._values[s : s + self._W].unsqueeze(-1)   # (W, 1)
-        y = self._values[s + self._W + self._H - 1]       # scalar
+        if self._univariate:
+            x = self._values[s : s + self._W].unsqueeze(-1)   # (W, 1)
+            y = self._values[s + self._W + self._H - 1]       # scalar
+        else:
+            x = self._values[s : s + self._W, :]               # (W, C)
+            y = self._values[s + self._W + self._H - 1, :]     # (C,)
         return x, y
 
 
@@ -268,16 +501,35 @@ def make_dataloaders(
     ``num_workers=0`` on MPS (macOS); cloud.yaml sets ``num_workers=4``.
     ``pin_memory`` is enabled automatically when CUDA is available.
 
+    Multivariate (docs/plans/021-multivariate-telemanom.md): when
+    ``settings.model.input_channels`` is set, ``channel`` is the model's
+    registry key (e.g. a subsystem name) and the group's channels are loaded
+    and aligned jointly via load_multichannel_series_parquet. A window is
+    skipped if it crosses a segment boundary or contains an anomalous
+    timestep in ANY channel — the Design section's "only continuous nominal
+    parts ... without any anomalies in any target channel." A single-channel
+    group (the default, and the ``len(group) == 1`` case generally) takes
+    the original single-channel path unchanged, so this function is
+    byte-identical to pre-021 whenever input_channels is None.
+
     Args:
         settings: Fully resolved Settings.
         mission:  Mission name, e.g. ``"ESA-Mission1"``.
-        channel:  Channel ID, e.g. ``"channel_1"``.
+        channel:  Channel ID, e.g. ``"channel_1"`` (or a subsystem key — see above).
     """
     cfg = settings.model
-    values, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "train",
-        variant=settings.variant,
-    )
+    group = _resolve_channel_group(settings, channel)
+    if len(group) == 1:
+        values, segment_ids, is_anomaly, _ = load_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group[0], "train",
+            variant=settings.variant,
+        )
+    else:
+        values, segment_ids, is_anomaly_2d, _ = load_multichannel_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group, "train",
+            variant=settings.variant,
+        )
+        is_anomaly = is_anomaly_2d.any(axis=1)
     all_indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
         skip_anomalous_windows=True,
@@ -318,6 +570,25 @@ def make_dataloaders(
     return train_loader, val_loader
 
 
+def _window_any_anomalous(
+    is_anomaly: np.ndarray[Any, Any],
+    indices: np.ndarray[Any, Any],
+    span: int,
+) -> np.ndarray[Any, Any]:
+    """Per-window OR of ``is_anomaly`` over ``[s, s+span)`` via a prefix sum.
+
+    Generalizes the pre-021 single-channel prefix-sum trick over an optional
+    trailing channel axis: a 1-D ``(N,)`` input returns ``(M,)``; a 2-D
+    ``(N, C)`` per-channel input returns ``(M, C)`` with the OR computed
+    independently per channel (so callers can report per-channel recall —
+    see docs/plans/021-multivariate-telemanom.md risk 3).
+    """
+    cumsum = np.zeros((is_anomaly.shape[0] + 1, *is_anomaly.shape[1:]), dtype=np.int64)
+    np.cumsum(is_anomaly, axis=0, out=cumsum[1:])
+    result: np.ndarray[Any, Any] = (cumsum[indices + span] - cumsum[indices]) > 0
+    return result
+
+
 def make_test_dataloader(
     settings: Settings,
     mission: str,
@@ -332,37 +603,48 @@ def make_test_dataloader(
     Unlike the train DataLoader, anomalous windows are **not** skipped —
     evaluation requires all windows, including those overlapping anomalies.
 
+    Multivariate (docs/plans/021-multivariate-telemanom.md): same channel
+    group resolution as make_dataloaders. ``window_is_anomaly`` is per
+    channel (not OR'd across channels) so the caller can score and report
+    each channel separately — see model/scoring.py.
+
     Returns:
         loader:            DataLoader over all valid (cross-segment-free) windows.
         target_timestamps: (M,) datetime64[ns] — timestamp at each window's
                            target position (index s + W + H - 1).
-        window_is_anomaly: (M,) bool — True iff any step in [s, s+W+H) is
-                           anomalous (``any(...)`` semantics; matches Phase 3
+        window_is_anomaly: (M,) bool, or (M, C) bool for a multivariate group
+                           — True iff any step in [s, s+W+H) is anomalous
+                           (``any(...)`` semantics; matches Phase 3
                            window-overlap definition for metric continuity).
 
     Args:
         settings: Fully resolved Settings.
         mission:  Mission name, e.g. ``"ESA-Mission1"``.
-        channel:  Channel ID, e.g. ``"channel_1"``.
+        channel:  Channel ID, e.g. ``"channel_1"`` (or a subsystem key — see
+                  make_dataloaders).
     """
     cfg = settings.model
-    values, segment_ids, is_anomaly, timestamps = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "test",
-        variant=settings.variant,
-    )
+    group = _resolve_channel_group(settings, channel)
+    if len(group) == 1:
+        values, segment_ids, is_anomaly, timestamps = load_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group[0], "test",
+            variant=settings.variant,
+        )
+        index_is_anomaly = is_anomaly
+    else:
+        values, segment_ids, is_anomaly, timestamps = load_multichannel_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group, "test",
+            variant=settings.variant,
+        )
+        index_is_anomaly = is_anomaly.any(axis=1)
     indices = _build_window_index(
-        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        segment_ids, index_is_anomaly, cfg.window_size, cfg.prediction_horizon,
         skip_anomalous_windows=False,
     )
 
     span = cfg.window_size + cfg.prediction_horizon
     target_timestamps = timestamps[indices + span - 1]
-
-    # Window-level is_anomaly via prefix sum — any() over [s, s+span).
-    cumsum = np.empty(len(is_anomaly) + 1, dtype=np.int64)
-    cumsum[0] = 0
-    np.cumsum(is_anomaly, out=cumsum[1:])
-    window_is_anomaly = (cumsum[indices + span] - cumsum[indices]) > 0
+    window_is_anomaly = _window_any_anomalous(is_anomaly, indices, span)
 
     ds = WindowedSequenceDataset(values, indices, cfg.window_size, cfg.prediction_horizon)
     _pin = torch.cuda.is_available()
@@ -387,32 +669,40 @@ def load_window_labels(
     dependency — suitable for import in numpy-only Ray Tune trial functions
     (Phase 5).
 
+    Multivariate (docs/plans/021-multivariate-telemanom.md): same channel
+    group resolution as make_dataloaders; returns (M,) for a single channel
+    or (M, C) per channel (not OR'd) for a multivariate group.
+
     Returns:
-        (M,) bool array — True iff any timestep in the window+horizon span
+        bool array — True iff any timestep in the window+horizon span
         is anomalous (any() semantics; matches make_test_dataloader).
 
     Args:
         settings: Fully resolved Settings.
         mission:  Mission name, e.g. ``"ESA-Mission1"``.
-        channel:  Channel ID, e.g. ``"channel_1"``.
+        channel:  Channel ID, e.g. ``"channel_1"`` (or a subsystem key — see
+                  make_dataloaders).
     """
     cfg = settings.model
-    _, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "test",
-        variant=settings.variant,
-    )
+    group = _resolve_channel_group(settings, channel)
+    if len(group) == 1:
+        _, segment_ids, is_anomaly, _ = load_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group[0], "test",
+            variant=settings.variant,
+        )
+        index_is_anomaly = is_anomaly
+    else:
+        _, segment_ids, is_anomaly, _ = load_multichannel_series_parquet(
+            settings.preprocess.processed_data_dir, mission, group, "test",
+            variant=settings.variant,
+        )
+        index_is_anomaly = is_anomaly.any(axis=1)
     indices = _build_window_index(
-        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        segment_ids, index_is_anomaly, cfg.window_size, cfg.prediction_horizon,
         skip_anomalous_windows=False,
     )
     span = cfg.window_size + cfg.prediction_horizon
-    cumsum = np.empty(len(is_anomaly) + 1, dtype=np.int64)
-    cumsum[0] = 0
-    np.cumsum(is_anomaly, out=cumsum[1:])
-    result: np.ndarray[Any, np.dtype[np.bool_]] = (
-        (cumsum[indices + span] - cumsum[indices]) > 0
-    )
-    return result
+    return _window_any_anomalous(is_anomaly, indices, span)
 
 
 def window_target_timestamps_from_metadata(
@@ -459,6 +749,9 @@ def window_target_timestamps(
     should instead preload once via load_series_metadata() and call
     window_target_timestamps_from_metadata() directly.
 
+    Multivariate (docs/plans/021-multivariate-telemanom.md): same channel
+    group resolution as make_dataloaders.
+
     Returns:
         (M,) datetime64[ns] — timestamp at each window's target position
         (index s + W + H - 1), aligned 1:1 with load_window_labels() and with
@@ -467,10 +760,18 @@ def window_target_timestamps(
     Args:
         settings: Fully resolved Settings.
         mission:  Mission name, e.g. ``"ESA-Mission1"``.
-        channel:  Channel ID, e.g. ``"channel_1"``.
+        channel:  Channel ID, e.g. ``"channel_1"`` (or a subsystem key — see
+                  make_dataloaders).
     """
-    segment_ids, is_anomaly, timestamps = load_series_metadata(
-        settings.preprocess.processed_data_dir, mission, channel, "test",
-        variant=settings.variant,
-    )
+    group = _resolve_channel_group(settings, channel)
+    if len(group) == 1:
+        segment_ids, is_anomaly, timestamps = load_series_metadata(
+            settings.preprocess.processed_data_dir, mission, group[0], "test",
+            variant=settings.variant,
+        )
+    else:
+        segment_ids, is_anomaly, timestamps = load_multichannel_series_metadata(
+            settings.preprocess.processed_data_dir, mission, group, "test",
+            variant=settings.variant,
+        )
     return window_target_timestamps_from_metadata(settings, segment_ids, is_anomaly, timestamps)

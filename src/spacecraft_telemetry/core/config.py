@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ValidationInfo, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
@@ -197,6 +197,52 @@ class ModelConfig(BaseModel):
     # preserving existing ESA and ISS behaviour). Scale-dependent: the paper's
     # 0.007 is calibrated to their normalization and must not be copied blindly.
     min_error_value: float = 0.0
+
+    # Multivariate Telemanom (docs/plans/021-multivariate-telemanom.md). None
+    # (the default) reproduces the univariate path byte-for-byte: the
+    # `channel` argument threaded through train_channel/score_channel/
+    # make_dataloaders is loaded as the model's sole input/target series.
+    # Setting these makes that argument the model's registry/experiment
+    # *key* (e.g. a subsystem name) while input_channels supplies the
+    # ordered channel_ids to forecast jointly — order is persisted with the
+    # model (model/io.py) and a mismatch at inference is a hard error, never
+    # a silent reorder. target_channels must equal input_channels: the
+    # comparator's own config sets both to the same subset, and this plan
+    # does not decouple them — kept as two fields for fidelity to their
+    # FixedParameters naming and so a future decoupled target set is a
+    # validator change, not a field rename.
+    input_channels: list[str] | None = None
+    target_channels: list[str] | None = None
+
+    @field_validator("input_channels")
+    @classmethod
+    def input_channels_valid(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("input_channels, if set, must be non-empty")
+        if len(set(v)) != len(v):
+            raise ValueError(f"input_channels must not contain duplicates, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _channel_group_pairing(self) -> ModelConfig:
+        # A plain field_validator on target_channels would only run when the
+        # caller explicitly passes it — pydantic skips validators on
+        # defaulted fields — so an omitted target_channels next to a set
+        # input_channels would silently pass. model_validator(mode="after")
+        # always runs, defaults included.
+        if (self.target_channels is None) != (self.input_channels is None):
+            raise ValueError(
+                "input_channels and target_channels must both be None or both be "
+                "set — see docs/plans/021-multivariate-telemanom.md"
+            )
+        if self.target_channels is not None and self.target_channels != self.input_channels:
+            raise ValueError(
+                "target_channels must equal input_channels; decoupled target sets "
+                "are out of scope for plan 021"
+            )
+        return self
 
     @field_validator(
         "hidden_dim", "num_layers", "batch_size", "epochs", "early_stopping_patience",

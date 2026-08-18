@@ -4,17 +4,25 @@ window_target_timestamps."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 torch = pytest.importorskip("torch")
 
 from spacecraft_telemetry.model.dataset import (  # noqa: E402
     WindowedSequenceDataset,
+    _align_multi_channel,
     _build_window_index,
+    _joint_segment_ids,
+    _resolve_channel_group,
+    _window_any_anomalous,
+    load_multichannel_series_parquet,
     load_series_metadata,
     load_series_parquet,
     make_dataloaders,
@@ -452,3 +460,327 @@ def test_window_target_timestamps_from_metadata_matches_disk_read(
     actual = window_target_timestamps_from_metadata(settings, segment_ids, is_anomaly, timestamps)
 
     np.testing.assert_array_equal(actual, expected)
+
+
+# ---------------------------------------------------------------------------
+# Multivariate (docs/plans/021-multivariate-telemanom.md)
+# ---------------------------------------------------------------------------
+
+
+def _write_synthetic_channel(
+    processed_dir: Path,
+    mission: str,
+    channel: str,
+    split: str,
+    n_rows: int,
+    value_offset: float,
+    anomaly_tail: int = 0,
+    seg_sizes: tuple[int, ...] | None = None,
+) -> None:
+    """Write one channel's per-timestep series Parquet for multi-channel tests.
+
+    All channels share the same 90s-cadence timestamp grid starting at a
+    fixed epoch, so tests fully control alignment; ``value_offset`` keeps
+    each channel's values distinguishable after stacking into (N, C).
+    """
+    seg_sizes = seg_sizes or (n_rows,)
+    assert sum(seg_sizes) == n_rows
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    timestamps = [
+        pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+            pa.timestamp("us", tz="UTC")
+        )
+        for i in range(n_rows)
+    ]
+    values = [float(i) + value_offset for i in range(n_rows)]
+    seg_ids = [seg for seg, size in enumerate(seg_sizes) for _ in range(size)]
+    is_anomaly = [False] * n_rows
+    for i in range(n_rows - anomaly_tail, n_rows):
+        is_anomaly[i] = True
+
+    table = pa.table(
+        {
+            "telemetry_timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(values, type=pa.float32()),
+            "segment_id": pa.array(seg_ids, type=pa.int32()),
+            "is_anomaly": pa.array(is_anomaly, type=pa.bool_()),
+        }
+    )
+    part_dir = processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, part_dir / "part.parquet")
+
+
+# --- _resolve_channel_group ---
+
+
+def test_resolve_channel_group_none_defaults_to_single_channel() -> None:
+    from spacecraft_telemetry.core.config import Settings
+
+    settings = Settings()
+    assert _resolve_channel_group(settings, "channel_41") == ["channel_41"]
+
+
+def test_resolve_channel_group_uses_input_channels_when_set() -> None:
+    from spacecraft_telemetry.core.config import Settings
+
+    settings = Settings(
+        model={
+            "input_channels": ["channel_41", "channel_42"],
+            "target_channels": ["channel_41", "channel_42"],
+        }
+    )
+    assert _resolve_channel_group(settings, "subsystem_1") == ["channel_41", "channel_42"]
+
+
+# --- _joint_segment_ids ---
+
+
+def test_joint_segment_ids_boundary_from_any_channel() -> None:
+    # channel A boundary at t=3; channel B boundary at t=2 -> joint has both.
+    seg = np.array([[0, 0], [0, 0], [0, 1], [1, 1], [1, 1]], dtype=np.int32)
+    joint = _joint_segment_ids(seg)
+    np.testing.assert_array_equal(joint, [0, 0, 1, 2, 2])
+
+
+def test_joint_segment_ids_empty_and_single_row() -> None:
+    assert _joint_segment_ids(np.empty((0, 2), dtype=np.int32)).shape == (0,)
+    np.testing.assert_array_equal(_joint_segment_ids(np.array([[3, 3]], dtype=np.int32)), [0])
+
+
+# --- _align_multi_channel ---
+
+
+def test_align_multi_channel_full_overlap() -> None:
+    ts = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ch_a = (
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool),
+        ts,
+    )
+    ch_b = (
+        np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32),
+        np.zeros(4, dtype=np.int32),
+        np.array([False, True, False, False]),
+        ts,
+    )
+    values, seg, is_anom, out_ts = _align_multi_channel([ch_a, ch_b], ["a", "b"])
+    assert values.shape == (4, 2)
+    np.testing.assert_array_equal(values[:, 0], [1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(values[:, 1], [10.0, 20.0, 30.0, 40.0])
+    np.testing.assert_array_equal(is_anom[:, 1], [False, True, False, False])
+    np.testing.assert_array_equal(seg, [0, 0, 0, 0])
+    np.testing.assert_array_equal(pd.DatetimeIndex(out_ts), pd.DatetimeIndex(ts))
+
+
+def test_align_multi_channel_partial_overlap_intersects() -> None:
+    """Alignment loss: a channel missing rows shrinks the joined series,
+    and the surviving rows must still map to the correct source values."""
+    ts_a = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ts_b = np.array([60, 120, 180, 240], dtype="datetime64[s]")  # missing t=0, extra t=240
+    ch_a = (
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool),
+        ts_a,
+    )
+    ch_b = (
+        np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32),
+        np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool),
+        ts_b,
+    )
+    values, _seg, _is_anom, out_ts = _align_multi_channel([ch_a, ch_b], ["a", "b"])
+    assert len(out_ts) == 3
+    np.testing.assert_array_equal(values[:, 0], [2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(values[:, 1], [10.0, 20.0, 30.0])
+
+
+def test_align_multi_channel_zero_overlap_raises() -> None:
+    ts_a = np.array([0, 60], dtype="datetime64[s]")
+    ts_b = np.array([1000, 1060], dtype="datetime64[s]")
+    zeros_f32, zeros_i32, zeros_bool = (
+        np.zeros(2, dtype=np.float32),
+        np.zeros(2, dtype=np.int32),
+        np.zeros(2, dtype=bool),
+    )
+    ch_a = (zeros_f32, zeros_i32, zeros_bool, ts_a)
+    ch_b = (zeros_f32, zeros_i32, zeros_bool, ts_b)
+    with pytest.raises(ValueError, match="No overlapping timestamps"):
+        _align_multi_channel([ch_a, ch_b], ["a", "b"])
+
+
+def test_load_multichannel_series_parquet_missing_channel_raises(tmp_path: Path) -> None:
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    _write_synthetic_channel(processed_dir, mission, "channel_1", "train", 10, value_offset=0.0)
+    with pytest.raises(FileNotFoundError, match="channel_id=channel_2"):
+        load_multichannel_series_parquet(
+            processed_dir, mission, ["channel_1", "channel_2"], "train"
+        )
+
+
+# --- _window_any_anomalous ---
+
+
+def test_window_any_anomalous_1d_matches_prefix_sum_definition() -> None:
+    is_anom = np.array([False, False, True, False, False])
+    indices = np.array([0, 1, 2], dtype=np.int32)
+    result = _window_any_anomalous(is_anom, indices, span=2)
+    np.testing.assert_array_equal(result, [False, True, True])
+
+
+def test_window_any_anomalous_2d_is_independent_per_channel() -> None:
+    is_anom = np.array([[False, True], [False, False], [True, False]])
+    indices = np.array([0, 1], dtype=np.int32)
+    result = _window_any_anomalous(is_anom, indices, span=2)
+    assert result.shape == (2, 2)
+    np.testing.assert_array_equal(result, [[False, True], [True, False]])
+
+
+# --- WindowedSequenceDataset (multivariate branch) ---
+
+
+def test_windowed_dataset_multivariate_item_shapes() -> None:
+    W, H, C = 3, 1, 2
+    n = W + H + 5
+    values = np.stack(
+        [np.arange(n, dtype=np.float32), np.arange(n, dtype=np.float32) * 10], axis=1
+    )
+    seg_ids = np.zeros(n, dtype=np.int32)
+    is_anomaly = np.zeros(n, dtype=bool)
+    idx = _build_window_index(seg_ids, is_anomaly, W, H, False)
+    ds = WindowedSequenceDataset(values, idx, W, H)
+    x, y = ds[0]
+    assert x.shape == (W, C)
+    assert y.shape == (C,)
+
+
+def test_windowed_dataset_multivariate_values_correct() -> None:
+    W, H = 3, 1
+    values = np.stack(
+        [np.arange(10, dtype=np.float32), np.arange(10, dtype=np.float32) + 100], axis=1
+    )
+    seg_ids = np.zeros(10, dtype=np.int32)
+    is_anomaly = np.zeros(10, dtype=bool)
+    idx = _build_window_index(seg_ids, is_anomaly, W, H, False)
+    ds = WindowedSequenceDataset(values, idx, W, H)
+    x, y = ds[0]
+    np.testing.assert_allclose(x.numpy(), [[0, 100], [1, 101], [2, 102]])
+    np.testing.assert_allclose(y.numpy(), [3, 103])
+
+
+def test_windowed_dataset_rejects_bad_ndim() -> None:
+    values = np.zeros((4, 2, 2), dtype=np.float32)
+    with pytest.raises(ValueError, match="1-D or 2-D"):
+        WindowedSequenceDataset(values, np.array([0], dtype=np.int32), 2, 1)
+
+
+# --- make_dataloaders / make_test_dataloader with input_channels ---
+
+
+def test_make_dataloaders_multichannel_shapes_and_window_count(tmp_path: Path) -> None:
+    from spacecraft_telemetry.core.config import Settings
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    W, H = 5, 1
+    n_rows = 20
+    _write_synthetic_channel(
+        processed_dir, mission, "channel_1", "train", n_rows, value_offset=0.0
+    )
+    _write_synthetic_channel(
+        processed_dir, mission, "channel_2", "train", n_rows, value_offset=100.0
+    )
+
+    settings = Settings(
+        model={
+            "window_size": W,
+            "prediction_horizon": H,
+            "input_channels": ["channel_1", "channel_2"],
+            "target_channels": ["channel_1", "channel_2"],
+            "batch_size": 4,
+        },
+        preprocess={"processed_data_dir": str(processed_dir)},
+    )
+    train_loader, val_loader = make_dataloaders(settings, mission, "subsystem_1")
+    x_batch, y_batch = next(iter(train_loader))
+    assert x_batch.shape[1:] == (W, 2)
+    assert y_batch.shape[1:] == (2,)
+
+    span = W + H
+    expected_windows = n_rows - span + 1
+    total = len(train_loader.dataset) + len(val_loader.dataset)  # type: ignore[arg-type]
+    assert total == expected_windows
+
+
+def test_make_test_dataloader_multichannel_per_channel_anomaly_flags(tmp_path: Path) -> None:
+    from spacecraft_telemetry.core.config import Settings
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    W, H = 3, 1
+    n_rows = 10
+    _write_synthetic_channel(
+        processed_dir, mission, "channel_1", "test", n_rows, value_offset=0.0, anomaly_tail=0
+    )
+    _write_synthetic_channel(
+        processed_dir, mission, "channel_2", "test", n_rows, value_offset=100.0, anomaly_tail=2
+    )
+
+    settings = Settings(
+        model={
+            "window_size": W,
+            "prediction_horizon": H,
+            "input_channels": ["channel_1", "channel_2"],
+            "target_channels": ["channel_1", "channel_2"],
+        },
+        preprocess={"processed_data_dir": str(processed_dir)},
+    )
+    _loader, _target_timestamps, window_is_anomaly = make_test_dataloader(
+        settings, mission, "subsystem_1"
+    )
+    assert window_is_anomaly.shape[1] == 2
+    assert not window_is_anomaly[:, 0].any()  # channel_1 is clean
+    assert window_is_anomaly[:, 1].any()  # channel_2 has an anomalous tail
+    assert not window_is_anomaly[0, 1]  # first window doesn't touch the tail
+
+
+def test_input_channels_single_item_matches_default_univariate_path(
+    tiny_series_parquet: SeriesParquetFixture,
+) -> None:
+    """input_channels=[channel] must reproduce input_channels=None exactly —
+    the operative form of 'C==1 reproduces the univariate path exactly.'"""
+    from spacecraft_telemetry.core.config import Settings
+
+    fx = tiny_series_parquet
+    model_base = {"window_size": fx.window_size, "prediction_horizon": fx.prediction_horizon}
+    preprocess = {"processed_data_dir": str(fx.processed_dir)}
+
+    settings_default = Settings(model=model_base, preprocess=preprocess)
+    settings_explicit = Settings(
+        model={**model_base, "input_channels": [fx.channel], "target_channels": [fx.channel]},
+        preprocess=preprocess,
+    )
+
+    train_a, val_a = make_dataloaders(settings_default, fx.mission, fx.channel)
+    train_b, val_b = make_dataloaders(settings_explicit, fx.mission, fx.channel)
+    assert len(train_a.dataset) == len(train_b.dataset)  # type: ignore[arg-type]
+    assert len(val_a.dataset) == len(val_b.dataset)  # type: ignore[arg-type]
+
+    # shuffle=True on the train loader, so compare via the deterministic val loader.
+    xa_val = torch.cat([x for x, _ in val_a])
+    xb_val = torch.cat([x for x, _ in val_b])
+    ya_val = torch.cat([y for _, y in val_a])
+    yb_val = torch.cat([y for _, y in val_b])
+    np.testing.assert_array_equal(xa_val.numpy(), xb_val.numpy())
+    np.testing.assert_array_equal(ya_val.numpy(), yb_val.numpy())
+
+    loader_a, ts_a, wa = make_test_dataloader(settings_default, fx.mission, fx.channel)
+    loader_b, ts_b, wb = make_test_dataloader(settings_explicit, fx.mission, fx.channel)
+    np.testing.assert_array_equal(ts_a, ts_b)
+    np.testing.assert_array_equal(wa, wb)
+    xa2 = torch.cat([x for x, _ in loader_a])
+    xb2 = torch.cat([x for x, _ in loader_b])
+    np.testing.assert_array_equal(xa2.numpy(), xb2.numpy())

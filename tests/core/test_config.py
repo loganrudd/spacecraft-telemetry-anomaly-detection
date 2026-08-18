@@ -284,6 +284,58 @@ class TestLoadSettings:
 
 
 # ---------------------------------------------------------------------------
+# ModelConfig.input_channels / target_channels (Plan 021 — multivariate Telemanom)
+# ---------------------------------------------------------------------------
+
+
+class TestModelChannelGroup:
+    def test_default_is_none(self) -> None:
+        cfg = Settings().model
+        assert cfg.input_channels is None
+        assert cfg.target_channels is None
+
+    def test_accepts_matching_lists(self) -> None:
+        cfg = Settings(
+            model={
+                "input_channels": ["channel_41", "channel_42"],
+                "target_channels": ["channel_41", "channel_42"],
+            }
+        ).model
+        assert cfg.input_channels == ["channel_41", "channel_42"]
+        assert cfg.target_channels == ["channel_41", "channel_42"]
+
+    def test_rejects_empty_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="non-empty"):
+            Settings(model={"input_channels": [], "target_channels": []})
+
+    def test_rejects_duplicate_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="duplicates"):
+            Settings(
+                model={
+                    "input_channels": ["channel_41", "channel_41"],
+                    "target_channels": ["channel_41", "channel_41"],
+                }
+            )
+
+    def test_rejects_target_channels_without_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="both be None or both be set"):
+            Settings(model={"target_channels": ["channel_41"]})
+
+    def test_rejects_input_channels_without_target_channels(self) -> None:
+        with pytest.raises(ValidationError, match="both be None or both be set"):
+            Settings(model={"input_channels": ["channel_41"]})
+
+    def test_rejects_target_channels_not_matching_input(self) -> None:
+        with pytest.raises(ValidationError, match="must equal input_channels"):
+            Settings(
+                model={
+                    "input_channels": ["channel_41", "channel_42"],
+                    "target_channels": ["channel_42", "channel_41"],
+                }
+            )
+
+
+# ---------------------------------------------------------------------------
 # Settings.variant (Plan 020 — experiment variant axis)
 # ---------------------------------------------------------------------------
 
