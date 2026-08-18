@@ -12,9 +12,10 @@
 # Sizing rationale:
 #   Head: 1 vCPU / 4 GiB — driver only, no model work.
 #   Workers: g2-standard-8 (8 vCPU) + 1× L4 on-demand; NUM_GPUS controls packing.
-#   Default NUM_GPUS=0.125: 8-way pack, 8 tasks × 1 CPU + 0.125 GPU — fully utilises both.
+#   Default NUM_GPUS=0.16: 6-way pack, 6 tasks × 1 CPU + 0.16 GPU — leaves 2 vCPU
+#     headroom on the node and matches the ISS packing factor for both missions.
 #   NUM_GPUS=1: 1 channel at a time on the full GPU — use for outlier channels that
-#     exceed the 60-min auth-token window or stall under 8-way pack.
+#     exceed the 60-min auth-token window or stall under packed concurrency.
 
 apiVersion: ray.io/v1
 kind: RayJob

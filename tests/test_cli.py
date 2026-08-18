@@ -711,6 +711,79 @@ class TestRayTrainCommand:
         assert result.exit_code == 0
         assert "--subsystem" in result.output
 
+    def test_help_shows_multivariate_option(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "train", "--help"])
+        assert result.exit_code == 0
+        assert "--multivariate" in result.output
+
+    def test_multivariate_calls_train_all_subsystems(self, runner: CliRunner) -> None:
+        """--multivariate routes to train_all_subsystems, not train_all_channels
+        (docs/plans/021-multivariate-telemanom.md)."""
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.train_all_channels",
+            ) as mock_train_channels,
+            patch(
+                "spacecraft_telemetry.ray_fanout.train_all_subsystems",
+                return_value=[
+                    {
+                        "status": "ok", "channel": "subsystem_1",
+                        "best_epoch": 5, "best_val_loss": 0.01,
+                    },
+                ],
+            ) as mock_train_subsystems,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test", "ray", "train",
+                    "--mission=ESA-Mission1", "--channels=channel_41,channel_42",
+                    "--multivariate",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_train_subsystems.assert_called_once()
+        mock_train_channels.assert_not_called()
+        called_channels = mock_train_subsystems.call_args.args[2]
+        assert set(called_channels) == {"channel_41", "channel_42"}
+        assert "subsystem_1" in result.output
+
+    def test_default_calls_train_all_channels_not_subsystems(self, runner: CliRunner) -> None:
+        """Without --multivariate, behaviour is byte-identical to before —
+        train_all_subsystems is never invoked."""
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.train_all_channels",
+                return_value=[
+                    {
+                        "status": "ok", "channel": "channel_41",
+                        "best_epoch": 5, "best_val_loss": 0.01,
+                    },
+                ],
+            ) as mock_train_channels,
+            patch(
+                "spacecraft_telemetry.ray_fanout.train_all_subsystems",
+            ) as mock_train_subsystems,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test", "ray", "train",
+                    "--mission=ESA-Mission1", "--channels=channel_41",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_train_channels.assert_called_once()
+        mock_train_subsystems.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # ray score command
@@ -889,6 +962,92 @@ class TestRayScoreCommand:
         result = runner.invoke(main, ["ray", "score", "--help"])
         assert result.exit_code == 0
         assert "--subsystem" in result.output
+
+    def test_help_shows_multivariate_option(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["ray", "score", "--help"])
+        assert result.exit_code == 0
+        assert "--multivariate" in result.output
+
+    def test_multivariate_calls_score_all_subsystems(self, runner: CliRunner) -> None:
+        """--multivariate routes to score_all_subsystems and prints the
+        per-channel breakdown nested under the subsystem result
+        (docs/plans/021-multivariate-telemanom.md, model/scoring.py)."""
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+            ) as mock_score_channels,
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_subsystems",
+                return_value=[
+                    {
+                        "status": "ok",
+                        "channel": "subsystem_1",
+                        "channel_41": {
+                            "precision": 0.9, "recall": 0.8, "f0_5": 0.87,
+                            "seg_f0_5": 0.80, "n_true_seqs": 4, "n_pred_seqs": 5,
+                        },
+                        "channel_42": {
+                            "precision": 0.7, "recall": 0.6, "f0_5": 0.67,
+                            "seg_f0_5": 0.60, "n_true_seqs": 3, "n_pred_seqs": 4,
+                        },
+                    },
+                ],
+            ) as mock_score_subsystems,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test", "ray", "score",
+                    "--mission=ESA-Mission1", "--channels=channel_41,channel_42",
+                    "--multivariate",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_score_subsystems.assert_called_once()
+        mock_score_channels.assert_not_called()
+        called_channels = mock_score_subsystems.call_args.args[2]
+        assert set(called_channels) == {"channel_41", "channel_42"}
+        assert "subsystem_1" in result.output
+        assert "channel_41" in result.output
+        assert "channel_42" in result.output
+
+    def test_default_calls_score_all_channels_not_subsystems(self, runner: CliRunner) -> None:
+        """Without --multivariate, behaviour is byte-identical to before —
+        score_all_subsystems is never invoked."""
+        settings = load_settings("test")
+        with (
+            patch("spacecraft_telemetry.cli.load_settings", return_value=settings),
+            patch("spacecraft_telemetry.cli._ray_session", return_value=self._mock_cm()),
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_channels",
+                return_value=[
+                    {
+                        "status": "ok", "channel": "channel_41",
+                        "precision": 0.9, "recall": 0.8, "f0_5": 0.87, "seg_f0_5": 0.80,
+                        "n_true_seqs": 4, "n_pred_seqs": 5,
+                        "pruned_seg_f0_5": 0.83, "pruned_n_pred_seqs": 4,
+                    },
+                ],
+            ) as mock_score_channels,
+            patch(
+                "spacecraft_telemetry.ray_fanout.score_all_subsystems",
+            ) as mock_score_subsystems,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "--env=test", "ray", "score",
+                    "--mission=ESA-Mission1", "--channels=channel_41",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_score_channels.assert_called_once()
+        mock_score_subsystems.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

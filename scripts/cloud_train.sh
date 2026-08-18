@@ -52,14 +52,11 @@ REGION="${REGION:-us-central1}"
 # segment must be a single pre-resolved variable the YAML can interpolate
 # verbatim rather than each YAML site re-deriving the conditional itself.
 VARIANT_SEG="${VARIANT:+/${VARIANT}}"
-# ISS: 6-way L4 packing (floor(1/0.16)=6). ESA: 8-way (floor(1/0.125)=8).
-# 0.167 rounds to floor(5.99)=5 under floating point; 0.16 is the safe 6-way value.
-# Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption issues).
-if [[ "${MISSION}" = "ISS" ]]; then
-  NUM_GPUS="${NUM_GPUS:-0.16}"
-else
-  NUM_GPUS="${NUM_GPUS:-0.125}"
-fi
+# 6-way L4 packing by default for every mission (floor(1/0.16)=6).
+# 0.167 (=1/6 exactly) rounds to floor(5.99)=5 under floating point; 0.16 is
+# the safe 6-way value. Pass NUM_GPUS=1 to run one channel at a time (large
+# channels / preemption issues).
+NUM_GPUS="${NUM_GPUS:-0.16}"
 
 # Build the channel-selection argument for the RayJob entrypoint.
 # Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.

@@ -847,7 +847,19 @@ def ray_group() -> None:
     "--max-channels",
     type=int,
     default=None,
-    help="Cap sweep at this many channels (useful for smoke tests).",
+    help="Cap sweep at this many channels (useful for smoke tests). Under "
+    "--multivariate this caps the number of SUBSYSTEM groups instead.",
+)
+@click.option(
+    "--multivariate",
+    is_flag=True,
+    default=False,
+    help="Train one joint multivariate model per subsystem group instead of "
+    "one model per channel (docs/plans/021-multivariate-telemanom.md). The "
+    "resolved channel list is grouped by subsystem (load_channel_subsystem_map) "
+    "and settings.model.input_channels/target_channels are set per group — "
+    "each task trains a single n_channels=len(group) model, registered under "
+    "the subsystem name rather than a channel_id.",
 )
 @click.pass_context
 def ray_train(
@@ -857,6 +869,7 @@ def ray_train(
     channels_from: str | None,
     subsystem: str | None,
     max_channels: int | None,
+    multivariate: bool,
 ) -> None:
     """Train channels in parallel using Ray Core.
 
@@ -876,8 +889,13 @@ def ray_train(
         spacecraft-telemetry --env cloud ray train \\
             --mission ESA-Mission2 \\
             --channels-from gs://my-project-processed-data/ESA-Mission2/channels.txt
+
+        # One joint 6-in/6-out model for a subsystem instead of 6 channel models
+        spacecraft-telemetry ray train --mission ESA-Mission1 --variant adb-84m \\
+            --channels channel_41,channel_42,channel_43,channel_44,channel_45,channel_46 \\
+            --multivariate
     """
-    from spacecraft_telemetry.ray_fanout import train_all_channels
+    from spacecraft_telemetry.ray_fanout import train_all_channels, train_all_subsystems
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -892,15 +910,21 @@ def ray_train(
             mission=mission,
             n_channels=len(channel_list),
             subsystem=subsystem,
+            multivariate=multivariate,
         )
-        results = train_all_channels(
-            settings, mission, channel_list, max_channels=max_channels
-        )
+        if multivariate:
+            results = train_all_subsystems(
+                settings, mission, channel_list, max_subsystems=max_channels
+            )
+        else:
+            results = train_all_channels(
+                settings, mission, channel_list, max_channels=max_channels
+            )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
     n_err = len(results) - n_ok
     click.echo(f"Mission  : {mission}")
-    click.echo(f"Channels : {len(results)}")
+    click.echo(f"{'Subsystems' if multivariate else 'Channels '}: {len(results)}")
     click.echo(f"OK       : {n_ok}")
     click.echo(f"Errors   : {n_err}")
     for r in results:
@@ -974,6 +998,14 @@ def ray_train(
     "nominal baseline run for the HPO false-positive-rate penalty — omit this "
     "flag for the baseline/nominal scoring pass.",
 )
+@click.option(
+    "--multivariate",
+    is_flag=True,
+    default=False,
+    help="Score the joint multivariate model for each subsystem group instead "
+    "of one model per channel (docs/plans/021-multivariate-telemanom.md) — "
+    "must match how the model was trained (ray train --multivariate).",
+)
 @click.pass_context
 def ray_score(
     ctx: click.Context,
@@ -986,6 +1018,7 @@ def ray_score(
     eval_split: str,
     processed_dir: str | None,
     injected: bool,
+    multivariate: bool,
 ) -> None:
     """Score channels in parallel using Ray Core.
 
@@ -1009,10 +1042,15 @@ def ray_score(
         spacecraft-telemetry ray score --mission ISS \\
             --processed-dir data/processed_injected --injected
         spacecraft-telemetry ray score --mission ISS
+
+        # Score the joint multivariate model trained via ray train --multivariate
+        spacecraft-telemetry ray score --mission ESA-Mission1 --variant adb-84m \\
+            --channels channel_41,channel_42,channel_43,channel_44,channel_45,channel_46 \\
+            --multivariate
     """
     import json
 
-    from spacecraft_telemetry.ray_fanout import score_all_channels
+    from spacecraft_telemetry.ray_fanout import score_all_channels, score_all_subsystems
 
     settings = ctx.obj["settings"]
     log = get_logger(__name__)
@@ -1042,27 +1080,53 @@ def ray_score(
             n_channels=len(channel_list),
             subsystem=subsystem,
             eval_split=eval_split,
+            multivariate=multivariate,
         )
-        results = score_all_channels(
-            settings,
-            mission,
-            channel_list,
-            max_channels=max_channels,
-            tuned_configs=tuned,
-            eval_split=eval_split,
-            data_source="injected" if injected else "nominal",
-        )
+        if multivariate:
+            results = score_all_subsystems(
+                settings,
+                mission,
+                channel_list,
+                max_subsystems=max_channels,
+                tuned_configs=tuned,
+                eval_split=eval_split,
+                data_source="injected" if injected else "nominal",
+            )
+        else:
+            results = score_all_channels(
+                settings,
+                mission,
+                channel_list,
+                max_channels=max_channels,
+                tuned_configs=tuned,
+                eval_split=eval_split,
+                data_source="injected" if injected else "nominal",
+            )
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
     n_skipped = sum(1 for r in results if r["status"] == "skipped")
     n_err = len(results) - n_ok - n_skipped
     click.echo(f"Mission  : {mission}")
-    click.echo(f"Channels : {len(results)}")
+    click.echo(f"{'Subsystems' if multivariate else 'Channels '}: {len(results)}")
     click.echo(f"OK       : {n_ok}")
     click.echo(f"Skipped  : {n_skipped} (no trained model)")
     click.echo(f"Errors   : {n_err}")
     for r in results:
-        if r["status"] == "ok":
+        if r["status"] == "ok" and multivariate:
+            # Multivariate result: {channel_id: metrics_dict, ...} spread
+            # alongside the task's own status/channel keys (model/scoring.py's
+            # score_channel docstring) — print one line per member channel.
+            click.echo(f"  {r['channel']} (joint model):")
+            for member_channel, m in r.items():
+                if not isinstance(m, dict):
+                    continue
+                click.echo(
+                    f"    {member_channel:20s}  "
+                    f"P={m['precision']:.3f}  R={m['recall']:.3f}  F0.5={m['f0_5']:.3f}  "
+                    f"segF0.5={m['seg_f0_5']:.3f}"
+                    f"  ({int(m['n_true_seqs'])} true / {int(m['n_pred_seqs'])} pred seqs)"
+                )
+        elif r["status"] == "ok":
             # Headline = serving-parity (un-pruned); pruned = offline ceiling.
             click.echo(
                 f"  {r['channel']:20s}  "
