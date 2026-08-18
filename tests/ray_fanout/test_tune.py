@@ -583,7 +583,7 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
 
     from spacecraft_telemetry.model.scoring import score_channel
     from spacecraft_telemetry.model.training import train_channel
-    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+    from spacecraft_telemetry.ray_fanout.tune import SEARCH_SPACE, run_hpo_sweep
 
     mission = "ESA-Mission1"
     channel = "channel_1"
@@ -610,19 +610,27 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
         "config", "seg_f0_5", "nominal_fp_rate", "objective", "run_id",
     }
     config = best["config"]
+    # Mirrors SEARCH_SPACE exactly — min_error_value joined it in 583a850
+    # (the ESA-ADB absolute error floor). Keep this set and the bounds below
+    # in sync with SEARCH_SPACE; an exhaustive == is deliberate, so adding a
+    # tunable without deciding what it should smoke-test fails loudly here.
+    assert set(config.keys()) == set(SEARCH_SPACE.keys())
     assert set(config.keys()) == {
         "error_smoothing_window",
         "threshold_window",
         "threshold_z",
         "threshold_min_anomaly_len",
+        "min_error_value",
     }
     assert isinstance(config["error_smoothing_window"], int)
     assert isinstance(config["threshold_window"], int)
     assert isinstance(config["threshold_min_anomaly_len"], int)
     assert isinstance(config["threshold_z"], float)
+    assert isinstance(config["min_error_value"], float)
     assert 5 <= config["error_smoothing_window"] <= 100
     assert 50 <= config["threshold_window"] <= 500
     assert 1 <= config["threshold_min_anomaly_len"] <= 10
+    assert 0.0 <= config["min_error_value"] <= 0.3
     assert 1.5 <= config["threshold_z"] <= 5.0
     assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)

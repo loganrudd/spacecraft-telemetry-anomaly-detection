@@ -423,7 +423,7 @@ class TestLabelTimesteps:
         assert not out["is_anomaly"].iloc[0]
 
     def test_single_row_channel_point_label_logs_warning(
-        self, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """len(ts) <= 1 keeps half_width at 0, so the point label matches nothing.
 
@@ -432,13 +432,32 @@ class TestLabelTimesteps:
         through the other guard (len(ts) > 1). It must not raise — preprocessing
         tolerates a degenerate channel — but it must be logged.
 
-        structlog emits to stdout via PrintLoggerFactory, and module-level
-        loggers are cached on first use (core/logging.py's
-        cache_logger_on_first_use=True) — by the time this runs inside the
-        full suite, this module's logger has typically already been realized
-        by an earlier test, which makes structlog.testing.capture_logs() miss
-        the event. Check capsys instead (see test_iss_io.py's precedent).
+        Asserts on the STRUCTURED event rather than rendered stdout. An earlier
+        version checked capsys for the literal substring "n_point_labels=1",
+        which is order-dependent and fails intermittently: core/logging.py's
+        get_logger() calls .bind() at import time, so this module's logger
+        freezes whatever structlog config was live when
+        preprocess.transforms was first imported — and that varies with which
+        tests ran first. When the frozen renderer is ConsoleRenderer(colors=True)
+        (structlog's default) the pair renders as
+        "\x1b[36mn_point_labels\x1b[0m=\x1b[35m1\x1b[0m", so the literal
+        substring is absent even though the event was emitted correctly.
+        Patching the module logger removes the dependency on rendering entirely
+        and lets us assert the exact payload instead of a substring.
         """
+        import spacecraft_telemetry.preprocess.transforms as _transforms
+
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+            def info(self, event: str, **kwargs: object) -> None:
+                pass  # label_timesteps also emits a summary info event
+
+        monkeypatch.setattr(_transforms, "log", _RecordingLogger())
+
         df = _make_channel_df(n=1)
         instant = df["telemetry_timestamp"].iloc[0]
         labels = pd.DataFrame(
@@ -452,10 +471,12 @@ class TestLabelTimesteps:
         out = label_timesteps(df, labels)
 
         assert not out["is_anomaly"].any(), "degenerate channel should mark nothing"
-        stdout = capsys.readouterr().out
-        assert "label_timesteps.point_labels_dropped" in stdout
-        assert "warning" in stdout
-        assert "n_point_labels=1" in stdout
+        assert len(recorded) == 1, f"expected exactly one warning, got {recorded}"
+        event, fields = recorded[0]
+        assert event == "label_timesteps.point_labels_dropped"
+        assert fields["n_point_labels"] == 1
+        assert fields["channel_id"] == "channel_1"
+        assert "half_width" in str(fields["reason"])
 
     def test_empty_labels_returns_all_false(self) -> None:
         df = _make_channel_df(n=20)
