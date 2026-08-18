@@ -26,7 +26,7 @@ from torch.utils.data import Dataset as _TorchDataset
 from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path
 
 
 def _read_partition_table(
@@ -35,6 +35,7 @@ def _read_partition_table(
     channel: str,
     split: Literal["train", "test"],
     columns: list[str],
+    variant: str | None = None,
 ) -> pa.Table:
     """Read + concat + timestamp-sort one channel partition's Parquet files.
 
@@ -42,13 +43,19 @@ def _read_partition_table(
     identical partition-discovery/sort logic and differ only in which
     columns PyArrow actually parses.
 
+    ``variant`` defaults to None, reproducing the pre-variant partition path
+    byte for byte (see core/paths.output_path). Callers within this module
+    that already hold a Settings object pass ``settings.variant`` explicitly;
+    external callers (api/, esa_adb/) that pass a bare processed_dir string
+    are unaffected by default.
+
     Raises:
         FileNotFoundError: If the partition directory doesn't exist or has no
             Parquet files.
     """
-    partition_dir = (
-        to_upath(processed_dir) / mission / split
-        / f"mission_id={mission}" / f"channel_id={channel}"
+    partition_dir = output_path(
+        processed_dir, mission, variant,
+        split, f"mission_id={mission}", f"channel_id={channel}",
     )
     if not partition_dir.exists():
         raise FileNotFoundError(
@@ -72,6 +79,7 @@ def load_series_parquet(
     mission: str,
     channel: str,
     split: Literal["train", "test"],
+    variant: str | None = None,
 ) -> tuple[
     np.ndarray[Any, np.dtype[np.float32]],
     np.ndarray[Any, np.dtype[np.int32]],
@@ -81,7 +89,10 @@ def load_series_parquet(
     """Read per-timestep series for one channel partition.
 
     Reads from the Hive-partitioned layout:
-        {processed_dir}/{mission}/{split}/mission_id={mission}/channel_id={channel}/*.parquet
+        {processed_dir}/{mission}/[{variant}/]{split}/mission_id={mission}/channel_id={channel}/*.parquet
+
+    ``variant`` defaults to None (today's layout, unchanged) — see
+    core/paths.output_path.
 
     Returns:
         values:      (N,) float32  — normalized values, sorted by timestamp
@@ -96,6 +107,7 @@ def load_series_parquet(
     table = _read_partition_table(
         processed_dir, mission, channel, split,
         columns=["telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly"],
+        variant=variant,
     )
 
     values = table.column("value_normalized").to_numpy(zero_copy_only=False).astype(np.float32)
@@ -111,6 +123,7 @@ def load_series_metadata(
     mission: str,
     channel: str,
     split: Literal["train", "test"],
+    variant: str | None = None,
 ) -> tuple[
     np.ndarray[Any, np.dtype[np.int32]],
     np.ndarray[Any, np.dtype[np.bool_]],
@@ -125,6 +138,9 @@ def load_series_metadata(
     needed (window-index building, target-timestamp derivation, observed
     timeline construction).
 
+    ``variant`` defaults to None (today's layout, unchanged) — see
+    core/paths.output_path.
+
     Returns:
         segment_ids: (N,) int32    — segment ID per timestep
         is_anomaly:  (N,) bool     — per-timestep anomaly flag
@@ -136,6 +152,7 @@ def load_series_metadata(
     table = _read_partition_table(
         processed_dir, mission, channel, split,
         columns=["telemetry_timestamp", "segment_id", "is_anomaly"],
+        variant=variant,
     )
 
     segment_ids = table.column("segment_id").to_numpy(zero_copy_only=False).astype(np.int32)
@@ -258,7 +275,8 @@ def make_dataloaders(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "train"
+        settings.preprocess.processed_data_dir, mission, channel, "train",
+        variant=settings.variant,
     )
     all_indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -329,7 +347,8 @@ def make_test_dataloader(
     """
     cfg = settings.model
     values, segment_ids, is_anomaly, timestamps = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test",
+        variant=settings.variant,
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -379,7 +398,8 @@ def load_window_labels(
     """
     cfg = settings.model
     _, segment_ids, is_anomaly, _ = load_series_parquet(
-        settings.preprocess.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test",
+        variant=settings.variant,
     )
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
@@ -450,6 +470,7 @@ def window_target_timestamps(
         channel:  Channel ID, e.g. ``"channel_1"``.
     """
     segment_ids, is_anomaly, timestamps = load_series_metadata(
-        settings.preprocess.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test",
+        variant=settings.variant,
     )
     return window_target_timestamps_from_metadata(settings, segment_ids, is_anomaly, timestamps)

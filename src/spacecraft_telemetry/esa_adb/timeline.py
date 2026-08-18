@@ -72,7 +72,8 @@ def channel_timeline(settings: Settings, mission: str, channel: str) -> list[Int
     channel_timeline_from_metadata() directly.
     """
     segment_ids, _, timestamps = load_series_metadata(
-        settings.preprocess.processed_data_dir, mission, channel, "test"
+        settings.preprocess.processed_data_dir, mission, channel, "test",
+        variant=settings.variant,
     )
     return channel_timeline_from_metadata(segment_ids, timestamps)
 

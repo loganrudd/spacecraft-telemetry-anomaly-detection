@@ -19,7 +19,7 @@
 #   ./scripts/cloud_tune.sh  --mission ISS --injected      # HPO uses both
 #
 # Usage:
-#   ./scripts/cloud_score.sh [--mission MISSION] [--tuned] [--injected] [--no-wait] [--delete-after]
+#   ./scripts/cloud_score.sh [--mission MISSION] [--variant VARIANT] [--tuned] [--injected] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -33,6 +33,10 @@
 #                last 40%). Set full_test for a coverage view that also scores
 #                channels whose anomalies fall outside the held-out slice.
 #
+# Optional environment variables:
+#   VARIANT      Experiment variant (default: unset = None; see
+#                docs/plans/020-experiment-variant-axis.md).
+#
 # Example:
 #   export PROJECT_ID=my-gcp-project
 #   export REGION=us-central1
@@ -43,6 +47,7 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+VARIANT="${VARIANT:-}"
 TUNED="${TUNED:-}"
 INJECTED="${INJECTED:-0}"
 CHANNELS="${CHANNELS:-}"
@@ -54,6 +59,7 @@ CPU="${CPU:-0}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
+    --variant)      VARIANT="$2"; shift 2 ;;
     --tuned)        TUNED="1"; shift ;;
     --injected)     INJECTED="1"; shift ;;
     --channels)     CHANNELS="$2"; shift 2 ;;
@@ -67,24 +73,47 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
+
+# --injected and --variant cannot be combined: INJECTED=1 below points
+# PROCESSED_DATA_DIR at a mission-only _injected root (injection/generate.py
+# writes no variant segment), so composing it with VARIANT_SEG would resolve
+# to _injected/{mission}/{variant}/test/... — a path nothing ever writes.
+# No caller needs the combination today (ISS injection runs at variant=None),
+# so this is a guard rather than plumbing variant support through
+# injection/generate.py's five path sites for an unused case. See
+# docs/reviews/020-experiment-variant-axis.md §3.6.
+if [[ "${INJECTED}" = "1" && -n "${VARIANT}" ]]; then
+  echo "ERROR: --injected and --variant cannot be combined — injection writes a" >&2
+  echo "mission-only layout (injection/generate.py). See" >&2
+  echo "docs/reviews/020-experiment-variant-axis.md §3.6." >&2
+  exit 1
+fi
 
 # INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO)
 # and tags the run data_source=injected (see model/scoring.py, cli.py
 # `ray score --injected`). `inject run` writes no channels.txt, so fall back
 # to the base channels.txt (injected data covers exactly the same channels as
-# the preprocessed dataset).
+# the preprocessed dataset). The channels.txt default path is variant-aware —
+# preprocess writes it under {mission}/{variant}/ when VARIANT is set. The
+# _injected root itself is a separate mechanism that cannot be combined with
+# a variant (guarded above).
 if [[ "${INJECTED}" = "1" ]]; then
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
   INJECTED_FLAG="--injected"
   if [[ -n "${CHANNELS:-}" ]]; then
     CHANNELS_ARG="--channels ${CHANNELS}"
   else
-    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
   fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
   INJECTED_FLAG=""
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 # GPU fraction per score task → floor(1/NUM_GPUS) tasks share the one L4.
 # Packing is bounded by GPU MEMORY, not vCPUs: each task is a separate process
@@ -102,13 +131,13 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION TUNED INJECTED_FLAG NUM_GPUS EVAL_SPLIT \
-  PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG TUNED INJECTED_FLAG NUM_GPUS \
+  EVAL_SPLIT PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
 
 if [[ "${TUNED}" = "1" ]]; then
-  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=tuned)"
+  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, mode=tuned)"
 else
-  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}, mode=baseline)"
+  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, mode=baseline)"
 fi
 
 if kubectl get rayjob spacecraft-score -n ray &>/dev/null; then

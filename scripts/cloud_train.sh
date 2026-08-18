@@ -2,7 +2,7 @@
 # Submit a spacecraft-train RayJob to the GKE cluster and tail its logs.
 #
 # Usage:
-#   ./scripts/cloud_train.sh [--mission MISSION] [--no-wait] [--delete-after]
+#   ./scripts/cloud_train.sh [--mission MISSION] [--variant VARIANT] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -10,6 +10,12 @@
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
 #                  (from `terraform output -raw mlflow_url` or
 #                   `gcloud run services describe mlflow --format='value(status.url)'`)
+#
+# Optional environment variables:
+#   VARIANT      Experiment variant (default: unset = None; see
+#                docs/plans/020-experiment-variant-axis.md). Reads/writes
+#                {processed|artifacts}/{mission}/{variant}/ instead of
+#                {processed|artifacts}/{mission}/.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -20,6 +26,7 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+VARIANT="${VARIANT:-}"
 NO_WAIT=false
 DELETE_AFTER=false
 
@@ -28,6 +35,7 @@ CPU="${CPU:-0}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)       MISSION="$2"; shift 2 ;;
+    --variant)       VARIANT="$2"; shift 2 ;;
     --channels-from) CHANNELS_FROM="$2"; shift 2 ;;
     --cpu)           CPU="1"; shift ;;
     --no-wait)       NO_WAIT=true; shift ;;
@@ -39,6 +47,11 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 # ISS: 6-way L4 packing (floor(1/0.16)=6). ESA: 8-way (floor(1/0.125)=8).
 # 0.167 rounds to floor(5.99)=5 under floating point; 0.16 is the safe 6-way value.
 # Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption issues).
@@ -50,12 +63,14 @@ fi
 
 # Build the channel-selection argument for the RayJob entrypoint.
 # Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.
+# The default channels.txt path is variant-aware: preprocess writes it under
+# {mission}/{variant}/ when VARIANT is set (core/paths.output_path).
 if [[ -n "${CHANNELS:-}" ]]; then
   CHANNELS_ARG="--channels ${CHANNELS}"
 elif [[ -n "${CHANNELS_FROM:-}" ]]; then
   CHANNELS_ARG="--channels-from ${CHANNELS_FROM}"
 else
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 
 # ISS LOS fragmentation limits contiguous segments to <240 rows on the 30 s grid.
@@ -66,9 +81,10 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION CHANNELS_ARG NUM_GPUS WINDOW_SIZE_OVERRIDE
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
+  WINDOW_SIZE_OVERRIDE
 
-echo "==> Submitting spacecraft-train RayJob (mission=${MISSION})"
+echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}})"
 
 # Delete any existing job with the same name so kubectl apply is idempotent.
 if kubectl get rayjob spacecraft-train -n ray &>/dev/null; then

@@ -152,6 +152,65 @@ def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.Monkey
     assert result["objective"] < result["seg_f0_5"]
 
 
+def test_run_hpo_sweep_trial_tags_unchanged_at_variant_none() -> None:
+    """run_hpo_sweep's trial-run tags were refactored from an inline dict to
+    common_tags() (docs/reviews/020-experiment-variant-axis.md §3.8) -- pin
+    that the emitted tag set at variant=None is byte-identical to the
+    pre-refactor dict, since run_hpo_sweep itself is too heavy (a real Tune
+    loop) to assert on directly in a unit test.
+    """
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(
+        model_type="telemanom",
+        mission="ESA-Mission1",
+        phase="hpo",
+        variant=None,
+        subsystem="subsystem_1",
+        extra={"eval_split": "hpo_portion"},
+    )
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+        "subsystem": "subsystem_1",
+        "eval_split": "hpo_portion",
+    }
+
+
+def test_run_hpo_sweep_trial_tags_include_variant_when_set() -> None:
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(
+        model_type="telemanom",
+        mission="ESA-Mission1",
+        phase="hpo",
+        variant="adb-24m",
+        subsystem="subsystem_1",
+        extra={"eval_split": "hpo_portion"},
+    )
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+        "subsystem": "subsystem_1",
+        "eval_split": "hpo_portion",
+        "variant": "adb-24m",
+    }
+
+
+def test_run_all_sweeps_summary_run_tags_unchanged_at_variant_none() -> None:
+    """Same pin as above for run_all_sweeps's tuned-configs-summary run tags."""
+    from spacecraft_telemetry.mlflow_tracking.conventions import common_tags
+
+    tags = common_tags(model_type="telemanom", mission="ESA-Mission1", phase="hpo", variant=None)
+    assert tags == {
+        "model_type": "telemanom",
+        "mission_id": "ESA-Mission1",
+        "phase": "hpo",
+    }
+
+
 def test_resilient_mlflow_callback_swallows_unregistered_trial() -> None:
     """The resilient callback must not raise when a trial was never registered.
 
@@ -298,22 +357,31 @@ def test_run_all_sweeps_filters_and_runs(
 
 
 @pytest.mark.parametrize(
-    ("mission", "expected_space_name", "threshold_z_bounds"),
+    ("mission", "variant", "expected_space_name", "threshold_z_bounds"),
     [
-        ("ESA-Mission1", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
-        ("ESA-Mission1-ADB", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
-        ("ISS", "ISS_SEARCH_SPACE", (2.5, 5.0)),
-        ("ESA-Mission2", "SEARCH_SPACE", (2.5, 5.0)),
+        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        # A real ESA-Mission1 variant (mission unchanged, variant set) keeps
+        # the widened space — the selector is mission-keyed, not name-keyed.
+        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        # A legacy un-migrated ESA-Mission1-ADB* pseudo-mission is a DIFFERENT
+        # `mission` string entirely and correctly falls through to the default
+        # space — this is the plan 020 fix (was `mission.startswith(...)`, a
+        # pseudo-mission prefix test); migrate via plan 020 stage 020.5 to
+        # regain the widened space under mission=ESA-Mission1 + a variant.
+        ("ESA-Mission1-ADB", None, "SEARCH_SPACE", (2.5, 5.0)),
+        ("ISS", None, "ISS_SEARCH_SPACE", (2.5, 5.0)),
+        ("ESA-Mission2", None, "SEARCH_SPACE", (2.5, 5.0)),
     ],
 )
 def test_run_all_sweeps_selects_search_space_by_mission(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mission: str,
+    variant: str | None,
     expected_space_name: str,
     threshold_z_bounds: tuple[float, float],
 ) -> None:
-    """The search-space selector must route each mission to the right space.
+    """The search-space selector must route each (mission, variant) to the right space.
 
     The ISS row is the valuable half: ISS_SEARCH_SPACE = {**SEARCH_SPACE, ...},
     so the 2026-08-14 widening of the base SEARCH_SPACE for ESA-Mission1 would
@@ -331,6 +399,7 @@ def test_run_all_sweeps_selects_search_space_by_mission(
         update={
             "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
             "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+            "variant": variant,
         }
     )
 
@@ -514,7 +583,7 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
 
     from spacecraft_telemetry.model.scoring import score_channel
     from spacecraft_telemetry.model.training import train_channel
-    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+    from spacecraft_telemetry.ray_fanout.tune import SEARCH_SPACE, run_hpo_sweep
 
     mission = "ESA-Mission1"
     channel = "channel_1"
@@ -541,19 +610,27 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
         "config", "seg_f0_5", "nominal_fp_rate", "objective", "run_id",
     }
     config = best["config"]
+    # Mirrors SEARCH_SPACE exactly — min_error_value joined it in 583a850
+    # (the ESA-ADB absolute error floor). Keep this set and the bounds below
+    # in sync with SEARCH_SPACE; an exhaustive == is deliberate, so adding a
+    # tunable without deciding what it should smoke-test fails loudly here.
+    assert set(config.keys()) == set(SEARCH_SPACE.keys())
     assert set(config.keys()) == {
         "error_smoothing_window",
         "threshold_window",
         "threshold_z",
         "threshold_min_anomaly_len",
+        "min_error_value",
     }
     assert isinstance(config["error_smoothing_window"], int)
     assert isinstance(config["threshold_window"], int)
     assert isinstance(config["threshold_min_anomaly_len"], int)
     assert isinstance(config["threshold_z"], float)
+    assert isinstance(config["min_error_value"], float)
     assert 5 <= config["error_smoothing_window"] <= 100
     assert 50 <= config["threshold_window"] <= 500
     assert 1 <= config["threshold_min_anomaly_len"] <= 10
+    assert 0.0 <= config["min_error_value"] <= 0.3
     assert 1.5 <= config["threshold_z"] <= 5.0
     assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)

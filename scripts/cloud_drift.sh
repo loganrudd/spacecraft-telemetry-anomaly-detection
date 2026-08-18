@@ -6,7 +6,7 @@
 # It is the cloud equivalent of `make drift-batch-mission`.
 #
 # Usage:
-#   ./scripts/cloud_drift.sh [--mission MISSION] [--subsystem SUBSYSTEM]
+#   ./scripts/cloud_drift.sh [--mission MISSION] [--variant VARIANT] [--subsystem SUBSYSTEM]
 #                            [--channel CHANNEL] [--max-channels N]
 #
 # Required environment variables:
@@ -18,6 +18,8 @@
 # Optional environment variables:
 #   REGION       GCP region (default: us-central1)
 #   MISSION      Mission name (default: ESA-Mission2); overridden by --mission
+#   VARIANT      Experiment variant (default: unset = None; see
+#                docs/plans/020-experiment-variant-axis.md).
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -29,6 +31,7 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+VARIANT="${VARIANT:-}"
 SUBSYSTEM=""
 CHANNEL=""
 MAX_CHANNELS=""
@@ -36,6 +39,7 @@ MAX_CHANNELS=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
+    --variant)      VARIANT="$2"; shift 2 ;;
     --subsystem)    SUBSYSTEM="$2"; shift 2 ;;
     --channel)      CHANNEL="$2"; shift 2 ;;
     --max-channels) MAX_CHANNELS="$2"; shift 2 ;;
@@ -78,10 +82,11 @@ CMD=(
 [[ -n "$CHANNEL" ]]      && CMD+=(--channel "$CHANNEL")
 [[ -n "$MAX_CHANNELS" ]] && CMD+=(--max-channels "$MAX_CHANNELS")
 
-echo "==> Running cloud drift batch-mission (mission=${MISSION}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${CHANNEL:+, channel=${CHANNEL}})"
+echo "==> Running cloud drift batch-mission (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${CHANNEL:+, channel=${CHANNEL}})"
 
 SSL_CERT_FILE="$(uv run python -m certifi)" \
 SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data" \
+SPACECRAFT_VARIANT="$VARIANT" \
 SPACECRAFT_MLFLOW__TRACKING_URI="$MLFLOW_URL" \
 MLFLOW_ARTIFACTS_DESTINATION="gs://${PROJECT_ID}-artifacts/mlflow" \
   "${CMD[@]}"

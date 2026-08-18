@@ -13,6 +13,7 @@ Priority (highest → lowest):
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,6 +25,29 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 # Repo root — used to locate configs/ in local dev.
 # Override with SPACECRAFT_CONFIG_DIR for non-standard layouts.
 _REPO_ROOT = Path(__file__).parents[3]
+
+
+def _coerce_none_sentinel(v: object) -> object:
+    """Coerce the empty-string / "null" / "none" env-var spellings to None.
+
+    There is no way to spell None for a `str | None` pydantic field via an
+    env var: `SPACECRAFT_X=` yields `''` and `SPACECRAFT_X=null` yields the
+    string `'null'` — neither coerces to None on its own, both crashing
+    downstream code that branches on `is None` (e.g. pd.Timedelta(train_lookback)).
+    Shared by every `str | None` field that needs an env-settable None.
+    """
+    if isinstance(v, str) and v.strip().lower() in ("", "null", "none"):
+        return None
+    return v
+
+
+# docs/plans/020-experiment-variant-axis.md Open Question 1 answered "flat,
+# kebab-case" — it survives both GCS paths (core/paths.py output_path()) and
+# MLflow model/experiment names (mlflow_tracking/conventions.py), which
+# disallow some characters. Enforced here so a bad slug fails at settings-load
+# with a clear message instead of hours later, mid-registration or after a
+# destructive preprocess clear has already run against the wrong tree.
+_VARIANT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 class DataConfig(BaseModel):
@@ -77,6 +101,11 @@ class PreprocessingConfig(BaseModel):
     @classmethod
     def coerce_path_to_str(cls, v: object) -> str:
         return str(v)
+
+    @field_validator("train_lookback", mode="before")
+    @classmethod
+    def coerce_train_lookback_none(cls, v: object) -> object:
+        return _coerce_none_sentinel(v)
 
     @field_validator("train_fraction")
     @classmethod
@@ -673,6 +702,11 @@ class Settings(BaseSettings):
     )
 
     env: str = "local"
+    # Identifies which experiment configuration produced these artifacts —
+    # separate from `mission` (which spacecraft the data came from). None
+    # reproduces today's paths/names byte for byte; see core/paths.py
+    # output_path() and docs/plans/020-experiment-variant-axis.md.
+    variant: str | None = None
     data: DataConfig = DataConfig()
     logging: LoggingConfig = LoggingConfig()
     preprocess: PreprocessingConfig = PreprocessingConfig()
@@ -685,6 +719,25 @@ class Settings(BaseSettings):
     api: ApiConfig = ApiConfig()
     collect: CollectorConfig = CollectorConfig()
     injection: InjectionConfig = InjectionConfig()
+
+    @field_validator("variant", mode="before")
+    @classmethod
+    def coerce_variant_none(cls, v: object) -> object:
+        return _coerce_none_sentinel(v)
+
+    @field_validator("variant", mode="after")
+    @classmethod
+    def validate_variant_slug(cls, v: str | None) -> str | None:
+        if v is not None and not _VARIANT_SLUG_RE.match(v):
+            raise ValueError(
+                f"variant {v!r} must be a flat, kebab-case slug matching "
+                f"{_VARIANT_SLUG_RE.pattern!r} (lowercase alphanumeric, "
+                "hyphen-separated, e.g. 'adb-24m') — it becomes a GCS path "
+                "segment (core/paths.output_path) and part of an MLflow "
+                "model/experiment name (mlflow_tracking/conventions.py), "
+                "both of which reject other characters."
+            )
+        return v
 
     @property
     def replay_dir(self) -> str:

@@ -663,6 +663,106 @@ def _read_channels_from_file(path: str) -> list[str]:
         return [line.strip() for line in fh if line.strip()]
 
 
+def _discover_registered_channels(mission: str, variant: str | None) -> list[str]:
+    """Discover channel IDs registered for (mission, variant) in the MLflow registry.
+
+    Used by ``mlflow promote``/``demote`` bulk-mission discovery. Filters on
+    the ``tags.mission_id`` model-version tag (set unconditionally at
+    registration since 2026-06-03 — see model/training.py; versions
+    registered before that date have no ``mission_id`` tag and are invisible
+    to this filter even though their name matches — see
+    ``_untagged_registry_hint`` for the diagnostic that surfaces this) in
+    addition to the ``name LIKE`` prefix, so a pseudo-mission like
+    ``ESA-Mission1-ADB-24m`` — whose model
+    names also match the ``telemanom-ESA-Mission1-`` prefix — is correctly
+    excluded from ``--mission ESA-Mission1`` (no --variant): its mission_id
+    tag is the pseudo-mission string, not "ESA-Mission1". This is the fix for
+    the registry hazard in docs/plans/020-experiment-variant-axis.md — before
+    this, ``promote --mission ESA-Mission1`` (name-prefix only) could sweep
+    ADB-arm models into the production promotion set.
+
+    ``variant`` further disambiguates real variants of the same real mission:
+    None matches only models with no ``variant`` tag (today's models, and any
+    base-mission model trained after this landed); a variant string matches
+    only models tagged with that exact variant.
+    """
+    from mlflow.tracking.client import MlflowClient
+
+    log = get_logger(__name__)
+    prefix = f"telemanom-{mission}-"
+    client = MlflowClient()
+    # The tags.mission_id server-side filter is the primary defense; it is
+    # ALSO re-checked client-side below (belt and suspenders — a backend that
+    # ignores the tag clause, or silently degrades to name-prefix-only, must
+    # not reopen the hazard this function exists to close).
+    all_versions = client.search_model_versions(
+        f"name LIKE '{prefix}%' and tags.mission_id = '{mission}'"
+    )
+
+    def _version_tag(v: Any, key: str) -> str | None:
+        tag = (v.tags or {}).get(key)
+        return tag if tag else None
+
+    matching = [
+        v for v in all_versions
+        if _version_tag(v, "mission_id") == mission and _version_tag(v, "variant") == variant
+    ]
+
+    channel_ids: set[str] = set()
+    for v in matching:
+        channel_id = _version_tag(v, "channel_id")
+        if channel_id is None:
+            # No name-derived fallback: matching is already filtered to
+            # mission_id == mission, and training.py sets mission_id and
+            # channel_id in the same dict literal, so a version with one but
+            # not the other should not exist. If it does, deriving a channel
+            # from the name via removeprefix(prefix) would be wrong under a
+            # variant — it would yield "{variant}-{channel}" instead of
+            # "{channel}", which registered_model_name() would then re-expand
+            # into a name that does not exist. Log and skip instead.
+            log.warning(
+                "cli.discover_registered_channels.missing_channel_id_tag",
+                name=v.name, mission=mission, variant=variant,
+            )
+            continue
+        channel_ids.add(channel_id)
+    return sorted(channel_ids)
+
+
+def _untagged_registry_hint(mission: str) -> str:
+    """Return a diagnostic suffix if models exist but predate the mission_id tag.
+
+    ``_discover_registered_channels`` filters server-side on the
+    ``mission_id`` version tag, added 2026-06-03 (model/training.py). A
+    version registered before that date has no such tag and is invisible to
+    that filter even though its name matches — so "no registered models
+    found" is misleading in that case: something IS registered, it is just
+    not discoverable by tag. Runs a second, unfiltered name-prefix query
+    (only reached when the tag-filtered discovery came back empty) to
+    distinguish the two cases and name the actual remedy.
+
+    Returns "" when nothing matches the name prefix either (the ordinary
+    "train something first" case) or when every match is properly tagged
+    (an empty discovery result then means the mission/variant truly has no
+    models, not a tagging gap).
+    """
+    from mlflow.tracking.client import MlflowClient
+
+    prefix = f"telemanom-{mission}-"
+    client = MlflowClient()
+    all_named = client.search_model_versions(f"name LIKE '{prefix}%'")
+    untagged = [v for v in all_named if not (v.tags or {}).get("mission_id")]
+    if not untagged:
+        return ""
+    n_models = len({v.name for v in untagged})
+    return (
+        f" {len(untagged)} version(s) across {n_models} model(s) match the name prefix "
+        f"'{prefix}' but predate the mission_id tag (registered before 2026-06-03) and "
+        "are not discoverable by --mission/--variant — pass --channels explicitly, "
+        "or re-register to pick up the tag."
+    )
+
+
 def _resolve_ray_channels(
     settings: Settings,
     mission: str,
@@ -701,10 +801,16 @@ def _resolve_ray_channels(
 
     channel_list = discover_channels(settings, mission)
     if not channel_list:
+        from spacecraft_telemetry.core.paths import output_path as _compose_output_path
+
+        _variant_note = f", variant={settings.variant!r}" if settings.variant else ""
+        _expected_dir = _compose_output_path(
+            settings.preprocess.processed_data_dir, mission, settings.variant, "train",
+        )
         raise click.ClickException(
-            f"No preprocessed channels found for {mission}. "
-            "Run `spacecraft-telemetry preprocess run` first, "
-            "or pass --channels / --channels-from explicitly."
+            f"No preprocessed channels found for {mission}{_variant_note} "
+            f"at {_expected_dir}. Run `spacecraft-telemetry preprocess run` "
+            "first, or pass --channels / --channels-from explicitly."
         )
     if subsystem is not None:
         channel_list = _filter_channels_by_subsystem(
@@ -1093,25 +1199,30 @@ def ray_tune(
         )
 
         if subsystem is None:
-            output_path = run_all_sweeps(tune_settings, mission, channel_list)
+            tuned_configs_path = run_all_sweeps(tune_settings, mission, channel_list)
             click.echo(f"Mission       : {mission}")
             click.echo(f"Channels      : {len(channel_list)}")
             click.echo("Subsystems    : all")
             click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
-            click.echo(f"Output        : {output_path}")
+            click.echo(f"Output        : {tuned_configs_path}")
             return
 
         subsystem_channels = _filter_channels_by_subsystem(
             tune_settings, mission, channel_list, subsystem
         )
 
+        from spacecraft_telemetry.core.paths import output_path
+
         best = run_hpo_sweep(subsystem, subsystem_channels, tune_settings, mission)
-        output_path = Path(tune_settings.model.artifacts_dir) / mission / "tuned_configs.json"
+        tuned_configs_path = output_path(
+            tune_settings.model.artifacts_dir, mission, tune_settings.variant,
+            "tuned_configs.json",
+        )
 
         existing: dict[str, dict[str, Any]] = {}
-        if output_path.exists():
+        if tuned_configs_path.exists():
             try:
-                loaded = json.loads(output_path.read_text())
+                loaded = json.loads(tuned_configs_path.read_text())
                 if isinstance(loaded, dict):
                     existing = {
                         str(k): v for k, v in loaded.items() if isinstance(v, dict)
@@ -1122,7 +1233,9 @@ def ray_tune(
                         "Existing tuned config file contains invalid JSON. "
                         "Fix/remove the file, or re-run with --overwrite-existing."
                     ) from err
-                log.warning("ray.tune.output.invalid_json.overwriting", path=str(output_path))
+                log.warning(
+                    "ray.tune.output.invalid_json.overwriting", path=str(tuned_configs_path)
+                )
 
         entry: dict[str, Any] = {
             **best.get("config", {}),
@@ -1132,14 +1245,14 @@ def ray_tune(
             },
         }
         existing[subsystem] = entry
-        write_tuned_configs(existing, output_path)
+        write_tuned_configs(existing, tuned_configs_path)
 
     click.echo(f"Mission       : {mission}")
     click.echo(f"Channels      : {len(subsystem_channels)}")
     click.echo(f"Subsystem     : {subsystem}")
     click.echo(f"Num samples   : {tune_settings.tune.num_samples}")
     click.echo(f"Best config   : {best.get('config', best)}")
-    click.echo(f"Output        : {output_path}")
+    click.echo(f"Output        : {tuned_configs_path}")
 
 
 main.add_command(ray_group, name="ray")
@@ -1167,6 +1280,14 @@ def mlflow_group() -> None:
     default=None,
     help="Mission name. Alone → discovers all registered models for the mission. "
          "Required with --channels, --channels-from, or --subsystem.",
+)
+@click.option(
+    "--variant",
+    default=None,
+    help="Experiment variant, e.g. adb-24m (see docs/plans/020-experiment-variant-axis.md). "
+         "Only used with bulk mission discovery (--mission, no --channels/--channels-from). "
+         "Default None discovers only base (no-variant) models for the mission — it will "
+         "NOT sweep in a mission's variant arms, and vice versa.",
 )
 @click.option(
     "--channels",
@@ -1200,6 +1321,7 @@ def mlflow_promote(
     ctx: click.Context,
     name: str | None,
     mission: str | None,
+    variant: str | None,
     channels: str | None,
     channels_from: str | None,
     subsystem: str | None,
@@ -1216,6 +1338,11 @@ def mlflow_promote(
 
         spacecraft-telemetry --env cloud mlflow promote --mission ESA-Mission2
 
+    Bulk form — a specific experiment variant of a mission:
+
+        spacecraft-telemetry --env cloud mlflow promote \\
+            --mission ESA-Mission1 --variant adb-24m
+
     Bulk form — specific channels from a manifest file:
 
         spacecraft-telemetry --env cloud mlflow promote \\
@@ -1227,6 +1354,7 @@ def mlflow_promote(
         spacecraft-telemetry --env cloud mlflow promote \\
             --mission ESA-Mission2 --subsystem subsystem_1
     """
+    from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, promote
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 
@@ -1237,6 +1365,16 @@ def mlflow_promote(
     configure_mlflow(settings)
     tracking_uri = settings.mlflow.tracking_uri
 
+    if variant is not None and mission is None:
+        raise click.ClickException("--variant requires --mission.")
+    # Fall back to SPACECRAFT_VARIANT when --variant isn't given explicitly.
+    # Without this, a train -> score -> tune session run under an exported
+    # SPACECRAFT_VARIANT (the pattern scripts/cloud_*.sh's docs encourage)
+    # silently promotes/demotes the BASE production models on this step,
+    # since --variant is otherwise the only source of scope here.
+    if variant is None:
+        variant = settings.variant
+
     # Resolve channel list from --channels, --channels-from, or registry discovery.
     channel_list: list[str] | None = None
     if channels is not None and channels_from is not None:
@@ -1245,7 +1383,7 @@ def mlflow_promote(
         channel_list = [c.strip() for c in channels.split(",") if c.strip()]
     elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
-    elif mission == "ISS" and name is None and subsystem is None:
+    elif mission == "ISS" and variant is None and name is None and subsystem is None:
         # ISS with no explicit filter → the curated stationary model set, matching
         # preprocess/train/score (see cli preprocess + ingest.iss_channels).
         # Without this, discovery would promote every archived PUI including the
@@ -1257,18 +1395,17 @@ def mlflow_promote(
 
         channel_list = list(VALIDATION_CHANNELS)
     elif mission is not None and name is None:
-        # Discover all registered models for this mission directly from the registry.
-        # Imported lazily so the slim collector image (no mlflow) can run `collect`.
-        from mlflow.tracking.client import MlflowClient
-
-        prefix = f"telemanom-{mission}-"
-        client = MlflowClient()
-        all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
-        discovered = sorted({v.name[len(prefix):] for v in all_versions})
+        # Discover all registered models for (mission, variant) directly from
+        # the registry — see _discover_registered_channels for the mission_id
+        # tag filter that prevents this from sweeping in a different variant's
+        # (or a legacy pseudo-mission's) models (plan 020 registry hazard).
+        discovered = _discover_registered_channels(mission, variant)
         if not discovered:
+            _scope = f"mission={mission!r} variant={variant!r}"
             raise click.ClickException(
-                f"No registered models found matching '{prefix}*'. "
+                f"No registered models found for {_scope}. "
                 "Train at least one channel before promoting."
+                f"{_untagged_registry_hint(mission)}"
             )
         channel_list = discovered
 
@@ -1288,7 +1425,7 @@ def mlflow_promote(
 
         ok, failed = 0, []
         for channel in channel_list:
-            model_name = f"telemanom-{mission}-{channel}"
+            model_name = registered_model_name("telemanom", mission, channel, variant)
             try:
                 promote(name=model_name, version=None)
                 ok += 1
@@ -1296,6 +1433,11 @@ def mlflow_promote(
                 failed.append((channel, str(exc)))
 
         click.echo(f"Mission       : {mission}")
+        # Printed unconditionally (not only "if variant") — this command
+        # mutates registry aliases, and the resolved scope (which may have
+        # come from SPACECRAFT_VARIANT rather than an explicit flag) must be
+        # visible in the output of a command that can move @champion.
+        click.echo(f"Variant       : {variant if variant else '(none)'}")
         if subsystem:
             click.echo(f"Subsystem     : {subsystem}")
         click.echo(f"Promoted      : {ok}/{len(channel_list)}")
@@ -1337,7 +1479,14 @@ def mlflow_promote(
     default=None,
     help="Mission name. Alone → removes @champion from EVERY registered model "
          "for the mission (a full reset). Required with --channels/--channels-from/"
-         "--subsystem.",
+         "--subsystem/--variant.",
+)
+@click.option(
+    "--variant",
+    default=None,
+    help="Experiment variant, e.g. adb-24m (see docs/plans/020-experiment-variant-axis.md). "
+         "Only used with bulk mission discovery (--mission, no --channels/--channels-from). "
+         "Default None demotes only base (no-variant) models for the mission.",
 )
 @click.option(
     "--channels",
@@ -1359,6 +1508,7 @@ def mlflow_demote(
     ctx: click.Context,
     name: str | None,
     mission: str | None,
+    variant: str | None,
     channels: str | None,
     channels_from: str | None,
     subsystem: str | None,
@@ -1379,6 +1529,7 @@ def mlflow_demote(
         spacecraft-telemetry --env cloud mlflow demote --mission ISS --subsystem attitude
         spacecraft-telemetry --env cloud mlflow demote --name telemanom-ISS-P4000007
     """
+    from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
     from spacecraft_telemetry.mlflow_tracking.registry import CHAMPION_ALIAS, demote
     from spacecraft_telemetry.mlflow_tracking.runs import configure_mlflow
 
@@ -1388,6 +1539,15 @@ def mlflow_demote(
 
     if channels is not None and channels_from is not None:
         raise click.ClickException("--channels and --channels-from are mutually exclusive.")
+    if variant is not None and mission is None:
+        raise click.ClickException("--variant requires --mission.")
+    # Fall back to SPACECRAFT_VARIANT when --variant isn't given explicitly —
+    # see the matching comment in mlflow_promote. Demote is the more
+    # destructive of the two commands (it clears @champion aliases), so
+    # resolving scope silently from settings.variant matters at least as much
+    # here.
+    if variant is None:
+        variant = settings.variant
 
     channel_list: list[str] | None = None
     if channels is not None:
@@ -1395,18 +1555,19 @@ def mlflow_demote(
     elif channels_from is not None:
         channel_list = _read_channels_from_file(channels_from)
     elif mission is not None and name is None:
-        # No explicit filter → discover EVERY registered model for the mission and
-        # clear its alias (the full-reset inverse of `promote --mission`). Unlike
-        # promote, no curated default: "demote the good set" is never the intent.
-        from mlflow.tracking.client import MlflowClient
-
-        prefix = f"telemanom-{mission}-"
-        client = MlflowClient()
-        all_versions = client.search_model_versions(f"name LIKE '{prefix}%'")
-        channel_list = sorted({v.name[len(prefix):] for v in all_versions})
+        # No explicit filter → discover EVERY registered model for (mission,
+        # variant) and clear its alias (the full-reset inverse of
+        # `promote --mission`). Unlike promote, no curated default: "demote
+        # the good set" is never the intent. See _discover_registered_channels
+        # for the mission_id tag filter that prevents a --mission ESA-Mission1
+        # reset from also demoting a different variant's — or a legacy
+        # pseudo-mission's — champions (plan 020 registry hazard).
+        channel_list = _discover_registered_channels(mission, variant)
         if not channel_list:
+            _scope = f"mission={mission!r} variant={variant!r}"
             raise click.ClickException(
-                f"No registered models found matching '{prefix}*'."
+                f"No registered models found for {_scope}."
+                f"{_untagged_registry_hint(mission)}"
             )
 
     if channel_list is not None:
@@ -1425,12 +1586,14 @@ def mlflow_demote(
 
         removed, absent = 0, 0
         for channel in channel_list:
-            if demote(name=f"telemanom-{mission}-{channel}"):
+            model_name = registered_model_name("telemanom", mission, channel, variant)
+            if demote(name=model_name):
                 removed += 1
             else:
                 absent += 1
 
         click.echo(f"Mission       : {mission}")
+        click.echo(f"Variant       : {variant if variant else '(none)'}")
         if subsystem:
             click.echo(f"Subsystem     : {subsystem}")
         click.echo(f"Demoted       : {removed}/{len(channel_list)} "
@@ -1564,7 +1727,7 @@ def _run_drift_batch(
     configure_mlflow(settings)
 
     # 4) Log to MLflow.
-    exp = experiment_name("telemanom", "monitoring", mission)
+    exp = experiment_name("telemanom", "monitoring", mission, settings.variant)
     run_id = log_drift_report(report, result, settings, mission, channel)
 
     return {

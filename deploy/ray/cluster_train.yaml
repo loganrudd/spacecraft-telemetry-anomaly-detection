@@ -91,6 +91,10 @@ spec:
                   value: ${MLFLOW_URL}
                 - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                   value: gs://${PROJECT_ID}-processed-data
+                # Experiment variant axis (plan 020) — empty string coerces to
+                # None (Settings.variant), reproducing today's output layout.
+                - name: SPACECRAFT_VARIANT
+                  value: "${VARIANT}"
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -168,6 +172,10 @@ spec:
                     value: ${MLFLOW_URL}
                   - name: SPACECRAFT_PREPROCESS__PROCESSED_DATA_DIR
                     value: gs://${PROJECT_ID}-processed-data
+                  # Must match the head's value — the @ray.remote fan-out
+                  # splits inside worker tasks (plan 019 B2).
+                  - name: SPACECRAFT_VARIANT
+                    value: "${VARIANT}"
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS

@@ -2,12 +2,16 @@
 # Submit a spacecraft-tune RayJob to the GKE cluster and tail its logs.
 #
 # Usage:
-#   ./scripts/cloud_tune.sh [--mission MISSION] [--no-wait] [--delete-after]
+#   ./scripts/cloud_tune.sh [--mission MISSION] [--variant VARIANT] [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
 #   REGION       GCP region (default: us-central1)
 #   MLFLOW_URL   Internal Cloud Run URL for the MLflow tracking server
+#
+# Optional environment variables:
+#   VARIANT      Experiment variant (default: unset = None; see
+#                docs/plans/020-experiment-variant-axis.md).
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -18,6 +22,7 @@
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
+VARIANT="${VARIANT:-}"
 INJECTED="${INJECTED:-0}"
 CHANNELS="${CHANNELS:-}"
 NO_WAIT=false
@@ -26,6 +31,7 @@ DELETE_AFTER=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)     MISSION="$2"; shift 2 ;;
+    --variant)     VARIANT="$2"; shift 2 ;;
     --injected)    INJECTED="1"; shift ;;
     --channels)    CHANNELS="$2"; shift 2 ;;
     --no-wait)     NO_WAIT=true; shift ;;
@@ -37,20 +43,43 @@ done
 : "${PROJECT_ID:?PROJECT_ID must be set}"
 : "${MLFLOW_URL:?MLFLOW_URL must be set}"
 REGION="${REGION:-us-central1}"
+# envsubst has no conditional-expansion syntax (same reason CHANNELS_ARG is
+# resolved here — see cloud_preprocess.sh), so the optional "/{variant}" path
+# segment must be a single pre-resolved variable the YAML can interpolate
+# verbatim rather than each YAML site re-deriving the conditional itself.
+VARIANT_SEG="${VARIANT:+/${VARIANT}}"
+
+# --injected and --variant cannot be combined: INJECTED=1 below points
+# PROCESSED_DATA_DIR at a mission-only _injected root (injection/generate.py
+# writes no variant segment), so composing it with VARIANT_SEG would resolve
+# to _injected/{mission}/{variant}/test/... — a path nothing ever writes.
+# No caller needs the combination today (ISS injection runs at variant=None),
+# so this is a guard rather than plumbing variant support through
+# injection/generate.py's five path sites for an unused case. See
+# docs/reviews/020-experiment-variant-axis.md §3.6.
+if [[ "${INJECTED}" = "1" && -n "${VARIANT}" ]]; then
+  echo "ERROR: --injected and --variant cannot be combined — injection writes a" >&2
+  echo "mission-only layout (injection/generate.py). See" >&2
+  echo "docs/reviews/020-experiment-variant-axis.md §3.6." >&2
+  exit 1
+fi
 
 # INJECTED=1 tunes against the manufactured-label dataset (ISS injection-driven
 # HPO). `inject run` writes no channels.txt, so fall back to the base channels.txt
 # (injected data covers exactly the same channels as the preprocessed dataset).
+# The channels.txt default path is variant-aware — preprocess writes it under
+# {mission}/{variant}/ when VARIANT is set. The _injected root itself is a
+# separate mechanism that cannot be combined with a variant (guarded above).
 if [[ "${INJECTED}" = "1" ]]; then
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
   if [[ -n "${CHANNELS:-}" ]]; then
     CHANNELS_ARG="--channels ${CHANNELS}"
   else
-    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+    CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
   fi
 else
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data"
-  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}/channels.txt"
+  CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 # ISS W=128 override — see cloud_train.sh for rationale.
 if [[ "${MISSION}" = "ISS" ]]; then
@@ -65,10 +94,10 @@ fi
 # neither needs a config switch.
 RAY_IMAGE_TAG="${RAY_IMAGE_TAG:-latest}"
 
-export PROJECT_ID REGION MLFLOW_URL MISSION PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE \
-  RAY_IMAGE_TAG
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG PROCESSED_DATA_DIR \
+  CHANNELS_ARG WINDOW_SIZE_OVERRIDE RAY_IMAGE_TAG
 
-echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION}, image tag=${RAY_IMAGE_TAG})"
+echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, image tag=${RAY_IMAGE_TAG})"
 
 if kubectl get rayjob spacecraft-tune -n ray &>/dev/null; then
   echo "==> Deleting existing spacecraft-tune RayJob"

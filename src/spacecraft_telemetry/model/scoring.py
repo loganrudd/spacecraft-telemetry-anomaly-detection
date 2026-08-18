@@ -29,7 +29,7 @@ import pandas as pd
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
-from spacecraft_telemetry.core.paths import to_upath
+from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
@@ -415,7 +415,7 @@ def score_channel(
     # require_champion=False: scoring is a training-pipeline step, not serving;
     # we need to score a model before deciding whether to promote it.
     log.info("model.score.start", channel=channel, mission=mission, device=str(device))
-    name = registered_model_name(cfg.model_type, mission, channel)
+    name = registered_model_name(cfg.model_type, mission, channel, settings.variant)
     model, saved_window_size = load_model_for_scoring(
         name, device, settings.mlflow.tracking_uri, require_champion=False
     )
@@ -486,11 +486,12 @@ def score_channel(
     if parent_hpo_run_id is not None:
         _extra["tuned_from_run"] = parent_hpo_run_id
 
-    _exp = experiment_name(cfg.model_type, "scoring", mission)
+    _exp = experiment_name(cfg.model_type, "scoring", mission, settings.variant)
     _tags = common_tags(
         model_type=cfg.model_type,
         mission=mission,
         phase="scoring",
+        variant=settings.variant,
         channel=channel,
         subsystem=_subsystem,
         extra=_extra,
@@ -501,7 +502,8 @@ def score_channel(
     _eval_hash: str | None = None
     with suppress(Exception):
         _eval_hash = partition_hash(
-            settings.preprocess.processed_data_dir, mission, channel, "test"
+            settings.preprocess.processed_data_dir, mission, channel, "test",
+            variant=settings.variant,
         )
 
     # The CPU forward pass above can run tens of minutes for a large channel —
@@ -515,10 +517,10 @@ def score_channel(
         # column in the MLflow UI records which data produced these scores.
         log_input_dataset(
             source=str(
-                to_upath(settings.preprocess.processed_data_dir)
-                / mission / "test"
-                / f"mission_id={mission}"
-                / f"channel_id={channel}"
+                output_path(
+                    settings.preprocess.processed_data_dir, mission, settings.variant,
+                    "test", f"mission_id={mission}", f"channel_id={channel}",
+                )
             ),
             name=f"{mission}-{channel}-test",
             digest=_eval_hash,

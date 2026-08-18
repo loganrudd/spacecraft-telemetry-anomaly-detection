@@ -292,6 +292,7 @@ def build_report(
     log.info(
         "esa_adb.report.start",
         mission=mission,
+        variant=settings.variant,
         channels=channels,
         offline=run_map is not None,
         include_tuned=include_tuned,
@@ -310,7 +311,8 @@ def build_report(
     # small columns actually needed. See docs/plans/019 P2/P3.
     metadata_by_channel: dict[str, SeriesMetadata] = {
         channel: load_series_metadata(
-            settings.preprocess.processed_data_dir, mission, channel, "test"
+            settings.preprocess.processed_data_dir, mission, channel, "test",
+            variant=settings.variant,
         )
         for channel in channels
     }

@@ -30,7 +30,7 @@ from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.paths import absolutize_if_local, to_upath
+from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS
 from spacecraft_telemetry.preprocess.io import (
     discover_iss_channels,
@@ -252,8 +252,11 @@ def run_preprocessing(
 
     # Clear output dirs: re-runs must not accumulate duplicates.
     # Use the underlying fsspec fs.rm() so this works for both local and gs://.
-    train_out = output_dir / mission / "train"
-    test_out = output_dir / mission / "test"
+    # output_path inserts settings.variant as a path segment between mission
+    # and split when set, so the destructive clear below never touches a
+    # sibling variant's train/test (Plan 020 variant isolation).
+    train_out = output_path(output_dir, mission, settings.variant, "train")
+    test_out = output_path(output_dir, mission, settings.variant, "test")
     for out_dir in (train_out, test_out):
         if out_dir.exists():
             out_dir.fs.rm(str(out_dir), recursive=True)
@@ -289,7 +292,7 @@ def run_preprocessing(
                 mission=mission,
             )
 
-    mission_out = output_dir / mission
+    mission_out = output_path(output_dir, mission, settings.variant)
     if not str(mission_out).startswith("gs://"):
         mission_out.mkdir(parents=True, exist_ok=True)
 
@@ -565,8 +568,8 @@ def run_iss_preprocessing(
     channel_list = channels if channels is not None else available
 
     # Clear output dirs so re-runs are idempotent (no duplicate part files).
-    train_out = output_dir / "ISS" / "train"
-    test_out = output_dir / "ISS" / "test"
+    train_out = output_path(output_dir, "ISS", settings.variant, "train")
+    test_out = output_path(output_dir, "ISS", settings.variant, "test")
     for out_dir in (train_out, test_out):
         if out_dir.exists():
             out_dir.fs.rm(str(out_dir), recursive=True)
@@ -613,7 +616,7 @@ def run_iss_preprocessing(
                 channel_id=result["channel_id"],
             )
 
-    mission_out = output_dir / "ISS"
+    mission_out = output_path(output_dir, "ISS", settings.variant)
     if not str(mission_out).startswith("gs://"):
         mission_out.mkdir(parents=True, exist_ok=True)
 
