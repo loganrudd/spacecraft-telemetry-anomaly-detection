@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import pandas as pd
 
-from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.config import ModelConfig, Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.core.paths import output_path
@@ -34,6 +34,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
     configure_mlflow,
     experiment_name,
+    group_partition_hash,
     log_artifact_bytes,
     log_input_dataset,
     log_metrics_final,
@@ -65,7 +66,9 @@ def predict(
 
     Both arrays are shape (N,) float32 and in DataLoader iteration order
     (i.e. the same order as the window index, since the test loader does not
-    shuffle).
+    shuffle). For a multivariate model (docs/plans/021-multivariate-telemanom.md)
+    both are (N, C) — unchanged code path: ``model(x)`` is already (B, C) and
+    ``.squeeze(1)`` is a no-op whenever C > 1, so nothing here needed to move.
 
     Emits a ``batch X / total`` log line every ``log_every`` batches so a long
     CPU inference pass (≈1M test windows/channel) is observable in the worker
@@ -349,6 +352,63 @@ def evaluate_overlap(
     }
 
 
+def _score_series(
+    errors: np.ndarray[Any, Any],
+    is_anomaly: np.ndarray[Any, Any],
+    cfg: ModelConfig,
+    eval_split: Literal["full_test", "hpo_portion", "final_portion"],
+    hpo_eval_fraction: float,
+) -> tuple[dict[str, float], np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    """Run the existing scoring pipeline on one channel's 1-D error series.
+
+    Shared by score_channel's univariate and multivariate paths — the Design
+    section of docs/plans/021-multivariate-telemanom.md: "only the forecaster
+    becomes multivariate. The error, threshold, and evaluation path stay
+    exactly as they are." For a multivariate group, score_channel calls this
+    once per channel with column i of the joint model's (N, C) error matrix —
+    smooth_errors/dynamic_threshold/flag_anomalies/prune_anomalies/evaluate/
+    evaluate_overlap are all untouched by this plan.
+
+    Returns:
+        metrics:   headline (un-pruned) + offline pruned-ceiling keys, same
+                   shape score_channel has always returned for one channel.
+        smoothed:  full smoothed-error array (for errors.npy — always the
+                   full array regardless of eval_split, pre-021 behaviour).
+        threshold: full threshold array (for threshold.npy).
+    """
+    smoothed = smooth_errors(errors, cfg.error_smoothing_window)
+    threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)
+    # Headline flags are UN-pruned — see score_channel's module-level comment
+    # on train/serve parity; pruning is an offline ceiling only.
+    flags_raw = flag_anomalies(
+        smoothed, threshold, cfg.threshold_min_anomaly_len, cfg.min_error_value
+    )
+    flags_pruned = prune_anomalies(smoothed, flags_raw, cfg.prune_min_decrease)
+
+    n = len(is_anomaly)
+    n_hpo = int(n * hpo_eval_fraction)
+    if eval_split == "hpo_portion":
+        _sl = slice(None, n_hpo)
+    elif eval_split == "final_portion":
+        _sl = slice(n_hpo, None)
+    else:  # "full_test"
+        _sl = slice(None, None)
+    eval_true = is_anomaly[_sl]
+    eval_raw = flags_raw[_sl]
+    eval_pruned = flags_pruned[_sl]
+
+    metrics: dict[str, float] = {
+        **evaluate(eval_true, eval_raw),
+        **evaluate_overlap(eval_true, eval_raw),
+    }
+    _ceiling = evaluate_overlap(eval_true, eval_pruned)
+    metrics["pruned_seg_precision"] = _ceiling["seg_precision"]
+    metrics["pruned_seg_recall"] = _ceiling["seg_recall"]
+    metrics["pruned_seg_f0_5"] = _ceiling["seg_f0_5"]
+    metrics["pruned_n_pred_seqs"] = _ceiling["n_pred_seqs"]
+    return metrics, smoothed, threshold
+
+
 def score_channel(
     settings: Settings,
     mission: str,
@@ -386,14 +446,26 @@ def score_channel(
                            injected-data run (used by the false-positive-rate
                            penalty in the HPO objective; see ray_fanout/tune.py).
 
+    Multivariate (docs/plans/021-multivariate-telemanom.md): when
+    ``settings.model.input_channels`` is set, ``channel`` is the joint
+    model's registry key (e.g. a subsystem name), and the return value is
+    ``{channel_id: metrics_dict, ...}`` — one entry per channel in the
+    group, each with the exact keys documented below. This is a per-channel
+    breakdown, not a mission-level aggregate: the OR-aggregated mission-level
+    metric is computed by the caller (ray_fanout/tune.py — see plan stage
+    021.4b), not here, so the univariate contract stays exactly what it was.
+
     Returns:
-        Metrics dict over the selected eval portion. Headline keys are computed
-        on the UN-pruned pipeline (serving parity): point {precision, recall,
-        f1, f0_5, n_true_positive_labels, n_predicted_positive_labels} and
-        segment-overlap {seg_precision, seg_recall, seg_f1, seg_f0_5,
-        n_true_seqs, n_pred_seqs}. Offline pruned-ceiling keys (Hundman §3.3,
-        not produced by serving): {pruned_seg_precision, pruned_seg_recall,
-        pruned_seg_f0_5, pruned_n_pred_seqs}.
+        Univariate: a flat metrics dict over the selected eval portion.
+        Multivariate: ``{channel_id: <the same flat dict>, ...}``.
+
+        Headline keys are computed on the UN-pruned pipeline (serving parity):
+        point {precision, recall, f1, f0_5, n_true_positive_labels,
+        n_predicted_positive_labels} and segment-overlap {seg_precision,
+        seg_recall, seg_f1, seg_f0_5, n_true_seqs, n_pred_seqs}. Offline
+        pruned-ceiling keys (Hundman §3.3, not produced by serving):
+        {pruned_seg_precision, pruned_seg_recall, pruned_seg_f0_5,
+        pruned_n_pred_seqs}.
     """
     from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
@@ -434,57 +506,55 @@ def score_channel(
     preds, targets = predict(model, loader, device, channel=channel)
     log.info("model.score.predict_done", channel=channel)
     errors = preds - targets
-    smoothed = smooth_errors(errors, cfg.error_smoothing_window)
-    threshold = dynamic_threshold(smoothed, cfg.threshold_window, cfg.threshold_z)
-    # Headline flags are UN-pruned: this is exactly what the online serving
-    # engine (api/inference.py) produces tick-by-tick. Hundman §3.3 pruning is
-    # a retrospective batch op the streaming path cannot replicate, so we keep
-    # train/serve parity by reporting the un-pruned pipeline as the headline and
-    # the pruned result only as an offline "ceiling" (see docs/architecture/
-    # online-pruning-investigation.md for the path to online pruning).
-    flags_raw = flag_anomalies(
-        smoothed, threshold, cfg.threshold_min_anomaly_len, cfg.min_error_value
-    )
-    flags_pruned = prune_anomalies(smoothed, flags_raw, cfg.prune_min_decrease)
 
-    # Slice true/pred labels for the reported metrics.
-    # errors.npy is saved from the full smoothed array below, unaffected.
-    n = len(is_anomaly)
-    n_hpo = int(n * settings.tune.hpo_eval_fraction)
-    if eval_split == "hpo_portion":
-        _sl = slice(None, n_hpo)
-    elif eval_split == "final_portion":
-        _sl = slice(n_hpo, None)
-    else:  # "full_test"
-        _sl = slice(None, None)
-    eval_true = is_anomaly[_sl]
-    eval_raw = flags_raw[_sl]
-    eval_pruned = flags_pruned[_sl]
+    # Multivariate (docs/plans/021-multivariate-telemanom.md): `channel` is
+    # the joint model's registry key (a subsystem name); `errors`/`targets`/
+    # `is_anomaly` are (N, C). Extract column i as channel group[i]'s error
+    # series and run the SAME per-channel pipeline as the univariate case —
+    # "only the forecaster becomes multivariate" (Design). Univariate is not
+    # a degenerate C=1 loop iteration; it stays the exact pre-021 call.
+    is_multivariate = cfg.input_channels is not None
+    group = list(cfg.input_channels) if cfg.input_channels else [channel]
 
-    # Headline = serving-parity (un-pruned). Ceiling = offline pruned report.
-    metrics = {**evaluate(eval_true, eval_raw), **evaluate_overlap(eval_true, eval_raw)}
-    _ceiling = evaluate_overlap(eval_true, eval_pruned)
-    metrics["pruned_seg_precision"] = _ceiling["seg_precision"]
-    metrics["pruned_seg_recall"] = _ceiling["seg_recall"]
-    metrics["pruned_seg_f0_5"] = _ceiling["seg_f0_5"]
-    metrics["pruned_n_pred_seqs"] = _ceiling["n_pred_seqs"]
-
-    # Serialise numpy artifacts for MLflow logging (all writes inside open_run).
-    _errors_bytes = errors_to_bytes(smoothed)
-    _threshold_bytes = threshold_to_bytes(threshold)
+    # Untyped-Any dict, populated below rather than reassigned per branch —
+    # keeps a single settled static type instead of a per-branch union.
+    metrics: dict[str, Any] = {}
+    _artifact_writes: list[tuple[bytes, str]]
+    if is_multivariate:
+        _artifact_writes = []
+        for i, ch in enumerate(group):
+            ch_metrics, ch_smoothed, ch_threshold = _score_series(
+                errors[:, i], is_anomaly[:, i], cfg, eval_split, settings.tune.hpo_eval_fraction
+            )
+            metrics[ch] = ch_metrics
+            _artifact_writes.append((errors_to_bytes(ch_smoothed), f"errors/{ch}.npy"))
+            _artifact_writes.append((threshold_to_bytes(ch_threshold), f"threshold/{ch}.npy"))
+    else:
+        _flat_metrics, _smoothed, _threshold = _score_series(
+            errors, is_anomaly, cfg, eval_split, settings.tune.hpo_eval_fraction
+        )
+        metrics.update(_flat_metrics)
+        _artifact_writes = [
+            (errors_to_bytes(_smoothed), "errors.npy"),
+            (threshold_to_bytes(_threshold), "threshold.npy"),
+        ]
     _threshold_config_bytes = json.dumps(
         {"window": cfg.threshold_window, "z": cfg.threshold_z}, indent=2
     ).encode()
 
     # Subsystem lookup — best-effort metadata; never breaks scoring on failure.
     # load_channel_subsystem_map is in core.metadata (no ray_fanout dep).
-    _subsystem: str | None = None
-    with suppress(Exception):
-        _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    # Multivariate: `channel` already IS the subsystem key.
+    _subsystem: str | None = channel if is_multivariate else None
+    if not is_multivariate:
+        with suppress(Exception):
+            _subsystem = load_channel_subsystem_map(settings, mission).get(channel)
 
     _extra: dict[str, str] = {"eval_split": eval_split, "data_source": data_source}
     if parent_hpo_run_id is not None:
         _extra["tuned_from_run"] = parent_hpo_run_id
+    if is_multivariate:
+        _extra["channels"] = ",".join(group)
 
     _exp = experiment_name(cfg.model_type, "scoring", mission, settings.variant)
     _tags = common_tags(
@@ -492,19 +562,28 @@ def score_channel(
         mission=mission,
         phase="scoring",
         variant=settings.variant,
-        channel=channel,
+        # A multivariate run's `channel` is a subsystem key, not a real
+        # channel_id — see model/training.py's identical distinction.
+        channel=None if is_multivariate else channel,
         subsystem=_subsystem,
         extra=_extra,
     )
 
-    # Hash the test partition for the Dataset column — best-effort; failure is
-    # expected for GCS paths in local dev where the partition is not cached.
+    # Hash the test partition(s) for the Dataset column — best-effort;
+    # failure is expected for GCS paths in local dev where the partition is
+    # not cached.
     _eval_hash: str | None = None
     with suppress(Exception):
-        _eval_hash = partition_hash(
-            settings.preprocess.processed_data_dir, mission, channel, "test",
-            variant=settings.variant,
-        )
+        if is_multivariate:
+            _eval_hash = group_partition_hash(
+                settings.preprocess.processed_data_dir, mission, group, "test",
+                variant=settings.variant,
+            )
+        else:
+            _eval_hash = partition_hash(
+                settings.preprocess.processed_data_dir, mission, channel, "test",
+                variant=settings.variant,
+            )
 
     # The CPU forward pass above can run tens of minutes for a large channel —
     # long enough to outlive the GCP ID token fetched by configure_mlflow at the
@@ -513,15 +592,27 @@ def score_channel(
     # training; no-op for local SQLite backends).
     refresh_mlflow_auth()
     with open_run(experiment=_exp, run_name=channel, tags=_tags):
-        # Log the test partition as the evaluation dataset so the Dataset
+        # Log the test partition(s) as the evaluation dataset so the Dataset
         # column in the MLflow UI records which data produced these scores.
-        log_input_dataset(
-            source=str(
+        if is_multivariate:
+            _test_source = "; ".join(
+                str(
+                    output_path(
+                        settings.preprocess.processed_data_dir, mission, settings.variant,
+                        "test", f"mission_id={mission}", f"channel_id={ch}",
+                    )
+                )
+                for ch in group
+            )
+        else:
+            _test_source = str(
                 output_path(
                     settings.preprocess.processed_data_dir, mission, settings.variant,
                     "test", f"mission_id={mission}", f"channel_id={channel}",
                 )
-            ),
+            )
+        log_input_dataset(
+            source=_test_source,
             name=f"{mission}-{channel}-test",
             digest=_eval_hash,
             context="evaluation",
@@ -538,23 +629,42 @@ def score_channel(
             "min_error_value": cfg.min_error_value,
             "eval_split": eval_split,
         })
-        log_metrics_final(metrics)
-        log_artifact_bytes(_errors_bytes, "errors.npy")
-        log_artifact_bytes(_threshold_bytes, "threshold.npy")
+        if is_multivariate:
+            # log_metrics_final wants a flat {name: float} dict; MLflow has no
+            # native nesting for scalar metrics, so per-channel keys are
+            # prefixed rather than logged as one channel's worth per call —
+            # one open_run per group keeps the run count == model count.
+            log_metrics_final({
+                f"{ch}.{k}": v for ch, ch_metrics in metrics.items() for k, v in ch_metrics.items()
+            })
+        else:
+            log_metrics_final(metrics)
+        for _data, _artifact_file in _artifact_writes:
+            log_artifact_bytes(_data, _artifact_file)
         log_artifact_bytes(_threshold_config_bytes, "threshold_config.json")
         log_artifact_bytes(
             json.dumps(metrics, indent=2).encode(),
             "metrics/metrics.json",
         )
 
-    log.info(
-        "model.score.end",
-        mission=mission,
-        channel=channel,
-        eval_split=eval_split,
-        precision=round(metrics["precision"], 4),
-        recall=round(metrics["recall"], 4),
-        f0_5=round(metrics["f0_5"], 4),
-    )
+    if is_multivariate:
+        log.info(
+            "model.score.end",
+            mission=mission,
+            channel=channel,
+            eval_split=eval_split,
+            channels=group,
+            f0_5_by_channel={ch: round(m["f0_5"], 4) for ch, m in metrics.items()},
+        )
+    else:
+        log.info(
+            "model.score.end",
+            mission=mission,
+            channel=channel,
+            eval_split=eval_split,
+            precision=round(metrics["precision"], 4),
+            recall=round(metrics["recall"], 4),
+            f0_5=round(metrics["f0_5"], 4),
+        )
 
     return metrics

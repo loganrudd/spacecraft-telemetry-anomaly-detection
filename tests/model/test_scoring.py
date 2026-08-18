@@ -431,6 +431,38 @@ def test_predict_sets_eval_mode() -> None:
     assert not model.training, "predict() should leave the model in eval mode"
 
 
+def test_predict_output_shape_multivariate() -> None:
+    """A multivariate model's predict() output is (N, C) — docs/plans/021.
+
+    Unchanged code path: model(x) is already (B, C) and .squeeze(1) is a
+    no-op for C > 1, so this pins that behaviour rather than exercising new
+    logic in predict() itself.
+    """
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+
+    C = 3
+    cfg = ModelConfig(
+        hidden_dim=8, num_layers=1, dropout=0.0,
+        input_channels=[f"channel_{i}" for i in range(C)],
+        target_channels=[f"channel_{i}" for i in range(C)],
+    )
+    model = build_model(cfg)
+    n, W = 20, cfg.window_size
+    rng = np.random.default_rng(0)
+    x_np = rng.standard_normal((n, W, C)).astype(np.float32)
+    y_np = rng.standard_normal((n, C)).astype(np.float32)
+    dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_np), torch.from_numpy(y_np))
+    loader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False)
+
+    preds, targets = predict(model, loader, torch.device("cpu"))
+
+    assert preds.shape == (n, C)
+    assert targets.shape == (n, C)
+    np.testing.assert_array_equal(targets, y_np)
+
+
 # ---------------------------------------------------------------------------
 # score_channel — integration test (slow)
 # ---------------------------------------------------------------------------
@@ -525,6 +557,107 @@ def test_score_channel_artifacts_and_metrics(
     assert "threshold.npy" in artifact_names, "threshold.npy not logged to MLflow"
     assert "threshold_config.json" in artifact_names, "threshold_config.json not logged to MLflow"
     assert "metrics" in artifact_names, "metrics/ dir not logged to MLflow"
+
+
+@pytest.mark.slow
+def test_score_channel_multivariate(
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """A multivariate group scores per channel with the existing scorer,
+    unchanged — each channel's metrics dict is keyed under the group's
+    return dict. See docs/plans/021-multivariate-telemanom.md."""
+    import json as _json
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from mlflow.tracking import MlflowClient
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    window_size = 10
+    channels = ["channel_41", "channel_42"]
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+
+    def _write(split: str, ch: str, n: int, value_offset: float) -> None:
+        timestamps = [
+            pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+                pa.timestamp("us", tz="UTC")
+            )
+            for i in range(n)
+        ]
+        table = pa.table({
+            "telemetry_timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(
+                [float(i) + value_offset for i in range(n)], type=pa.float32()
+            ),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array([False] * n),
+        })
+        part_dir = (
+            processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={ch}"
+        )
+        part_dir.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, part_dir / "part.parquet")
+
+    for i, ch in enumerate(channels):
+        _write("train", ch, n=40, value_offset=float(i))
+        _write("test", ch, n=30, value_offset=float(i))
+
+    norm_file = processed_dir / mission / "normalization_params.json"
+    norm_file.parent.mkdir(parents=True, exist_ok=True)
+    norm_file.write_text(_json.dumps({ch: {"mean": 0.0, "std": 1.0} for ch in channels}))
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "mlflow": base_settings.mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+            "preprocess": base_settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            ),
+            "model": base_settings.model.model_copy(update={
+                "artifacts_dir": tmp_path / "models",
+                "window_size": window_size,
+                "input_channels": channels,
+                "target_channels": channels,
+                "hidden_dim": 4,
+                "batch_size": 4,
+            }),
+        }
+    )
+
+    subsystem_key = "subsystem_1"
+    train_channel(settings, mission, subsystem_key)
+    metrics = score_channel(settings, mission, subsystem_key)
+
+    assert set(metrics.keys()) == set(channels)
+    for ch in channels:
+        ch_metrics = metrics[ch]
+        assert 0.0 <= ch_metrics["precision"] <= 1.0
+        assert 0.0 <= ch_metrics["f0_5"] <= 1.0
+
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    exp_name = experiment_name(settings.model.model_type, "scoring", mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert "channel_id" not in tags
+    assert tags.get("subsystem") == subsystem_key
+    assert tags.get("channels") == ",".join(channels)
+
+    artifact_names = {a.path for a in client.list_artifacts(runs[0].info.run_id)}
+    assert "errors" in artifact_names, "per-channel errors/ dir not logged"
+    assert "threshold" in artifact_names, "per-channel threshold/ dir not logged"
+    assert "threshold_config.json" in artifact_names
+    assert "metrics" in artifact_names
 
 
 @pytest.mark.slow
