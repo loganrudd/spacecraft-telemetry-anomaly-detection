@@ -79,13 +79,29 @@ REGION="${REGION:-us-central1}"
 # verbatim rather than each YAML site re-deriving the conditional itself.
 VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 
+# --injected and --variant cannot be combined: INJECTED=1 below points
+# PROCESSED_DATA_DIR at a mission-only _injected root (injection/generate.py
+# writes no variant segment), so composing it with VARIANT_SEG would resolve
+# to _injected/{mission}/{variant}/test/... — a path nothing ever writes.
+# No caller needs the combination today (ISS injection runs at variant=None),
+# so this is a guard rather than plumbing variant support through
+# injection/generate.py's five path sites for an unused case. See
+# docs/reviews/020-experiment-variant-axis.md §3.6.
+if [[ "${INJECTED}" = "1" && -n "${VARIANT}" ]]; then
+  echo "ERROR: --injected and --variant cannot be combined — injection writes a" >&2
+  echo "mission-only layout (injection/generate.py). See" >&2
+  echo "docs/reviews/020-experiment-variant-axis.md §3.6." >&2
+  exit 1
+fi
+
 # INJECTED=1 scores the manufactured-label dataset (ISS injection-driven HPO)
 # and tags the run data_source=injected (see model/scoring.py, cli.py
 # `ray score --injected`). `inject run` writes no channels.txt, so fall back
 # to the base channels.txt (injected data covers exactly the same channels as
 # the preprocessed dataset). The channels.txt default path is variant-aware —
 # preprocess writes it under {mission}/{variant}/ when VARIANT is set. The
-# _injected root itself is a separate, orthogonal mechanism (not variant-scoped).
+# _injected root itself is a separate mechanism that cannot be combined with
+# a variant (guarded above).
 if [[ "${INJECTED}" = "1" ]]; then
   PROCESSED_DATA_DIR="gs://${PROJECT_ID}-processed-data/_injected"
   INJECTED_FLAG="--injected"
