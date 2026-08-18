@@ -12,16 +12,26 @@ from spacecraft_telemetry.core.paths import output_path, to_upath
 
 
 class TestOutputPathNullDefault:
-    """variant=None must be string-identical to the pre-variant layout."""
+    """variant=None must be string-identical to the pre-variant layout.
+
+    Golden-filed as literals (docs/plans/020-experiment-variant-axis.md
+    Validation: "assert every composed path ... is string-identical to the
+    pre-refactor value. Golden-file these.") rather than recomputed via
+    to_upath(...) / ... — a recomputation using the same composition idiom
+    the helper itself uses can't catch a shared misconception about that
+    composition, and can't pin UPath's exact stringification the way a
+    literal does (see test_gcs_root, the one case a local-only recomputation
+    would never exercise).
+    """
 
     def test_no_parts(self) -> None:
         assert str(output_path("data/processed", "ESA-Mission1", None)) == (
-            str(to_upath("data/processed") / "ESA-Mission1")
+            "data/processed/ESA-Mission1"
         )
 
     def test_single_part(self) -> None:
         assert str(output_path("data/processed", "ESA-Mission1", None, "train")) == (
-            str(to_upath("data/processed") / "ESA-Mission1" / "train")
+            "data/processed/ESA-Mission1/train"
         )
 
     def test_multiple_parts_hive_partition(self) -> None:
@@ -29,27 +39,23 @@ class TestOutputPathNullDefault:
             "data/processed", "ESA-Mission1", None,
             "train", "mission_id=ESA-Mission1", "channel_id=channel_1",
         )
-        want = (
-            to_upath("data/processed") / "ESA-Mission1"
-            / "train" / "mission_id=ESA-Mission1" / "channel_id=channel_1"
+        assert str(got) == (
+            "data/processed/ESA-Mission1/train/mission_id=ESA-Mission1/channel_id=channel_1"
         )
-        assert str(got) == str(want)
 
     def test_gcs_root(self) -> None:
         got = output_path("gs://my-bucket-processed-data", "ISS", None, "train")
-        want = to_upath("gs://my-bucket-processed-data") / "ISS" / "train"
-        assert str(got) == str(want)
+        assert str(got) == "gs://my-bucket-processed-data/ISS/train"
 
     def test_artifacts_dir_tuned_configs(self) -> None:
         got = output_path("models", "ESA-Mission1", None, "tuned_configs.json")
-        want = to_upath("models") / "ESA-Mission1" / "tuned_configs.json"
-        assert str(got) == str(want)
+        assert str(got) == "models/ESA-Mission1/tuned_configs.json"
 
     def test_empty_string_variant_also_short_circuits(self) -> None:
         # Settings coerces "" to None before this is ever called, but the
         # helper itself treats any falsy variant identically to None.
         assert str(output_path("data/processed", "ESA-Mission1", "")) == (
-            str(output_path("data/processed", "ESA-Mission1", None))
+            "data/processed/ESA-Mission1"
         )
 
 
