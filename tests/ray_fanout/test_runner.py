@@ -249,6 +249,172 @@ def test_with_abs_paths_resolves_all_paths(tmp_path) -> None:
     assert result.data.raw_data_dir.is_absolute(), "raw_data_dir should be absolute"
 
 
+# ---------------------------------------------------------------------------
+# Multivariate fan-out (docs/plans/021-multivariate-telemanom.md)
+# ---------------------------------------------------------------------------
+
+
+def test_group_channels_by_subsystem_groups_and_orders(tmp_path) -> None:
+    """Channels group by subsystem; each group's order matches the input list."""
+    import json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.ray_fanout.runner import _group_channels_by_subsystem
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    metadata_dir = processed_dir / mission / "metadata"
+    metadata_dir.mkdir(parents=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({
+            "channel_42": "subsystem_1", "channel_41": "subsystem_1", "channel_9": "subsystem_2",
+        })
+    )
+    settings = load_settings("test").model_copy(
+        update={"preprocess": load_settings("test").preprocess.model_copy(
+            update={"processed_data_dir": str(processed_dir)}
+        )}
+    )
+
+    groups = _group_channels_by_subsystem(
+        settings, mission, ["channel_41", "channel_9", "channel_42"]
+    )
+
+    assert groups == {
+        "subsystem_1": ["channel_41", "channel_42"],
+        "subsystem_2": ["channel_9"],
+    }
+
+
+def test_group_channels_by_subsystem_drops_unmapped(tmp_path) -> None:
+    """A channel with no subsystem entry is dropped, not silently grouped."""
+    import json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.ray_fanout.runner import _group_channels_by_subsystem
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    metadata_dir = processed_dir / mission / "metadata"
+    metadata_dir.mkdir(parents=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({"channel_41": "subsystem_1"})
+    )
+    settings = load_settings("test").model_copy(
+        update={"preprocess": load_settings("test").preprocess.model_copy(
+            update={"processed_data_dir": str(processed_dir)}
+        )}
+    )
+
+    groups = _group_channels_by_subsystem(settings, mission, ["channel_41", "channel_unmapped"])
+
+    assert groups == {"subsystem_1": ["channel_41"]}
+
+
+@pytest.mark.slow
+def test_train_all_subsystems_ok(ray_local, ray_series_parquet_multichannel) -> None:
+    """train_all_subsystems trains one joint model per subsystem group."""
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_fanout.runner import train_all_subsystems
+
+    settings = ray_series_parquet_multichannel
+    results = train_all_subsystems(settings, "ESA-Mission1", ["channel_41", "channel_42"])
+
+    assert len(results) == 1
+    r = results[0]
+    assert r["status"] == "ok", f"Expected ok, got: {r.get('error_msg')}"
+    assert r["channel"] == "subsystem_1"
+    assert isinstance(r["best_epoch"], int)
+
+
+@pytest.mark.slow
+def test_train_all_subsystems_registers_joint_model(
+    ray_local, ray_series_parquet_multichannel
+) -> None:
+    """The registered model is keyed by subsystem, and its saved n_channels == 2."""
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.mlflow_tracking.conventions import registered_model_name
+    from spacecraft_telemetry.ray_fanout.runner import train_all_subsystems
+
+    settings = ray_series_parquet_multichannel
+    train_all_subsystems(settings, "ESA-Mission1", ["channel_41", "channel_42"])
+
+    import mlflow
+
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    client = mlflow.tracking.MlflowClient()
+    model_name = registered_model_name(settings.model.model_type, "ESA-Mission1", "subsystem_1")
+    versions = list(client.search_model_versions(f"name='{model_name}'"))
+    assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
+    mv = versions[0]
+    assert mv.tags.get("subsystem_id") == "subsystem_1"
+    assert mv.tags.get("channels") == "channel_41,channel_42"
+    assert "channel_id" not in mv.tags
+
+
+@pytest.mark.slow
+def test_score_all_subsystems_ok(ray_local, ray_series_parquet_multichannel) -> None:
+    """score_all_subsystems returns per-channel metrics nested under the subsystem."""
+    pytest.importorskip("ray")
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+
+    settings = ray_series_parquet_multichannel
+    train_all_subsystems(settings, "ESA-Mission1", ["channel_41", "channel_42"])
+    results = score_all_subsystems(settings, "ESA-Mission1", ["channel_41", "channel_42"])
+
+    assert len(results) == 1
+    r = results[0]
+    assert r["status"] == "ok", f"Expected ok, got: {r.get('error_msg')}"
+    assert r["channel"] == "subsystem_1"
+    for ch in ("channel_41", "channel_42"):
+        assert ch in r, f"expected per-channel metrics dict under key {ch!r} in {r.keys()}"
+        assert "precision" in r[ch]
+        assert "f0_5" in r[ch]
+
+
+@pytest.mark.slow
+def test_score_all_subsystems_applies_tuned_configs(
+    ray_local, ray_series_parquet_multichannel
+) -> None:
+    """tuned_configs keyed by subsystem apply directly to the group's settings."""
+    pytest.importorskip("ray")
+    import json
+
+    import mlflow
+
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.io import download_artifact_bytes
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+
+    settings = ray_series_parquet_multichannel
+    train_all_subsystems(settings, "ESA-Mission1", ["channel_41", "channel_42"])
+
+    tuned = {"subsystem_1": {"threshold_z": 2.5}}
+    results = score_all_subsystems(
+        settings, "ESA-Mission1", ["channel_41", "channel_42"], tuned_configs=tuned
+    )
+    assert results[0]["status"] == "ok", f"Expected ok, got: {results[0].get('error_msg')}"
+
+    # A multivariate run has no channel_id tag (see model/scoring.py), so —
+    # unlike the univariate test above — look it up by the subsystem tag
+    # instead of find_latest_run_for_channel.
+    tracking_uri = settings.mlflow.tracking_uri
+    client = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri)
+    scoring_exp = experiment_name(settings.model.model_type, "scoring", "ESA-Mission1")
+    exp = client.get_experiment_by_name(scoring_exp)
+    assert exp is not None
+    runs = client.search_runs(
+        [exp.experiment_id],
+        filter_string="tags.subsystem = 'subsystem_1'",
+        order_by=["attributes.start_time DESC"],
+        max_results=1,
+    )
+    assert runs, "No scoring run found in MLflow for subsystem_1"
+    cfg_bytes = download_artifact_bytes(runs[0].info.run_id, "threshold_config.json", tracking_uri)
+    saved = json.loads(cfg_bytes.decode())
+    assert saved["z"] == pytest.approx(2.5)
+
+
 def test_min_error_value_is_a_tunable_scoring_field() -> None:
     """min_error_value must survive the tuned_configs whitelist.
 

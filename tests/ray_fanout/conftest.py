@@ -153,3 +153,56 @@ def pretrained_channel(ray_series_parquet: Settings) -> Settings:
     train_channel(ray_series_parquet, _MISSION, _CHANNEL)
     return ray_series_parquet
 
+
+# ---------------------------------------------------------------------------
+# Multivariate fan-out fixtures (docs/plans/021-multivariate-telemanom.md)
+# ---------------------------------------------------------------------------
+
+_MV_CHANNELS = ["channel_41", "channel_42"]
+_MV_SUBSYSTEM = "subsystem_1"
+
+
+@pytest.fixture(scope="session")
+def ray_series_parquet_multichannel(tmp_path_factory: pytest.TempPathFactory) -> Settings:
+    """Two channels, both mapped to one subsystem — the 021 fan-out unit.
+
+    Mirrors ray_series_parquet's shape (same window/horizon-derived row
+    counts) but writes channel_41 and channel_42, both under subsystem_1, so
+    train_all_subsystems/score_all_subsystems have something real to group.
+    """
+    import json
+
+    base = tmp_path_factory.mktemp("ray_processed_mv")
+
+    test_cfg = load_settings("test")
+    window = test_cfg.model.window_size
+    horizon = test_cfg.model.prediction_horizon
+    n_train = window + horizon + 5
+    n_test = window + horizon + 5
+
+    for channel in _MV_CHANNELS:
+        for split, n_rows, n_anom in [("train", n_train, 0), ("test", n_test, 3)]:
+            _write_series_split(
+                base / _MISSION, split, _MISSION, channel, n_rows, n_anom, segment_id=0,
+            )
+
+    norm_dir = base / _MISSION
+    norm_dir.mkdir(parents=True, exist_ok=True)
+    (norm_dir / "normalization_params.json").write_text(
+        json.dumps({ch: {"mean": 0.0, "std": 1.0} for ch in _MV_CHANNELS})
+    )
+    metadata_dir = norm_dir / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({ch: _MV_SUBSYSTEM for ch in _MV_CHANNELS})
+    )
+
+    artifacts_dir = tmp_path_factory.mktemp("ray_models_mv")
+
+    return test_cfg.model_copy(
+        update={
+            "preprocess": test_cfg.preprocess.model_copy(update={"processed_data_dir": base}),
+            "model": test_cfg.model.model_copy(update={"artifacts_dir": artifacts_dir}),
+        }
+    )
+
