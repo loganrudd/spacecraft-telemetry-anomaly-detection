@@ -52,11 +52,22 @@ REGION="${REGION:-us-central1}"
 # segment must be a single pre-resolved variable the YAML can interpolate
 # verbatim rather than each YAML site re-deriving the conditional itself.
 VARIANT_SEG="${VARIANT:+/${VARIANT}}"
-# 6-way L4 packing by default for every mission (floor(1/0.16)=6).
-# 0.167 (=1/6 exactly) rounds to floor(5.99)=5 under floating point; 0.16 is
-# the safe 6-way value. Pass NUM_GPUS=1 to run one channel at a time (large
-# channels / preemption issues).
-NUM_GPUS="${NUM_GPUS:-0.16}"
+# 8-way L4 packing by default (floor(1/0.125)=8) — the empirically established
+# value: 8 concurrent channel processes (~534 MiB each) peg the L4 at 99% util.
+#
+# Do NOT reach for the packing factor to speed training up. Training here is
+# GPU-COMPUTE-BOUND (the 250 sequential LSTM timesteps are the load), so when
+# the GPU is saturated total time = total work / GPU rate, *independent of
+# packing*. 4-way vs 8-way only trades per-channel latency for concurrency —
+# same aggregate throughput. The real levers are less work (fewer channels,
+# fewer epochs, smaller window_size) or more GPU (quota-blocked at 1 L4).
+#
+# ISS previously defaulted to 6-way (0.16); collapsed to one value because the
+# distinction bought nothing measurable and 8-way is the benchmarked optimum.
+# 0.167 (=1/6 exactly) rounds to floor(5.99)=5 under floating point, which is
+# why the old 6-way spelling was 0.16 rather than 1/6.
+# Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption).
+NUM_GPUS="${NUM_GPUS:-0.125}"
 
 # Build the channel-selection argument for the RayJob entrypoint.
 # Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.
