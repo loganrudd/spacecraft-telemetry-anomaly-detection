@@ -616,10 +616,10 @@ def test_run_all_sweeps_filters_and_runs(
 @pytest.mark.parametrize(
     ("mission", "variant", "expected_space_name", "threshold_z_bounds"),
     [
-        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (1.0, 8.0)),
         # A real ESA-Mission1 variant (mission unchanged, variant set) keeps
         # the widened space — the selector is mission-keyed, not name-keyed.
-        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (1.0, 8.0)),
         # A legacy un-migrated ESA-Mission1-ADB* pseudo-mission is a DIFFERENT
         # `mission` string entirely and correctly falls through to the default
         # space — this is the plan 020 fix (was `mission.startswith(...)`, a
@@ -726,17 +726,30 @@ class TestPinnedParamDetection:
     """Regression coverage for the 2026-08-15 evening re-tune finding.
 
     subsystem_5's threshold_z landed at 2.511 against ESA_M1_SEARCH_SPACE's
-    lower bound of 2.5, and subsystem_3's min_error_value landed at 0.5685
+    then-lower bound of 2.5, and subsystem_3's min_error_value landed at 0.5685
     against the upper bound of 0.6 (see docs/reviews/019-esa-adb-comparable-eval.md).
     Both are cheap fixtures pinned here so a future re-discovery is a single
     failing assertion instead of a fresh investigation.
+
+    The threshold_z lower bound was subsequently dropped 2.5 -> 1.0 for ESA
+    (docs/plans/021 stage 021.5b) precisely because configs kept landing on it.
     """
 
     def test_flags_param_pinned_to_lower_bound(self) -> None:
         from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
 
-        config = {"threshold_z": 2.511, "min_error_value": 0.1}
+        config = {"threshold_z": 1.02, "min_error_value": 0.1}
         assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == ["threshold_z"]
+
+    def test_historical_2_511_is_no_longer_pinned(self) -> None:
+        """The 2026-08-15 finding, re-asserted as a *fix*: subsystem_5's
+        threshold_z=2.511 sat on the old 2.5 floor. With the ESA floor now at
+        1.0 that same value is comfortably interior, which is the whole point
+        of the 021.5b change — the optimizer is no longer wall-limited there."""
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {"threshold_z": 2.511, "min_error_value": 0.1}
+        assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == []
 
     def test_flags_param_pinned_to_upper_bound(self) -> None:
         from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
@@ -756,6 +769,53 @@ class TestPinnedParamDetection:
 
         config = {"min_error_value": 0.0, "threshold_z": 2.5}
         assert _pinned_params(config, ISS_SEARCH_SPACE) == ["threshold_z"]
+
+
+class TestIssKeepsItsThresholdZFloor:
+    """The trap guarding the 021.5b change.
+
+    ESA's threshold_z floor was lowered 2.5 -> 1.0 because both plan-021 arms'
+    optima sat on the 2.5 bound. That floor exists for an ISS reason: during
+    Phase 15 the optimizer drove z to ~1.6 chasing undetectable drift faults and
+    fired on nominal noise in replay. ISS_SEARCH_SPACE is built as
+    `{**SEARCH_SPACE, ...}` and does NOT override threshold_z, so the lowering
+    had to go in ESA_M1_SEARCH_SPACE — putting it in the base would silently
+    re-expose ISS to exactly that failure.
+
+    ESA can afford a low z because its optimum pairs it with a high
+    min_error_value (0.4-0.5); ISS pins min_error_value to 0.0 and so has no
+    compensating suppression.
+    """
+
+    def test_iss_floor_is_unchanged(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        assert ISS_SEARCH_SPACE["threshold_z"].lower == pytest.approx(2.5)
+
+    def test_base_floor_is_unchanged(self) -> None:
+        """The base space feeds ISS and every non-Mission1 ESA mission."""
+        from spacecraft_telemetry.ray_fanout.tune import SEARCH_SPACE
+
+        assert SEARCH_SPACE["threshold_z"].lower == pytest.approx(2.5)
+
+    def test_only_esa_m1_got_the_lower_floor(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            ISS_SEARCH_SPACE,
+            SEARCH_SPACE,
+        )
+
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower == pytest.approx(1.0)
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower < SEARCH_SPACE["threshold_z"].lower
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower < ISS_SEARCH_SPACE["threshold_z"].lower
+
+    def test_iss_still_pins_min_error_value_to_zero(self) -> None:
+        """Documents *why* ISS cannot inherit a low z: it has no error floor to
+        compensate with. If this ever becomes tunable for ISS, the z floor
+        decision must be revisited together with it."""
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        assert ISS_SEARCH_SPACE["min_error_value"] == 0.0
 
 
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:

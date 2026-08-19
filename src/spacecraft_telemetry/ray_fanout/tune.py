@@ -206,9 +206,29 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
 # channels, so 0.6 still sits below the observed max while genuinely spanning
 # "keeps only the extreme tail". z to 8.0 is deliberately generous — the goal is
 # for the optimum to be interior, not to be tight.
+# The z LOWER bound is also overridden here, 2.5 -> 1.0 (added 2026-08-19,
+# docs/plans/021 stage 021.5b). A post-hoc ceiling sweep over both plan-021 arms'
+# saved error arrays (scripts/threshold_ceiling.py) found BOTH optima sitting at
+# the 2.5 floor and wanting to go lower — worth ~0.015 mean segF0.5 to each:
+#
+#   univariate arm A : 0.754 at z=2.5  ->  0.769 at z=1.0 (floor 0.4)
+#   multivariate     : 0.759 at z=2.5  ->  0.775 at z=1.0 (floor 0.5)
+#
+# Both plateau by z=1.0-1.5, so 1.0 is generous rather than tight — the goal is
+# an interior optimum, same as the 8.0 upper bound.
+#
+# ⚠️ This MUST live here and never in SEARCH_SPACE. The 2.5 floor exists for an
+# ISS reason (the optimizer flooring z to ~1.6 to chase undetectable drift
+# faults during Phase 15, firing on nominal noise in replay), and
+# ISS_SEARCH_SPACE is built as `{**SEARCH_SPACE, ...}` WITHOUT overriding
+# threshold_z — so lowering the base floor would silently re-expose ISS to
+# exactly the failure the floor was introduced to prevent. ESA's high-floor
+# optimum (min_error_value 0.4-0.5) is what makes a low z safe here; ISS pins
+# min_error_value to 0.0 and therefore has no such compensating mechanism.
 ESA_M1_SEARCH_SPACE: dict[str, Any] = {
     **SEARCH_SPACE,
-    "threshold_z":     tune.uniform(2.5, 8.0),  # was (2.5, 5.0) — arm A pegged at 4.783
+    "threshold_z":     tune.uniform(1.0, 8.0),  # upper: arm A pegged at 4.783 of 5.0
+                                                # lower: both 021 arms pegged at the 2.5 floor
     "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
 }
 
