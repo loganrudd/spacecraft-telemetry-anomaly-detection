@@ -27,6 +27,7 @@ spec:
     spacecraft-telemetry --env cloud ray train
     --mission ${MISSION}
     ${CHANNELS_ARG}
+    ${MULTIVARIATE_ARG}
 
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
