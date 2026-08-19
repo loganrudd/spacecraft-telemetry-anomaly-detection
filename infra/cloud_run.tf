@@ -23,12 +23,23 @@ resource "google_cloud_run_v2_service" "mlflow" {
     service_account = google_service_account.mlflow.email
 
     scaling {
-      # min=0: scale-to-zero. MLflow cold-start adds ~10-20s to the first API
-      # request after idle — acceptable for a portfolio demo. min=1 triggers
-      # instance-based CPU billing ($0.000018/vCPU-s always-on) which costs
-      # ~$3/day for 2 vCPU regardless of traffic; request-based billing does not
-      # apply to minimum instances.
-      min_instance_count = 0
+      # min=1 (docs/plans/021-multivariate-telemanom.md 021.5): a cold instance
+      # under a concurrent Ray fan-out burst (6+ tasks all calling
+      # mlflow.set_experiment() within the same ~15s window at job start) can
+      # blow open_run()'s 30s timeout — observed directly during the arm A
+      # migration training run, silently skipping that channel's model
+      # registration (open_run degrades to yielding None, never crashes the
+      # task). min=1 keeps an instance warm so every remaining cloud
+      # score/tune/score-tuned step (and later the multivariate arm) doesn't
+      # re-risk the same race.
+      #
+      # Cost: cpu_idle=true below means CPU is only billed during actual
+      # request processing even while min=1 keeps the container resident —
+      # this is NOT the always-allocated-CPU rate. At the current 1 vCPU /
+      # 2Gi sizing, idle cost is dominated by memory-resident billing, well
+      # under $1/day — not the ~$3/day a naive min=1 read implies. Revert to
+      # 0 after this round of cloud work if scale-to-zero is preferred again.
+      min_instance_count = 1
       max_instance_count = 2
     }
 
