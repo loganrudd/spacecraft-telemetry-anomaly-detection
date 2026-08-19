@@ -1,0 +1,162 @@
+"""Tests for ray_fanout.threshold_grid — post-hoc (z, floor) ceiling sweeps.
+
+The load-bearing property is the precompute equivalence: the whole module is a
+speed optimisation over calling dynamic_threshold once per grid point, so if
+the recombination drifts from dynamic_threshold the ceilings are quietly wrong
+and the tuning-parity check (docs/plans/021 stage 021.5b) silently lies.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from spacecraft_telemetry.model.scoring import dynamic_threshold
+from spacecraft_telemetry.ray_fanout.threshold_grid import (
+    best_point,
+    bounds_report,
+    precompute_threshold_terms,
+    sweep_channel,
+    sweep_group,
+    threshold_from_terms,
+)
+
+
+def _series(n: int = 400, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    x = np.abs(rng.standard_normal(n)) * 0.05
+    x[120:130] += 1.2  # a clear excursion so flags are non-degenerate
+    x[300:308] += 0.8
+    return x.astype(np.float64)
+
+
+def _labels_for(n: int = 400) -> np.ndarray:
+    lab = np.zeros(n, dtype=bool)
+    lab[120:130] = True
+    lab[300:308] = True
+    return lab
+
+
+class TestPrecomputeEquivalence:
+    """The optimisation must be exact, not approximate."""
+
+    @pytest.mark.parametrize("z", [0.0, 1.0, 2.5, 3.0, 7.978, 20.0])
+    @pytest.mark.parametrize("window", [2, 10, 50, 250])
+    def test_matches_dynamic_threshold_exactly(self, z: float, window: int) -> None:
+        smoothed = _series()
+        expected = dynamic_threshold(smoothed, window, z)
+        mean, std = precompute_threshold_terms(smoothed, window)
+        actual = threshold_from_terms(mean, std, z)
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_position_zero_is_inf(self) -> None:
+        """No history at t=0 → threshold inf → never flags, same as
+        dynamic_threshold's fillna(inf)."""
+        mean, std = precompute_threshold_terms(_series(), 10)
+        assert threshold_from_terms(mean, std, 3.0)[0] == np.inf
+
+    def test_terms_are_z_independent(self) -> None:
+        """The point of the split: the rolling passes don't depend on z."""
+        smoothed = _series()
+        a = precompute_threshold_terms(smoothed, 25)
+        b = precompute_threshold_terms(smoothed, 25)
+        np.testing.assert_array_equal(a[0], b[0])
+        np.testing.assert_array_equal(a[1], b[1])
+
+
+class TestSweepChannel:
+    def test_covers_full_grid(self) -> None:
+        grid = sweep_channel(
+            _series(), _labels_for(),
+            threshold_window=50, min_run_length=2,
+            z_values=[2.0, 3.0], floor_values=[0.0, 0.1, 0.2],
+        )
+        assert set(grid) == {(z, f) for z in (2.0, 3.0) for f in (0.0, 0.1, 0.2)}
+        assert all(0.0 <= v <= 1.0 for v in grid.values())
+
+    def test_shape_mismatch_raises(self) -> None:
+        with pytest.raises(ValueError, match="same shape"):
+            sweep_channel(
+                _series(400), _labels_for(300),
+                threshold_window=10, min_run_length=1,
+                z_values=[3.0], floor_values=[0.0],
+            )
+
+    def test_eval_slice_restricts_scoring(self) -> None:
+        """A slice covering only nominal windows must score differently from
+        one covering the excursions — otherwise the slice is being ignored."""
+        smoothed, labels = _series(), _labels_for()
+        kw = dict(
+            threshold_window=50, min_run_length=2,
+            z_values=[2.0], floor_values=[0.0],
+        )
+        anomalous = sweep_channel(smoothed, labels, eval_slice=slice(100, 200), **kw)
+        nominal = sweep_channel(smoothed, labels, eval_slice=slice(200, 290), **kw)
+        assert anomalous[(2.0, 0.0)] != nominal[(2.0, 0.0)]
+
+    def test_matches_naive_per_point_computation(self) -> None:
+        """End-to-end equivalence against the obvious slow implementation."""
+        from spacecraft_telemetry.model.scoring import evaluate_overlap, flag_anomalies
+
+        smoothed, labels = _series(), _labels_for()
+        grid = sweep_channel(
+            smoothed, labels,
+            threshold_window=40, min_run_length=3,
+            z_values=[2.0, 4.0], floor_values=[0.0, 0.15],
+        )
+        for (z, floor), got in grid.items():
+            th = dynamic_threshold(smoothed, 40, z)
+            fl = flag_anomalies(smoothed, th, 3, floor)
+            assert got == pytest.approx(evaluate_overlap(labels, fl)["seg_f0_5"])
+
+
+class TestSweepGroup:
+    def test_averages_across_channels(self) -> None:
+        a = (_series(seed=1), _labels_for())
+        b = (_series(seed=2), _labels_for())
+        kw = dict(
+            threshold_window=40, min_run_length=2,
+            z_values=[2.0, 3.0], floor_values=[0.0],
+        )
+        per_a = sweep_channel(*a, **kw)
+        per_b = sweep_channel(*b, **kw)
+        grouped = sweep_group({"a": a, "b": b}, **kw)
+        for point in grouped:
+            assert grouped[point] == pytest.approx((per_a[point] + per_b[point]) / 2)
+
+    def test_empty_group_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            sweep_group({}, threshold_window=10, min_run_length=1,
+                        z_values=[3.0], floor_values=[0.0])
+
+
+class TestBestPointAndBounds:
+    def test_picks_maximum(self) -> None:
+        grid = {(2.0, 0.0): 0.1, (3.0, 0.1): 0.9, (4.0, 0.2): 0.5}
+        assert best_point(grid) == ((3.0, 0.1), 0.9)
+
+    def test_ties_break_toward_conservative_config(self) -> None:
+        """Deterministic and defensible: same score → prefer lower z/floor."""
+        grid = {(5.0, 0.2): 0.7, (3.0, 0.1): 0.7}
+        assert best_point(grid)[0] == (3.0, 0.1)
+
+    def test_flags_optimum_on_grid_edge_as_lower_bound(self) -> None:
+        """The exact situation that made plan 021's first ceiling estimate
+        provisional: both arms peaked at the grid's maximum floor."""
+        zs, floors = [4.0, 5.0], [0.0, 0.4]
+        grid = {(4.0, 0.0): 0.1, (4.0, 0.4): 0.9, (5.0, 0.0): 0.2, (5.0, 0.4): 0.3}
+        rep = bounds_report(grid, zs, floors)
+        assert rep["best_floor"] == 0.4
+        assert rep["at_floor_edge"] is True
+        assert rep["is_lower_bound"] is True
+
+    def test_interior_optimum_is_not_a_lower_bound(self) -> None:
+        zs, floors = [3.0, 4.0, 5.0], [0.0, 0.2, 0.4]
+        grid = {(z, f): 0.1 for z in zs for f in floors}
+        grid[(4.0, 0.2)] = 0.9
+        rep = bounds_report(grid, zs, floors)
+        assert rep["is_lower_bound"] is False
+
+    def test_empty_grid_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            best_point({})
