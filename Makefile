@@ -425,8 +425,9 @@ cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-
 	# ISS 6-channel validation set:
 	# make cloud-inject MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		VARIANT=$(VARIANT) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
@@ -436,9 +437,9 @@ cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… 
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
 
-cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [SUBSYSTEM=…] [CHANNEL=…])
+cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [CHANNEL=…])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
-	SUBSYSTEM=$(SUBSYSTEM) CHANNEL=$(CHANNEL) \
+	VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) CHANNEL=$(CHANNEL) \
 		./scripts/cloud_drift.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)
