@@ -353,12 +353,23 @@ def _prepare_channel_data(
             f"{ch}: labels{lbl} vs errors{err}"
             for ch, lbl, err in shape_mismatches[:3]
         )
+        _multivariate_hint = (
+            " NOTE: settings.model.input_channels is set, so load_window_labels() "
+            "returned PER-CHANNEL 2-D labels (M, C) while a multivariate scoring "
+            "run saves 1-D per-channel errors (M,) at errors/{channel}.npy. HPO "
+            "operates on saved error arrays and never loads the model, so it must "
+            "run WITHOUT the multivariate settings — unset input_channels/"
+            "target_channels (do not pass --multivariate to a tune job). See "
+            "docs/plans/021-multivariate-telemanom.md."
+            if settings.model.input_channels
+            else ""
+        )
         raise ValueError(
             "run_hpo_sweep input mismatch: load_window_labels() shape does not "
             f"match saved errors.npy for {len(shape_mismatches)} channel(s). "
             "This usually means errors were scored with a different settings profile "
             "(window_size/prediction_horizon) than the one passed to tune. "
-            f"Examples: {details}."
+            f"Examples: {details}.{_multivariate_hint}"
         )
 
     if not prepared:

@@ -207,6 +207,58 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
         _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
 
 
+def test_prepare_channel_data_shape_mismatch_names_multivariate_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running HPO with multivariate settings must name the ACTUAL cause.
+
+    HPO consumes saved error arrays and never loads a model, so it has to run
+    without input_channels. If someone sets them anyway, load_window_labels
+    returns 2-D (M, C) labels against the 1-D (M,) per-channel errors a
+    multivariate scoring run saved. The generic message blames
+    window_size/prediction_horizon, which would send a reader hunting the
+    wrong problem entirely (docs/plans/021-multivariate-telemanom.md).
+    """
+    import io as _io
+
+    from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
+
+    channels = ["channel_41", "channel_42"]
+    settings = load_settings("test")
+    settings = settings.model_copy(
+        update={
+            "model": settings.model.model_copy(
+                update={"input_channels": channels, "target_channels": channels}
+            )
+        }
+    )
+
+    _buf = _io.BytesIO()
+    np.save(_buf, np.array([0.1, 0.2, 0.3], dtype=np.float64))  # 1-D (3,) errors
+    _raw = _buf.getvalue()
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-run-id"
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.download_artifact_bytes",
+        lambda *_args, **_kwargs: _raw,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.model.dataset.load_window_labels",
+        # (3, 2) per-channel labels — what the multivariate path really returns.
+        lambda *_args, **_kwargs: np.zeros((3, 2), dtype=np.bool_),
+    )
+
+    with pytest.raises(ValueError, match="input_channels is set"):
+        _prepare_channel_data(settings, "ESA-Mission1", ["channel_41"])
+
+
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     """_scoring_trial returns a final metrics dict containing f0_5 and objective."""
     from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
