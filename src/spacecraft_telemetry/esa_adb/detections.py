@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from spacecraft_telemetry.core.logging import get_logger
+from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
 from spacecraft_telemetry.esa_adb.intervals import union as _union
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
 from spacecraft_telemetry.model.dataset import (
@@ -97,6 +98,113 @@ def find_scoring_run(
         f"{'presence' if tuned else 'absence'} of the tuned_from_run tag). "
         f"Run `spacecraft-telemetry ray score` for this channel {flag}."
     )
+
+
+def _find_multivariate_scoring_run(
+    settings: Settings,
+    mission: str,
+    experiment: str,
+    channel: str,
+    *,
+    tuned: bool,
+) -> str | None:
+    """Locate the scoring run for a channel scored inside a multivariate group.
+
+    A multivariate scoring run deliberately carries no ``channel_id`` tag
+    (model/scoring.py — the run's key is a subsystem, not a real channel), so
+    :func:`find_scoring_run` can never match it. This resolves the channel's
+    subsystem, takes the most recent run tagged with it, and — critically —
+    confirms the channel is actually listed in that run's ``channels`` tag
+    before trusting it: a subsystem name alone does not prove this particular
+    channel was in the scored group, since a narrower channel subset could
+    reuse the same subsystem name.
+
+    Mirrors ray_fanout.tune._find_multivariate_scoring_run, which solves the
+    identical lookup problem for HPO.
+
+    Returns the run_id, or None when no matching multivariate run exists.
+    """
+    import mlflow
+
+    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    if subsystem is None:
+        return None
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    exp = client.get_experiment_by_name(experiment)
+    if exp is None:
+        return None
+    runs = client.search_runs(
+        [exp.experiment_id],
+        filter_string=f"tags.subsystem = '{subsystem}'",
+        order_by=["attributes.start_time DESC"],
+    )
+    for run in runs:
+        # Same tuned/untuned convention as find_scoring_run: score_channel only
+        # writes tuned_from_run when given a parent_hpo_run_id.
+        if ("tuned_from_run" in run.data.tags) != tuned:
+            continue
+        members = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
+        if channel in members:
+            return str(run.info.run_id)
+    return None
+
+
+def find_scoring_run_and_artifacts(
+    settings: Settings,
+    mission: str,
+    experiment: str,
+    channel: str,
+    *,
+    tuned: bool,
+) -> tuple[str, str, str]:
+    """Return (run_id, errors_artifact, threshold_artifact) for a channel.
+
+    Tries the univariate per-channel lookup first — unchanged, and the common
+    case, where both arrays sit at the run root. Falls back to the
+    multivariate subsystem run, whose arrays are per-channel and therefore
+    nested (``errors/{channel}.npy``, ``threshold/{channel}.npy`` — see
+    model/scoring.py).
+
+    Raises:
+        RuntimeError: When neither lookup finds a run. The message names both
+            searches, because "no run found" for a multivariate mission would
+            otherwise point at the wrong remedy entirely.
+    """
+    from contextlib import suppress
+
+    try:
+        run_id = find_scoring_run(
+            experiment, channel, settings.mlflow.tracking_uri, tuned=tuned
+        )
+    except RuntimeError as univariate_exc:
+        # Best-effort, exactly as in ray_fanout.tune: a failing fallback
+        # (missing subsystem metadata, unreachable backend) must degrade to
+        # "not found" so the original, more precise univariate error is what
+        # the caller sees.
+        multivariate_run_id: str | None = None
+        with suppress(Exception):
+            multivariate_run_id = _find_multivariate_scoring_run(
+                settings, mission, experiment, channel, tuned=tuned
+            )
+        if multivariate_run_id is None:
+            raise RuntimeError(
+                f"{univariate_exc} Also searched for a multivariate scoring run "
+                f"(tags.subsystem = this channel's subsystem, with {channel!r} "
+                "listed in the run's `channels` tag) and found none — so this is "
+                "not simply a multivariate run being missed."
+            ) from univariate_exc
+        log.info(
+            "esa_adb.detections.multivariate_run_used",
+            channel=channel,
+            run_id=multivariate_run_id,
+            tuned=tuned,
+        )
+        return (
+            multivariate_run_id,
+            f"errors/{channel}.npy",
+            f"threshold/{channel}.npy",
+        )
+    return run_id, "errors.npy", "threshold.npy"
 
 
 def _true_runs(flags: np.ndarray[Any, Any]) -> list[tuple[int, int]]:
@@ -206,10 +314,12 @@ def channel_detection_intervals(
     run_id: str,
     *,
     metadata: SeriesMetadata | None = None,
+    errors_artifact: str = "errors.npy",
+    threshold_artifact: str = "threshold.npy",
 ) -> list[Interval]:
     """Reconstruct one channel's flagged-anomaly intervals from a scoring run.
 
-    Downloads errors.npy / threshold.npy and the threshold_min_anomaly_len
+    Downloads the errors / threshold arrays and the threshold_min_anomaly_len
     param logged by score_channel() for ``run_id``, re-derives flags via
     flag_anomalies() (the same function score_channel() itself calls), and
     maps them onto the current processed test partition's timestamps.
@@ -220,6 +330,11 @@ def channel_detection_intervals(
     Args:
         metadata: See _intervals_from_arrays — preloaded (segment_ids,
             is_anomaly, timestamps) to avoid re-reading the parquet partition.
+        errors_artifact / threshold_artifact: Artifact paths within the run.
+            Default to the univariate run-root arrays; a multivariate run
+            stores them per channel (``errors/{channel}.npy``) since one run
+            covers a whole subsystem group — see
+            find_scoring_run_and_artifacts.
     """
     import mlflow
 
@@ -231,8 +346,10 @@ def channel_detection_intervals(
     # behaviour those runs had, so the default reproduces them faithfully.
     min_error_value = float(run.data.params.get("min_error_value", 0.0))
 
-    smoothed = bytes_to_errors(download_artifact_bytes(run_id, "errors.npy", tracking_uri))
-    threshold = bytes_to_errors(download_artifact_bytes(run_id, "threshold.npy", tracking_uri))
+    smoothed = bytes_to_errors(download_artifact_bytes(run_id, errors_artifact, tracking_uri))
+    threshold = bytes_to_errors(
+        download_artifact_bytes(run_id, threshold_artifact, tracking_uri)
+    )
 
     return _intervals_from_arrays(
         settings,
@@ -318,22 +435,26 @@ def per_channel_detection_intervals(
     if run_map is None:
         # This is the branch where MLflow IS required — see report.py's
         # matching comment. A failure here must stay visible, not vanish
-        # silently; find_scoring_run below still fails loudly if the tracking
-        # URI ends up misconfigured, so it's safe to continue.
+        # silently; find_scoring_run_and_artifacts below still fails loudly if
+        # the tracking URI ends up misconfigured, so it's safe to continue.
+        # (It reads the URI from settings itself, so none is bound here.)
         try:
             configure_mlflow(settings)
         except Exception as exc:
             log.warning("esa_adb.detections.configure_mlflow_failed", error=str(exc))
-        tracking_uri = settings.mlflow.tracking_uri
         exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
 
     result: dict[str, list[Interval]] = {}
     for channel in channels:
         metadata = metadata_by_channel[channel] if metadata_by_channel is not None else None
         if run_map is None:
-            run_id = find_scoring_run(exp, channel, tracking_uri, tuned=tuned)
+            run_id, errors_artifact, threshold_artifact = find_scoring_run_and_artifacts(
+                settings, mission, exp, channel, tuned=tuned
+            )
             channel_intervals = channel_detection_intervals(
-                settings, mission, channel, run_id, metadata=metadata
+                settings, mission, channel, run_id, metadata=metadata,
+                errors_artifact=errors_artifact,
+                threshold_artifact=threshold_artifact,
             )
             source = run_id
         else:
