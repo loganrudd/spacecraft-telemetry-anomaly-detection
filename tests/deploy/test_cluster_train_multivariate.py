@@ -35,6 +35,13 @@ _CLUSTER_TRAIN = _DEPLOY_DIR / "cluster_train.yaml"
 # to one branch and missed in the other — so these are asserted per-occurrence,
 # never on "the first match".
 _CLUSTER_SCORES = [_DEPLOY_DIR / "cluster_score.yaml", _DEPLOY_DIR / "cluster_score_cpu.yaml"]
+# Every cluster whose entrypoint can group channels by subsystem, and therefore
+# needs the channels.csv fallback reachable — see TestSubsystemMapEnvParity.
+_SUBSYSTEM_AWARE_YAMLS = [
+    _DEPLOY_DIR / "cluster_train.yaml",
+    _DEPLOY_DIR / "cluster_tune.yaml",
+    *_CLUSTER_SCORES,
+]
 
 # Only the variables the entrypoint actually interpolates need real values;
 # expandvars leaves anything else literal, which is harmless here.
@@ -129,6 +136,50 @@ class TestMultivariateFlagThreading:
         assert "--subsystem subsystem_5" in _entrypoint(
             "", SUBSYSTEM_ARG="--subsystem subsystem_5"
         )
+
+
+class TestSubsystemMapEnvParity:
+    """`--subsystem` / `--multivariate` group channels by subsystem, which for
+    an ESA mission resolves ONLY through the channels.csv fallback in
+    core/metadata.py — the channel_subsystems.json branch is written by the ISS
+    pipeline alone and never exists for ESA. configs/cloud.yaml points
+    data.sample_data_dir at a LOCAL path absent from the image, so every cluster
+    YAML whose entrypoint can group by subsystem must override it to the GCS
+    bucket. cluster_tune.yaml always did; cluster_train.yaml did not, which is
+    what made the first --multivariate submission abort with
+    'cannot resolve --subsystem'.
+
+    Parity between head and worker is asserted separately because the
+    @ray.remote fan-out splits inside worker tasks — a head-only override
+    diverges silently (plan 019 B2, the same rule SPACECRAFT_VARIANT follows).
+    """
+
+    _KEY = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+
+    @staticmethod
+    def _container_envs(template: dict) -> dict[str, str]:
+        containers = template["spec"]["containers"]
+        return {e["name"]: e.get("value") for e in containers[0].get("env", [])}
+
+    @pytest.mark.parametrize("yaml_path", _SUBSYSTEM_AWARE_YAMLS, ids=lambda p: p.name)
+    def test_sample_data_dir_set_on_head_and_every_worker(self, yaml_path: Path) -> None:
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+
+        head = self._container_envs(spec["headGroupSpec"]["template"])
+        assert self._KEY in head, f"{yaml_path.name}: head is missing {self._KEY}"
+        assert head[self._KEY].startswith("gs://"), (
+            f"{yaml_path.name}: head {self._KEY}={head[self._KEY]!r} is not a GCS URI; "
+            "the image has no local data/ tree"
+        )
+
+        # cluster_score_cpu.yaml is deliberately single-node (no workerGroupSpecs),
+        # so head-only is correct there — assert parity only where workers exist.
+        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
+            wenv = self._container_envs(worker["template"])
+            assert wenv.get(self._KEY) == head[self._KEY], (
+                f"{yaml_path.name}: worker[{i}] {self._KEY}={wenv.get(self._KEY)!r} "
+                f"diverges from head {head[self._KEY]!r}"
+            )
 
 
 class TestScoreYamlsFlagBothBranches:

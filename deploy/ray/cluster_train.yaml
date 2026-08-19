@@ -96,6 +96,21 @@ spec:
                 # None (Settings.variant), reproducing today's output layout.
                 - name: SPACECRAFT_VARIANT
                   value: "${VARIANT}"
+                # Channel -> subsystem map source. For ESA this resolves ONLY
+                # via the channels.csv fallback (core/metadata.py): the
+                # channel_subsystems.json branch is written by the ISS pipeline
+                # alone, so it never exists for an ESA mission. configs/cloud.yaml
+                # points data.sample_data_dir at the LOCAL data/processed/sample,
+                # which does not exist in this image — hence the override, the
+                # same one cluster_tune.yaml has always carried.
+                # Required by `ray train --subsystem` and `--multivariate`
+                # (plan 021), both of which group channels by subsystem. Without
+                # it they abort with "cannot resolve --subsystem"; plain
+                # per-channel training does not need it (the subsystem MLflow
+                # tag is best-effort and suppressed), which is why this gap
+                # stayed invisible until now.
+                - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                  value: gs://${PROJECT_ID}-sample-data
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -177,6 +192,11 @@ spec:
                   # splits inside worker tasks (plan 019 B2).
                   - name: SPACECRAFT_VARIANT
                     value: "${VARIANT}"
+                  # Head/worker parity, same rule as SPACECRAFT_VARIANT above:
+                  # train_channel resolves the subsystem tag inside the worker
+                  # task, so a head-only override diverges silently.
+                  - name: SPACECRAFT_DATA__SAMPLE_DATA_DIR
+                    value: gs://${PROJECT_ID}-sample-data
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS
