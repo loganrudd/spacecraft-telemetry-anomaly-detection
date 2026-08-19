@@ -79,8 +79,42 @@ def main() -> None:
         "smoothed array differs (different error_smoothing_window), so this "
         "measures a different conditional ceiling — not a like-for-like swap.",
     )
+    p.add_argument(
+        "--select-on",
+        choices=("final_portion", "hpo_portion"),
+        default="final_portion",
+        help="Which slice the grid is scored on. 'final_portion' (default) answers "
+        "'how high could this arm reach?' — a CEILING, and not safe to report as a "
+        "result because the config was chosen on the same data. 'hpo_portion' "
+        "selects on the first tune.hpo_eval_fraction exactly as Ray Tune does, so "
+        "the winning config can then be scored on the held-out remainder "
+        "leakage-free — use this to produce a config for --tuned-configs.",
+    )
+    p.add_argument(
+        "--emit-tuned-configs",
+        default=None,
+        metavar="JSON",
+        help="Write the winning config as a tuned_configs.json for the given "
+        "subsystem (see --subsystem-name), consumable by `ray score --tuned-configs`. "
+        "Intended with --select-on hpo_portion; refuses otherwise, since a config "
+        "selected on the reported slice would leak.",
+    )
+    p.add_argument(
+        "--subsystem-name",
+        default="subsystem_5",
+        help="Subsystem key for --emit-tuned-configs. tuned_configs.json is keyed "
+        "by subsystem (see ray_fanout/runner.py's schema).",
+    )
     p.add_argument("--out", default=None, metavar="JSON")
     args = p.parse_args()
+
+    if args.emit_tuned_configs and args.select_on != "hpo_portion":
+        raise SystemExit(
+            "--emit-tuned-configs requires --select-on hpo_portion. Selecting a "
+            "config on final_portion and then reporting metrics on that same slice "
+            "is leakage: the number would be optimistically biased and not "
+            "comparable to arm A's HPO-selected result."
+        )
 
     settings = load_settings(args.env)
     updates: dict[str, Any] = {}
@@ -142,10 +176,15 @@ def main() -> None:
         )
 
     assert threshold_window is not None and min_run_length is not None
-    # Match score_channel's reported eval split: HPO saw the first
-    # hpo_eval_fraction, so the held-out remainder is the comparable slice.
     n_windows = len(next(iter(per_channel.values()))[1])
-    eval_slice = slice(int(n_windows * settings.tune.hpo_eval_fraction), None)
+    n_hpo = int(n_windows * settings.tune.hpo_eval_fraction)
+    # final_portion = the held-out remainder score_channel reports on (a ceiling
+    # when selected on). hpo_portion = the slice Ray Tune actually optimises
+    # against, so a config chosen here can be scored on the remainder without
+    # leakage — the same separation the HPO pipeline relies on.
+    eval_slice = (
+        slice(n_hpo, None) if args.select_on == "final_portion" else slice(None, n_hpo)
+    )
 
     grid = sweep_group(
         per_channel,
@@ -165,12 +204,39 @@ def main() -> None:
     print(f"\n{'z\\floor':>9}" + "".join(f"{f:>8}" for f in floor_values))
     for z in z_values:
         print(f"{z:>9}" + "".join(f"{grid[(z, f)]:8.3f}" for f in floor_values))
-    print(f"\nCEILING  mean segF0.5 = {best_score:.3f}  at z={best_z}, floor={best_floor}")
+    label = "CEILING" if args.select_on == "final_portion" else "BEST-ON-HPO-PORTION"
+    print(f"\n{label}  mean segF0.5 = {best_score:.3f}  at z={best_z}, floor={best_floor}")
+    print(f"  (selected on {args.select_on})")
     if report["is_lower_bound"]:
-        print("  ⚠  optimum sits on a GRID EDGE — this ceiling is a LOWER BOUND. "
+        print("  ⚠  optimum sits on a GRID EDGE — this is a LOWER BOUND. "
               "Widen --z-values / --floor-values before quoting it.")
     else:
         print("  ✓  optimum is interior to the swept grid.")
+
+    if args.emit_tuned_configs:
+        # Same schema run_all_sweeps writes and score_all_channels reads
+        # (ray_fanout/runner.py). `_meta.run_id` is omitted deliberately: there
+        # is no HPO run behind this config, and fabricating one would corrupt
+        # the tuned_from_run lineage tag that scoring writes.
+        entry = {
+            args.subsystem_name: {
+                "threshold_z": best_z,
+                "min_error_value": best_floor,
+                "threshold_window": threshold_window,
+                "threshold_min_anomaly_len": min_run_length,
+                "_meta": {
+                    "seg_f0_5": best_score,
+                    "source": "scripts/threshold_ceiling.py exhaustive grid",
+                    "selected_on": args.select_on,
+                },
+            }
+        }
+        Path(args.emit_tuned_configs).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.emit_tuned_configs).write_text(json.dumps(entry, indent=2))
+        print(f"\nWrote tuned_configs → {args.emit_tuned_configs}")
+        print("  NOTE: error_smoothing_window is NOT included — it is baked into the "
+              "saved errors array this grid swept, so the scoring run must keep the "
+              "same value it already used. Overriding it would invalidate the grid.")
 
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
