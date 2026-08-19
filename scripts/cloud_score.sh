@@ -48,6 +48,8 @@ set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
 VARIANT="${VARIANT:-}"
+SUBSYSTEM="${SUBSYSTEM:-}"
+MULTIVARIATE="${MULTIVARIATE:-0}"
 TUNED="${TUNED:-}"
 INJECTED="${INJECTED:-0}"
 CHANNELS="${CHANNELS:-}"
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)      MISSION="$2"; shift 2 ;;
     --variant)      VARIANT="$2"; shift 2 ;;
+    --subsystem)    SUBSYSTEM="$2"; shift 2 ;;
+    --multivariate) MULTIVARIATE="1"; shift ;;
     --tuned)        TUNED="1"; shift ;;
     --injected)     INJECTED="1"; shift ;;
     --channels)     CHANNELS="$2"; shift 2 ;;
@@ -131,13 +135,34 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG TUNED INJECTED_FLAG NUM_GPUS \
-  EVAL_SPLIT PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE
-
-if [[ "${TUNED}" = "1" ]]; then
-  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, mode=tuned)"
+# Host-side resolution of the two optional pass-through flags — envsubst has
+# no conditional-expansion syntax, so a present-or-absent flag must arrive as
+# a single pre-resolved variable (same pattern as CHANNELS_ARG / INJECTED_FLAG).
+# --multivariate MUST match how the model was trained: the registry name is
+# keyed by subsystem for a joint model and by channel for univariate ones, so
+# a mismatch surfaces as "no registered versions found", not as wrong numbers.
+if [[ "${MULTIVARIATE}" = "1" ]]; then
+  MULTIVARIATE_ARG="--multivariate"
 else
-  echo "==> Submitting spacecraft-score RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, mode=baseline)"
+  MULTIVARIATE_ARG=""
+fi
+if [[ -n "${SUBSYSTEM}" ]]; then
+  SUBSYSTEM_ARG="--subsystem ${SUBSYSTEM}"
+else
+  SUBSYSTEM_ARG=""
+fi
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG TUNED INJECTED_FLAG NUM_GPUS \
+  EVAL_SPLIT PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE \
+  MULTIVARIATE_ARG SUBSYSTEM_ARG
+
+# Report the resolved scope, not just the mode: --multivariate must match how
+# the model was trained, and a mismatch fails late (inside the Ray task, as
+# "no registered versions found") rather than at submit time — so surface it here.
+_SCOPE="mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate}"
+if [[ "${TUNED}" = "1" ]]; then
+  echo "==> Submitting spacecraft-score RayJob (${_SCOPE}, mode=tuned)"
+else
+  echo "==> Submitting spacecraft-score RayJob (${_SCOPE}, mode=baseline)"
 fi
 
 if kubectl get rayjob spacecraft-score -n ray &>/dev/null; then

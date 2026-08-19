@@ -38,6 +38,7 @@ set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
 VARIANT="${VARIANT:-}"
+SUBSYSTEM="${SUBSYSTEM:-}"
 MULTIVARIATE="${MULTIVARIATE:-0}"
 NO_WAIT=false
 DELETE_AFTER=false
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)       MISSION="$2"; shift 2 ;;
     --variant)       VARIANT="$2"; shift 2 ;;
+    --subsystem)     SUBSYSTEM="$2"; shift 2 ;;
     --channels-from) CHANNELS_FROM="$2"; shift 2 ;;
     --multivariate)  MULTIVARIATE="1"; shift ;;
     --cpu)           CPU="1"; shift ;;
@@ -109,6 +111,17 @@ else
   MULTIVARIATE_ARG=""
 fi
 
+# Same host-side resolution again: --subsystem filters the resolved channel
+# list (whatever CHANNELS_ARG produced) down to one subsystem via channels.csv.
+# Prefer this over spelling out CHANNELS when a subsystem is the real unit —
+# it stays correct if the subsystem's membership ever changes, whereas a
+# hardcoded CSV silently goes stale.
+if [[ -n "${SUBSYSTEM}" ]]; then
+  SUBSYSTEM_ARG="--subsystem ${SUBSYSTEM}"
+else
+  SUBSYSTEM_ARG=""
+fi
+
 # ISS LOS fragmentation limits contiguous segments to <240 rows on the 30 s grid.
 # W=250 requires 251 consecutive rows → 0 valid test windows → scoring crash.
 # W=128 (64 min ≈ 0.7 orbits) fits comfortably; ESA keeps the 250 global default.
@@ -118,9 +131,9 @@ else
   WINDOW_SIZE_OVERRIDE="250"
 fi
 export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
-  WINDOW_SIZE_OVERRIDE MULTIVARIATE_ARG
+  WINDOW_SIZE_OVERRIDE MULTIVARIATE_ARG SUBSYSTEM_ARG
 
-echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${MULTIVARIATE_ARG:+, multivariate})"
+echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate})"
 
 # Delete any existing job with the same name so kubectl apply is idempotent.
 if kubectl get rayjob spacecraft-train -n ray &>/dev/null; then

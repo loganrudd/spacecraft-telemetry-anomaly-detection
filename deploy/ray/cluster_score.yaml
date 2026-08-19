@@ -50,13 +50,13 @@ spec:
     python -c "import gcsfs; fs=gcsfs.GCSFileSystem(); src=\"gs://${PROJECT_ID}-artifacts/${MISSION}${VARIANT_SEG}/tuned_configs.json\"; fs.exists(src) or (print(\"ERROR: tuned_configs.json not found at \" + src) or __import__(\"sys\").exit(1)); fs.get(src, \"/tmp/tuned_configs.json\")";
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
-    ${CHANNELS_ARG}
+    ${CHANNELS_ARG} ${SUBSYSTEM_ARG} ${MULTIVARIATE_ARG}
     --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG}
     --tuned-configs /tmp/tuned_configs.json;
     else
     spacecraft-telemetry --env cloud ray score
     --mission ${MISSION}
-    ${CHANNELS_ARG}
+    ${CHANNELS_ARG} ${SUBSYSTEM_ARG} ${MULTIVARIATE_ARG}
     --eval-split ${EVAL_SPLIT} ${INJECTED_FLAG};
     fi'
 
