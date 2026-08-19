@@ -144,6 +144,12 @@ def main() -> None:
     per_channel: dict[str, tuple[Any, Any]] = {}
     threshold_window: int | None = None
     min_run_length: int | None = None
+    # Captured so --emit-tuned-configs can pin it. The grid sweeps a saved
+    # SMOOTHED array, so its result is only valid for a scoring run that
+    # reproduces that smoothing; scoring recomputes it from scratch and would
+    # otherwise fall back to the settings default (30), silently invalidating
+    # the chosen (z, floor).
+    smoothing_window: int | None = None
     for channel in channels:
         run_id, errors_artifact, _threshold_artifact = find_scoring_run_and_artifacts(
             settings, args.mission, exp, channel, tuned=tuned
@@ -155,15 +161,18 @@ def main() -> None:
         # All channels in one arm share these; capture from the first and
         # verify the rest agree, so a mixed-config arm can't be averaged
         # together silently.
-        tw, mrl = int(params["threshold_window"]), int(params["threshold_min_anomaly_len"])
+        tw = int(params["threshold_window"])
+        mrl = int(params["threshold_min_anomaly_len"])
+        esw = int(params["error_smoothing_window"])
         if threshold_window is None:
-            threshold_window, min_run_length = tw, mrl
-        elif (tw, mrl) != (threshold_window, min_run_length):
+            threshold_window, min_run_length, smoothing_window = tw, mrl, esw
+        elif (tw, mrl, esw) != (threshold_window, min_run_length, smoothing_window):
             raise SystemExit(
                 f"Channel {channel!r} was scored with threshold_window={tw}, "
-                f"min_run_length={mrl}, but earlier channels used "
-                f"{threshold_window}/{min_run_length}. Averaging across differing "
-                "configs would not describe any single achievable operating point."
+                f"min_run_length={mrl}, error_smoothing_window={esw}, but earlier "
+                f"channels used {threshold_window}/{min_run_length}/{smoothing_window}. "
+                "Averaging across differing configs would not describe any single "
+                "achievable operating point."
             )
         smoothed = bytes_to_errors(
             download_artifact_bytes(run_id, errors_artifact, settings.mlflow.tracking_uri)
@@ -224,6 +233,11 @@ def main() -> None:
                 "min_error_value": best_floor,
                 "threshold_window": threshold_window,
                 "threshold_min_anomaly_len": min_run_length,
+                # MUST be pinned, not omitted. The grid swept a saved SMOOTHED
+                # array; scoring recomputes smoothing from scratch and would
+                # otherwise use the settings default, producing a different
+                # array for which the chosen (z, floor) was never evaluated.
+                "error_smoothing_window": smoothing_window,
                 "_meta": {
                     "seg_f0_5": best_score,
                     "source": "scripts/threshold_ceiling.py exhaustive grid",
@@ -234,9 +248,9 @@ def main() -> None:
         Path(args.emit_tuned_configs).parent.mkdir(parents=True, exist_ok=True)
         Path(args.emit_tuned_configs).write_text(json.dumps(entry, indent=2))
         print(f"\nWrote tuned_configs → {args.emit_tuned_configs}")
-        print("  NOTE: error_smoothing_window is NOT included — it is baked into the "
-              "saved errors array this grid swept, so the scoring run must keep the "
-              "same value it already used. Overriding it would invalidate the grid.")
+        print(f"  error_smoothing_window pinned to {smoothing_window} (the value the "
+              "swept arrays were produced with) — scoring must reproduce it or the "
+              "grid result does not apply.")
 
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
