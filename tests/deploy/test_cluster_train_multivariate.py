@@ -42,6 +42,15 @@ _SUBSYSTEM_AWARE_YAMLS = [
     _DEPLOY_DIR / "cluster_tune.yaml",
     *_CLUSTER_SCORES,
 ]
+# Every cluster that trains or scores a forecaster, and therefore needs the
+# 021.7 horizon — see TestForecastStepsEnvParity. cluster_tune.yaml is absent
+# deliberately: HPO searches thresholds over saved error arrays, so it never
+# builds a forecast head.
+_FORECAST_AWARE_YAMLS = [
+    _DEPLOY_DIR / "cluster_train.yaml",
+    _DEPLOY_DIR / "cluster_train_cpu.yaml",
+    *_CLUSTER_SCORES,
+]
 
 # Only the variables the entrypoint actually interpolates need real values;
 # expandvars leaves anything else literal, which is harmless here.
@@ -60,6 +69,8 @@ _ENV = {
     "INJECTED_FLAG": "",
     "TUNED": "",
     "PROCESSED_DATA_DIR": "gs://test-proj-processed-data",
+    "FORECAST_STEPS": "10",
+    "FORECAST_ERROR_REDUCTION": "mean",
 }
 
 
@@ -208,3 +219,57 @@ class TestScoreYamlsFlagBothBranches:
         assert "--multivariate" not in rendered
         assert "--subsystem" not in rendered
         assert "${" not in rendered, "unresolved placeholder in rendered score YAML"
+
+
+class TestForecastStepsEnvParity:
+    """``SPACECRAFT_MODEL__FORECAST_STEPS`` must reach head AND every worker.
+
+    Plan 021.7's horizon has no CLI flag — the only knob is this env var, and
+    the RayJob YAMLs enumerate env vars one by one, so exporting it in the
+    shell that runs `make cloud-train` reaches the submitting script and NOT
+    the pods. The @ray.remote fan-out builds its dataloaders and its (C, H)
+    output head inside the WORKER, so a missing or head-only value trains
+    H=1 and reports success — a wrong answer that looks like a right one,
+    which is the worst failure mode this experiment has.
+
+    Same rule and same rationale as TestSubsystemMapEnvParity above; kept as
+    a separate class because the acceptable values differ (an int, not a URI).
+    """
+
+    _KEY = "SPACECRAFT_MODEL__FORECAST_STEPS"
+
+    @pytest.mark.parametrize("yaml_path", _FORECAST_AWARE_YAMLS, ids=lambda p: p.name)
+    def test_forecast_steps_set_on_head_and_every_worker(self, yaml_path: Path) -> None:
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        envs = TestSubsystemMapEnvParity._container_envs
+
+        head = envs(spec["headGroupSpec"]["template"])
+        assert self._KEY in head, f"{yaml_path.name}: head is missing {self._KEY}"
+        assert head[self._KEY] == "10", (
+            f"{yaml_path.name}: head {self._KEY}={head[self._KEY]!r} did not "
+            "interpolate FORECAST_STEPS"
+        )
+
+        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
+            wenv = envs(worker["template"])
+            assert wenv.get(self._KEY) == head[self._KEY], (
+                f"{yaml_path.name}: worker[{i}] {self._KEY}={wenv.get(self._KEY)!r} "
+                f"diverges from head {head[self._KEY]!r} — the fan-out would "
+                "train a different horizon than requested"
+            )
+
+    @pytest.mark.parametrize("yaml_path", _CLUSTER_SCORES, ids=lambda p: p.name)
+    def test_error_reduction_set_wherever_scoring_happens(self, yaml_path: Path) -> None:
+        """The reduction is scoring-time only, so it belongs on the score
+        YAMLs alone — but there it has the same head/worker parity rule:
+        collapse_forecast_errors runs inside the worker task."""
+        key = "SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION"
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        envs = TestSubsystemMapEnvParity._container_envs
+
+        head = envs(spec["headGroupSpec"]["template"])
+        assert head.get(key) == "mean", f"{yaml_path.name}: head {key}={head.get(key)!r}"
+        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
+            assert envs(worker["template"]).get(key) == head[key], (
+                f"{yaml_path.name}: worker[{i}] {key} diverges from head"
+            )

@@ -261,13 +261,17 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 | ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
 | ours — tuned, 1-in/1-out (per-channel models) | 0.636 | 0.280 | **0.507** |
 | ours — tuned, 6-in/6-out (one joint model per subsystem) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out + **10-step horizon** | 0.917 | 0.440 | **0.753** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
 
 Only the **protocol-matched** row is like-for-like — neither side tuned, neither
 side using an error floor — and there we are far behind. The tuned rows apply
-per-subsystem HPO the paper never ran, so their 0.507, though above the paper's
-un-pruned 0.178, is not a like-for-like win. Reported both ways deliberately.
+per-subsystem HPO the paper never ran, so even the 0.753, close as it looks to the
+paper's pruned 0.786, is **not** a like-for-like win. It differs on two axes at
+once: we tuned and they did not, *and* our tuned rows are measured on the held-out
+final 40% (25 events) while theirs covers the full test half (65 events). Reported
+both ways deliberately.
 
 The two tuned rows are not a rounding artifact: the 6-in/6-out model was built and
 measured, and the two architectures land within 2×10⁻⁶ of each other — see
@@ -334,8 +338,45 @@ supports a general claim.
 The remaining case for the joint model is **operational, not accuracy**: one model per
 subsystem instead of six (~100 → ~4–8 at production scale), ~6× fewer training batches
 per epoch-round, and correspondingly fewer registry entries, promotions, and served
-artifacts. It is not deployed — serving is deliberately deferred until the horizon
-experiment below settles, since that would change the same code again.
+artifacts. It is not deployed yet — but it is the base the horizon result below builds on,
+and that result is what makes it worth serving.
+
+### The 10-step horizon: a real gain, but not from the horizon
+
+`telemanom_esa` also forecasts **10 steps ahead** (`prediction_window_size=10`) where this
+repo forecast one. That was the last unreplicated difference from the benchmark's
+configuration, and unlike a config flag it needs a `(C, H)` output head, vector targets, and
+a rule for collapsing H error series into the one-per-timestep series the scorer consumes.
+
+The collapse rule is a *scoring-time* knob, so one trained model can be scored under
+several. Two were measured on the same model, same test half, same selection procedure:
+`first` uses the 1-step-ahead error alone — scored identically to H=1, so only the
+**training** signal differs — and `mean` averages `|error|` across all ten lead times.
+
+| held-out, all events | precision | recall | F0.5 | detections |
+|---|---:|---:|---:|---:|
+| H=1 (6-in/6-out) | 0.636 | 0.280 | 0.507 | 18 |
+| H=10, `first` — strict ablation | 1.000 | 0.200 | **0.556** | 5 |
+| H=10, `mean` — deploy-plausible | 0.917 | 0.440 | **0.753** | 12 |
+
+**The pair is the result, and it says something the headline alone would hide.** Ten-step
+supervision on its own is worth **+0.048**. The remaining **+0.198** comes from averaging
+error across the horizon — a variance-reduction trick on the error series, not a better
+forecaster. So roughly **80% of the gain is a scoring statistic**, and matching the
+comparator's horizon is not, by itself, why the number moved. Scoring the same model both
+ways is what separated those; either number alone would have supported the wrong conclusion.
+
+The two reductions are also not interchangeable operating points. `first` fires five times
+and is right every time (precision 1.000, 5 of 25 events); `mean` fires twelve times at
+0.917 and catches 11 of 25. F0.5 rates both well while they behave very differently.
+
+Two caveats travel with these numbers. `first`'s five detections are thin — with 25 events
+recall moves in 0.04 steps, so 0.556 is directionally right rather than precise. And
+`first`'s selected `threshold_z` of 15.0 sits **outside the HPO search space**, which caps
+it at 8.0: that operating point exists only because the post-hoc grid ignores the search
+space, so the tuning layer could not have found the configuration that produced it. The
+untuned protocol-matched row is unmoved at 0.0016 — the horizon does not substitute for the
+absolute error floor the paper's pruned variant relies on.
 
 **Channel accounting.** A single fleet average hides the structure, so a
 diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
@@ -757,12 +798,29 @@ built and measured — it matched per-channel accuracy rather than beating it
 ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
-The immediate next step is the **10-step forecast horizon** — the last unreplicated
-difference from the benchmark's configuration. It is not a config flag: the existing
-`prediction_horizon` moves a *single* target H steps out against a `Linear(hidden_dim, 1)`
-head, whereas matching the benchmark needs a `(C, H)` output, vector targets, and a rule for
-collapsing H error series into one per timestep.
+The **10-step forecast horizon** — the last unreplicated difference from the benchmark's
+configuration — is now also built and measured: held-out F0.5 **0.507 → 0.753**, the largest
+detection gain in this repo's history, though the ablation shows ~80% of it comes from the
+horizon-averaged error statistic rather than from the longer training signal
+([details](#the-10-step-horizon-a-real-gain-but-not-from-the-horizon)).
 
+That finding sets up the immediate next step, which is **not** a new detector: standardize
+the threshold-selection layer before adding one. Selecting on the reported metric was worth
++0.13, the error statistic +0.20, and the architecture ~0 — the tuning layer is where the
+score actually lives, and one of the configurations reported above sits outside the search
+space HPO can reach. DC-VAE's whole premise is that this layer rescues a detector the
+benchmark authors say thresholds badly, so the layer has to be trustworthy *before* it is
+used as evidence about a new model.
+
+- **Standardize threshold selection before adding detectors.** The `(threshold_z,
+  min_error_value)` selection that equalizes tuning between compared arms is currently a
+  hand-driven script: run a grid, notice the "optimum sits on a grid edge" warning, widen by
+  eye, re-run. That loop is mechanical and belongs in code, because every future comparison
+  depends on both arms being selected the same way — the failure it guards against already
+  happened once, inflating an architecture claim threefold. Related, and measured: HPO leaves
+  0.07–0.13 on the table because the response surface is a narrow ridge, and `threshold_z`
+  and `min_error_value` are substitutes rather than independent knobs, so sampling them
+  independently spends most of the budget off-ridge.
 - **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
   Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
@@ -831,6 +889,14 @@ collapsing H error series into one per timestep.
 - **Parallelize the drift sweep.** `drift batch-mission` runs channels serially; the
   per-channel work has the same shape as the Ray training fan-out and could move to
   `@ray.remote` (tracked by a TODO in `cli.py`).
+- **Move the post-hoc threshold sweep onto Ray.** The `(threshold_z, min_error_value)` grid
+  that equalizes tuning between compared arms currently runs as a local script, and the cost
+  is dominated by *data locality*, not compute: ~11 min pulling each arm's saved error arrays
+  from GCS against ~4 min of actual sweep. Running it as a CPU-only RayJob next to the bucket
+  removes the download almost entirely, and the grid itself is embarrassingly parallel over
+  points (the rolling mean/std is precomputed once per channel and shared across every `z`).
+  It becomes *necessary* rather than merely nice at mission scale — six channels hold ~690 MB
+  resident, so ~100 channels would need ~15–18 GB and cannot run on a laptop at all.
 
 
 ## Links

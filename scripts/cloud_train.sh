@@ -130,10 +130,23 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
-  WINDOW_SIZE_OVERRIDE MULTIVARIATE_ARG SUBSYSTEM_ARG
 
-echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate})"
+# Multi-step forecast horizon (docs/plans/021, stage 021.7). Defaulted HERE
+# rather than left to the pod's config so envsubst can never emit an empty
+# string — SPACECRAFT_MODEL__FORECAST_STEPS="" fails ModelConfig validation at
+# container start, which is a confusing way to learn the var was unset.
+#
+# This must be an explicit YAML env entry on head AND worker: exporting
+# SPACECRAFT_MODEL__FORECAST_STEPS in the shell that runs `make cloud-train`
+# reaches this script's environment but NOT the pods, so the run would train
+# H=1 and report success. Accepts the SPACECRAFT_ name as an alias so that
+# mistake produces the intended run instead of a silent H=1.
+FORECAST_STEPS="${FORECAST_STEPS:-${SPACECRAFT_MODEL__FORECAST_STEPS:-1}}"
+
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
+  WINDOW_SIZE_OVERRIDE MULTIVARIATE_ARG SUBSYSTEM_ARG FORECAST_STEPS
+
+echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate}, forecast_steps=${FORECAST_STEPS})"
 
 # Delete any existing job with the same name so kubectl apply is idempotent.
 if kubectl get rayjob spacecraft-train -n ray &>/dev/null; then

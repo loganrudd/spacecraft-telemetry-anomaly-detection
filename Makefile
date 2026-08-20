@@ -406,9 +406,14 @@ cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=�
 	# ISS 6-channel validation set:
 	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
+# FORECAST_STEPS is forwarded explicitly: recipe shells inherit the caller's
+# environment, so an exported SPACECRAFT_MODEL__FORECAST_STEPS reaches the
+# script but NEVER the RayJob pods (the YAML lists env vars one by one), which
+# trains H=1 while looking like a success. Pass FORECAST_STEPS=10 instead.
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [FORECAST_STEPS=10] [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
 		VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) MULTIVARIATE=$(MULTIVARIATE) \
+		FORECAST_STEPS=$(FORECAST_STEPS) \
 		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) CPU=$(CPU) \
 		./scripts/cloud_train.sh
 
@@ -431,9 +436,10 @@ cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MI
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset; MULTIVARIATE=1 must match how the model was trained.
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset; MULTIVARIATE=1 must match how the model was trained. FORECAST_STEPS must match training; FORECAST_ERROR_REDUCTION=mean|first|max is scoring-time only.
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
 		VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) MULTIVARIATE=$(MULTIVARIATE) \
+		FORECAST_STEPS=$(FORECAST_STEPS) FORECAST_ERROR_REDUCTION=$(FORECAST_ERROR_REDUCTION) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
 

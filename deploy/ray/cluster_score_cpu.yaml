@@ -97,6 +97,14 @@ spec:
                   value: "0"
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                # Plan 021.7 — see cluster_score.yaml.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
+                # How the H forecast errors collapse into the one-per-window
+                # error the scorer consumes (mean|first|max). Scoring-time knob
+                # only — the SAME trained model can be scored under any of them.
+                - name: SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION
+                  value: "${FORECAST_ERROR_REDUCTION}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
                 - name: TUNED

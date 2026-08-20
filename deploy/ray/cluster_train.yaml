@@ -120,6 +120,14 @@ spec:
                 # ISS=128, ESA=250 — set by cloud_train.sh (LOS segment constraint).
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                # Multi-step forecast horizon (plan 021.7). 1 = the pre-021.7
+                # scalar-target head. Set on head AND worker below: the head
+                # value reaches workers via the pickled Settings, but a value
+                # that only exists in one place is exactly the failure mode
+                # that bit SPACECRAFT_DATA__SAMPLE_DATA_DIR, and a silent
+                # fallback to H=1 here would look like a successful run.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
               resources:
@@ -207,6 +215,11 @@ spec:
                   # ISS=128, ESA=250 — set by cloud_train.sh (LOS segment constraint).
                   - name: SPACECRAFT_MODEL__WINDOW_SIZE
                     value: "${WINDOW_SIZE_OVERRIDE}"
+                  # Head/worker parity — train_channel builds its dataloaders
+                  # (whose target span is window_size + forecast_steps - 1) and
+                  # its output head inside the worker task. See the head's copy.
+                  - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                    value: "${FORECAST_STEPS}"
                   # GKE mounts nvidia driver libs to /usr/local/nvidia/lib64 but
                   # does not set LD_LIBRARY_PATH — PyTorch can't find libcuda.so without it.
                   - name: LD_LIBRARY_PATH

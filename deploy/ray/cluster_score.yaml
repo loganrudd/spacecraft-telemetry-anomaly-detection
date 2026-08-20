@@ -101,6 +101,16 @@ spec:
                 # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                # Multi-step forecast horizon (plan 021.7); must match how the
+                # model was TRAINED — the loaded model's head is (C, H) and the
+                # dataloader's targets are built from this value.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
+                # How the H forecast errors collapse into the one-per-window
+                # error the scorer consumes (mean|first|max). Scoring-time knob
+                # only — the SAME trained model can be scored under any of them.
+                - name: SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION
+                  value: "${FORECAST_ERROR_REDUCTION}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
                 - name: TUNED
@@ -186,6 +196,13 @@ spec:
                   # ISS=128, ESA=250 — set by cloud_score.sh (LOS segment constraint).
                   - name: SPACECRAFT_MODEL__WINDOW_SIZE
                     value: "${WINDOW_SIZE_OVERRIDE}"
+                  - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                    value: "${FORECAST_STEPS}"
+                  # Head/worker parity: make_test_dataloader builds its target
+                  # span from forecast_steps, and collapse_forecast_errors reads
+                  # the reduction, both inside the worker task.
+                  - name: SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION
+                    value: "${FORECAST_ERROR_REDUCTION}"
                   # Reduce CUDA allocator fragmentation under fractional GPU
                   # sharing to prevent OOM error.
                   - name: PYTORCH_CUDA_ALLOC_CONF

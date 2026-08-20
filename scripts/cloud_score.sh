@@ -151,14 +151,24 @@ if [[ -n "${SUBSYSTEM}" ]]; then
 else
   SUBSYSTEM_ARG=""
 fi
+# Plan 021.7. FORECAST_STEPS must match the value the model was TRAINED with
+# (the loaded head emits (C, H); the dataloader's targets are built from this),
+# whereas FORECAST_ERROR_REDUCTION is purely scoring-time — the same trained
+# model can be scored under "mean", "first" and "max" without retraining.
+# Defaulted here so envsubst never emits "", and aliased from the SPACECRAFT_
+# spelling so exporting that in the calling shell (which reaches this script
+# but NOT the pods) still produces the intended run. See cloud_train.sh.
+FORECAST_STEPS="${FORECAST_STEPS:-${SPACECRAFT_MODEL__FORECAST_STEPS:-1}}"
+FORECAST_ERROR_REDUCTION="${FORECAST_ERROR_REDUCTION:-${SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION:-mean}}"
+
 export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG TUNED INJECTED_FLAG NUM_GPUS \
   EVAL_SPLIT PROCESSED_DATA_DIR CHANNELS_ARG WINDOW_SIZE_OVERRIDE \
-  MULTIVARIATE_ARG SUBSYSTEM_ARG
+  MULTIVARIATE_ARG SUBSYSTEM_ARG FORECAST_STEPS FORECAST_ERROR_REDUCTION
 
 # Report the resolved scope, not just the mode: --multivariate must match how
 # the model was trained, and a mismatch fails late (inside the Ray task, as
 # "no registered versions found") rather than at submit time — so surface it here.
-_SCOPE="mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate}"
+_SCOPE="mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate}, forecast_steps=${FORECAST_STEPS}, reduction=${FORECAST_ERROR_REDUCTION}"
 if [[ "${TUNED}" = "1" ]]; then
   echo "==> Submitting spacecraft-score RayJob (${_SCOPE}, mode=tuned)"
 else
