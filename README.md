@@ -259,14 +259,19 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 | all events, channels 41–46 | precision | recall | F0.5 |
 |---|---:|---:|---:|
 | ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
-| ours — tuned (per-subsystem Ray Tune HPO + error floor) | 0.370 | 0.400 | **0.376** |
+| ours — tuned, 1-in/1-out (per-channel models) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out (one joint model per subsystem) | 0.636 | 0.280 | **0.507** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
 
 Only the **protocol-matched** row is like-for-like — neither side tuned, neither
-side using an error floor — and there we are far behind. The tuned row applies
-per-subsystem HPO the paper never ran, so its 0.376, though above the paper's
+side using an error floor — and there we are far behind. The tuned rows apply
+per-subsystem HPO the paper never ran, so their 0.507, though above the paper's
 un-pruned 0.178, is not a like-for-like win. Reported both ways deliberately.
+
+The two tuned rows are not a rounding artifact: the 6-in/6-out model was built and
+measured, and the two architectures land within 2×10⁻⁶ of each other — see
+[Multivariate forecasting: built, measured, no gain](#multivariate-forecasting-built-measured-no-gain).
 
 **What the ESA-ADB authors actually concluded.** They benchmarked ~40 algorithms,
 including a `telemanom_esa` variant adapted to ESA's channel scale, and found that
@@ -283,15 +288,54 @@ parameter per subsystem with Ray Tune against a held-out portion. The platform i
 still the contribution — but it targets a named limitation of the benchmark's own
 best result, not a model nobody rates.
 
-The residual gap is model class — and it is narrower than it sounds. `telemanom_esa`
-is still a Telemanom LSTM, with the *same* 2×80 hidden layers this repo uses. On the
-lightweight subset it runs **6-in/6-out** (`input_channels` and `target_channels` both
-set to channels 41–46), forecasting all six channels jointly 10 steps ahead, where
-ours is 1-in/1-out one step ahead. Telecommands are *not* an input in that
-configuration — they enter only the full-set runs, which score 0.008. So the gap to
-close is joint multivariate forecasting over sibling channels, not a different
-architecture. Doing that is future work (see [Future Work](#future-work)); the
-infrastructure is built so the swap is a model-module change, not a platform rewrite.
+### Multivariate forecasting: built, measured, no gain
+
+The obvious explanation for the residual gap was model class. `telemanom_esa` is still
+a Telemanom LSTM with the *same* 2×80 hidden layers used here, but on the lightweight
+subset it runs **6-in/6-out** — `input_channels` and `target_channels` both set to
+channels 41–46 — forecasting all six jointly, where this repo ran 1-in/1-out.
+(Telecommands are *not* an input there; they enter only the full-set runs, which score
+0.008.) So joint multivariate forecasting over sibling channels was the named gap.
+
+It was built and measured. **It did not improve detection quality:**
+
+| held-out, all events | precision | recall | F0.5 | detections |
+|---|---:|---:|---:|---:|
+| 1-in/1-out (6 models) | 0.6364 | 0.280 | 0.50724 | 12 |
+| 6-in/6-out (1 model) | 0.6364 | 0.280 | 0.50724 | 18 |
+
+Both detect the same 7 of 25 events and emit 11 event-level detection groups, so the
+event-level precision term is identically 7/11 and only the time-level TNR separates
+them. Two secondary metrics split in *opposite* directions — the per-channel models
+have perfect alarming precision (1.00 vs 0.70), the joint model attributes detections
+to the right channel more often (channel-aware F0.5 0.672 vs 0.640) — so neither
+supports a general claim.
+
+**Three findings came out of this that mattered more than the architecture:**
+
+1. **The tuning objective was mis-specified, and fixing it was worth more than any
+   model change.** HPO optimised per-channel segment F0.5 while the benchmark reports
+   mission-level corrected event-wise F0.5 over OR-aggregated detections. Those diverge
+   sharply: a config optimal on the first drove detections from 33 to 112 and F0.5 from
+   0.376 to 0.123. Selecting on the metric actually being reported moved the per-channel
+   arm from 0.376 → 0.507 — a larger gain than the entire architecture question.
+2. **Apparent architecture wins can be tuning luck.** The first comparison credited
+   multivariate with +23%. Sweeping both arms exhaustively over the same threshold grid
+   showed the per-channel arm's HPO had simply landed on a worse operating point *inside*
+   a search space that contained a better one — 204 trials missed it, because the
+   response surface is a narrow ridge. `scripts/threshold_ceiling.py` makes that parity
+   check cheap (no GPU, no re-inference — it replays saved error arrays), and it is now
+   a required step before any architecture claim.
+3. **`threshold_z` and `min_error_value` are substitutes, not independent knobs.** High-z
+   + no-floor and low-z + high-floor score nearly identically, so the optimum is a ridge.
+   That is why a single "best trial" looked pinned at a bound when it wasn't, and why
+   bound-proximity alone is not evidence of a truncated search.
+
+The remaining case for the joint model is **operational, not accuracy**: one model per
+subsystem instead of six (~100 → ~4–8 at production scale), ~6× fewer training batches
+per epoch-round, and correspondingly fewer registry entries, promotions, and served
+artifacts. It is not deployed — serving is deliberately deferred until the horizon
+experiment below settles, since that would change the same code again.
 
 **Channel accounting.** A single fleet average hides the structure, so a
 diagnostic (`scripts/diagnose_channels.py`) buckets every trained channel against
@@ -653,8 +697,12 @@ A one-step-ahead forecaster reliably flags spikes and step changes but tracks
 gradual drifts and cannot see flatlines (flat input → flat prediction → ~0
 residual) — see [Evaluation → ISS](#iss-evaluation-by-fault-injection-no-real-labels).
 The ISS demo's value is the live *platform* (real-time ingestion, serving, drift
-monitoring), not headline detection numbers on injected slow-onset faults. A
-stronger, multivariate detector (DC-VAE) is the model-module swap tracked in
+monitoring), not headline detection numbers on injected slow-onset faults. The fix
+is a **reconstruction** model (DC-VAE), which sees a whole window rather than
+predicting one step — not simply a multivariate one. Widening a forecaster's input
+to sibling channels was measured on ESA and did not change detection quality
+([details](#multivariate-forecasting-built-measured-no-gain)); the blind spot is
+the forecasting objective, not the input scope. Tracked in
 [Future Work](#future-work).
 
 **ISS live service is not kept running.**  
@@ -704,8 +752,16 @@ mission, and 21 is the first detector change aimed at the precision gap 19 measu
 ## Future Work
 
 The detector roadmap below is sequenced deliberately: each step builds the infrastructure the
-next one needs. The immediate step — a **6-in/6-out multivariate Telemanom**, matching the
-architecture the benchmark actually used — is what the three items here depend on.
+next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now
+built and measured — it matched per-channel accuracy rather than beating it
+([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
+channel-group data path, which is the part the work below actually reuses.
+
+The immediate next step is the **10-step forecast horizon** — the last unreplicated
+difference from the benchmark's configuration. It is not a config flag: the existing
+`prediction_horizon` moves a *single* target H steps out against a `Linear(hidden_dim, 1)`
+head, whereas matching the benchmark needs a `(C, H)` output, vector targets, and a rule for
+collapsing H error series into one per timestep.
 
 - **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
@@ -713,8 +769,8 @@ architecture the benchmark actually used — is what the three items here depend
   scoring, `T=256` window on ESA-ADB, no RNNs) as a detector alongside Telemanom. It is
   configured exactly like their multivariate Telemanom — one model over a channel group,
   `input_channels = target_channels`, latent dimensionality scaling with channel count — so
-  once multivariate Telemanom exists, DC-VAE reuses the whole data path and genuinely becomes
-  a model-module swap.
+  now that multivariate Telemanom exists, DC-VAE reuses the whole data path and genuinely
+  becomes a model-module swap.
 
   The honest motivation is *not* "DC-VAE is the benchmark's best model" — it isn't. The paper
   reports DC-VAE-ESA performing *"very poorly"* event-wise on Mission1, *"especially
