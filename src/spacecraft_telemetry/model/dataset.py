@@ -377,19 +377,57 @@ def load_multichannel_series_metadata(
     return segment_ids, is_anomaly, timestamps
 
 
+def window_span(cfg: Any) -> int:
+    """Total timesteps one window consumes: inputs plus every forecast target.
+
+    ``window_size`` inputs, then ``forecast_steps`` targets beginning
+    ``prediction_horizon`` steps after the window's last input:
+
+        span = window_size + prediction_horizon + forecast_steps - 1
+
+    At ``forecast_steps == 1`` this is ``window_size + prediction_horizon``, the
+    pre-021.7 formula, exactly. Centralised because the span appears in the
+    window index, the target-timestamp map, and the per-window anomaly OR — and
+    those three disagreeing by one would misalign errors against labels
+    silently rather than raising.
+
+    Takes a ``ModelConfig``-shaped object (``Any`` to avoid importing Settings
+    into this module's hot path).
+    """
+    return int(cfg.window_size) + int(cfg.prediction_horizon) + int(cfg.forecast_steps) - 1
+
+
+def first_target_offset(cfg: Any) -> int:
+    """Offset from a window start to its FIRST forecast target.
+
+    A multi-step window is attributed to the first instant it forecasts, not
+    the last: that is the earliest moment the model was wrong, so a detection
+    lands nearest fault onset rather than trailing the horizon. At
+    ``forecast_steps == 1`` it is the single target, identical to pre-021.7.
+
+    Note the mild consequence when errors are aggregated across the horizon
+    (``forecast_error_reduction="mean"``/``"max"``): an error driven by a late
+    forecast step is still attributed to the first, so detections can lead the
+    fault slightly. That is the intended direction for early warning, and it is
+    why "first" reduction exists as the strict-ablation alternative.
+    """
+    return int(cfg.window_size) + int(cfg.prediction_horizon) - 1
+
+
 def _build_window_index(
     segment_ids: np.ndarray[Any, np.dtype[np.int32]],
     is_anomaly: np.ndarray[Any, np.dtype[np.bool_]],
     window_size: int,
     prediction_horizon: int,
     skip_anomalous_windows: bool,
+    forecast_steps: int = 1,
 ) -> np.ndarray[Any, Any]:
     """Return int32 array of valid window start indices.
 
     A start index ``s`` is valid iff:
 
-    1. ``segment_ids[s : s + window_size + prediction_horizon]`` is all one
-       value — the window plus target step don't span a segment gap.
+    1. ``segment_ids[s : s + span]`` is all one value — the window plus every
+       forecast target don't span a segment gap.
     2. If ``skip_anomalous_windows``: no timestep in that span is anomalous.
 
     Segment IDs are assigned in ascending temporal order by the preprocessing
@@ -400,15 +438,20 @@ def _build_window_index(
         segment_ids:            (N,) int32 — segment ID per timestep.
         is_anomaly:             (N,) bool  — per-timestep anomaly flag.
         window_size:            Number of input timesteps (W).
-        prediction_horizon:     Steps from the window end to the target (H).
-                                Target index = s + W + H - 1.
+        prediction_horizon:     Steps from the window end to the FIRST target.
         skip_anomalous_windows: Skip windows that contain any anomalous step.
+        forecast_steps:         Number of consecutive targets forecast per
+                                window (021.7). 1 = pre-021.7 single target.
+                                A longer horizon consumes more timesteps, so
+                                FEWER windows fit in a segment — expect the
+                                window count to drop as this rises.
 
     Returns:
         int32 array of valid start indices, length 0 when none qualify.
     """
     n = len(segment_ids)
-    span = window_size + prediction_horizon  # total positions consumed per window
+    # total positions consumed per window — see window_span()
+    span = window_size + prediction_horizon + forecast_steps - 1
 
     if n < span:
         return np.empty(0, dtype=np.int32)
@@ -439,15 +482,20 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
     multivariate ``(N, C)`` array (docs/plans/021-multivariate-telemanom.md).
     The univariate case is a distinct branch, not C=1 of the general one —
     output shapes match pre-021 exactly (y is a 0-d scalar tensor, not a
-    length-1 vector), so every existing caller is untouched byte-for-byte:
+    length-1 vector), so every existing caller is untouched byte-for-byte.
 
-        x: (W, 1) float32 tensor — window values
-        y: ()     float32 tensor — target value at index s + W + H - 1
+    ``forecast_steps`` (F, stage 021.7) likewise keeps F=1 on the pre-021.7
+    shapes rather than adding a trailing 1, matching the architecture's output
+    rank so loss and error extraction line up without squeezes:
 
-    For a multivariate ``(N, C)`` input:
+        F=1, univariate    x: (W, 1)   y: ()      scalar at s + W + H - 1
+        F=1, multivariate  x: (W, C)   y: (C,)
+        F>1, univariate    x: (W, 1)   y: (1, F)
+        F>1, multivariate  x: (W, C)   y: (C, F)
 
-        x: (W, C) float32 tensor — window values, channel order preserved
-        y: (C,)   float32 tensor — target vector at index s + W + H - 1
+    Targets are channel-major for F>1 — ``y[i]`` is channel i's trajectory —
+    matching TelemanomLSTM's ``(B, C, H)`` output layout so the MSE is
+    elementwise with no transpose.
     """
 
     def __init__(
@@ -456,6 +504,7 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
         start_indices: np.ndarray[Any, np.dtype[np.int32]],
         window_size: int,
         prediction_horizon: int,
+        forecast_steps: int = 1,
     ) -> None:
         super().__init__()
         arr = np.ascontiguousarray(values)
@@ -467,18 +516,28 @@ class WindowedSequenceDataset(_TorchDataset):  # type: ignore[type-arg]
         self._starts = start_indices           # (M,) int32
         self._W = window_size
         self._H = prediction_horizon
+        self._F = forecast_steps
 
     def __len__(self) -> int:
         return len(self._starts)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         s = int(self._starts[idx])
+        t0 = s + self._W + self._H - 1          # first forecast target
         if self._univariate:
             x = self._values[s : s + self._W].unsqueeze(-1)   # (W, 1)
-            y = self._values[s + self._W + self._H - 1]       # scalar
+            y = (
+                self._values[t0]                              # scalar (pre-021.7)
+                if self._F == 1
+                else self._values[t0 : t0 + self._F].unsqueeze(0)  # (1, F)
+            )
         else:
             x = self._values[s : s + self._W, :]               # (W, C)
-            y = self._values[s + self._W + self._H - 1, :]     # (C,)
+            y = (
+                self._values[t0, :]                            # (C,) (pre-021.7)
+                if self._F == 1
+                else self._values[t0 : t0 + self._F, :].transpose(0, 1)  # (C, F)
+            )
         return x, y
 
 
@@ -532,7 +591,7 @@ def make_dataloaders(
         is_anomaly = is_anomaly_2d.any(axis=1)
     all_indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
-        skip_anomalous_windows=True,
+        skip_anomalous_windows=True, forecast_steps=cfg.forecast_steps,
     )
 
     n = len(all_indices)
@@ -546,10 +605,12 @@ def make_dataloaders(
     n_train = n - n_val
 
     train_ds = WindowedSequenceDataset(
-        values, all_indices[:n_train], cfg.window_size, cfg.prediction_horizon
+        values, all_indices[:n_train], cfg.window_size, cfg.prediction_horizon,
+        cfg.forecast_steps,
     )
     val_ds = WindowedSequenceDataset(
-        values, all_indices[n_train:], cfg.window_size, cfg.prediction_horizon
+        values, all_indices[n_train:], cfg.window_size, cfg.prediction_horizon,
+        cfg.forecast_steps,
     )
 
     _pin = torch.cuda.is_available()
@@ -639,14 +700,20 @@ def make_test_dataloader(
         index_is_anomaly = is_anomaly.any(axis=1)
     indices = _build_window_index(
         segment_ids, index_is_anomaly, cfg.window_size, cfg.prediction_horizon,
-        skip_anomalous_windows=False,
+        skip_anomalous_windows=False, forecast_steps=cfg.forecast_steps,
     )
 
-    span = cfg.window_size + cfg.prediction_horizon
-    target_timestamps = timestamps[indices + span - 1]
+    span = window_span(cfg)
+    # Attributed to the FIRST forecast target, not the last — see
+    # first_target_offset(). Identical to pre-021.7 when forecast_steps == 1.
+    target_timestamps = timestamps[indices + first_target_offset(cfg)]
+    # ...but the anomaly OR spans the WHOLE window (inputs + every target):
+    # a window is anomalous if any timestep it touches is.
     window_is_anomaly = _window_any_anomalous(is_anomaly, indices, span)
 
-    ds = WindowedSequenceDataset(values, indices, cfg.window_size, cfg.prediction_horizon)
+    ds = WindowedSequenceDataset(
+        values, indices, cfg.window_size, cfg.prediction_horizon, cfg.forecast_steps
+    )
     _pin = torch.cuda.is_available()
     loader: DataLoader[tuple[torch.Tensor, torch.Tensor]] = DataLoader(
         ds,
@@ -699,9 +766,9 @@ def load_window_labels(
         index_is_anomaly = is_anomaly.any(axis=1)
     indices = _build_window_index(
         segment_ids, index_is_anomaly, cfg.window_size, cfg.prediction_horizon,
-        skip_anomalous_windows=False,
+        skip_anomalous_windows=False, forecast_steps=cfg.forecast_steps,
     )
-    span = cfg.window_size + cfg.prediction_horizon
+    span = window_span(cfg)
     return _window_any_anomalous(is_anomaly, indices, span)
 
 
@@ -722,10 +789,9 @@ def window_target_timestamps_from_metadata(
     cfg = settings.model
     indices = _build_window_index(
         segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
-        skip_anomalous_windows=False,
+        skip_anomalous_windows=False, forecast_steps=cfg.forecast_steps,
     )
-    span = cfg.window_size + cfg.prediction_horizon
-    result: np.ndarray[Any, Any] = timestamps[indices + span - 1]
+    result: np.ndarray[Any, Any] = timestamps[indices + first_target_offset(cfg)]
     return result
 
 

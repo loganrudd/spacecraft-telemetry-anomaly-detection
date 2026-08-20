@@ -747,6 +747,124 @@ def test_make_test_dataloader_multichannel_per_channel_anomaly_flags(tmp_path: P
     assert not window_is_anomaly[0, 1]  # first window doesn't touch the tail
 
 
+class TestForecastSteps:
+    """Multi-step horizon (docs/plans/021, stage 021.7b).
+
+    The span, the target-timestamp attribution, and the per-window anomaly OR
+    must all agree about how many timesteps a window consumes — a one-off
+    disagreement misaligns errors against labels silently rather than raising.
+    """
+
+    def test_span_and_offset_reduce_to_pre_021_7_at_f1(self) -> None:
+        from spacecraft_telemetry.core.config import Settings
+        from spacecraft_telemetry.model.dataset import first_target_offset, window_span
+
+        cfg = Settings(model={"window_size": 250, "prediction_horizon": 1}).model
+        assert window_span(cfg) == 250 + 1
+        assert first_target_offset(cfg) == 250 + 1 - 1
+
+    def test_span_grows_with_horizon(self) -> None:
+        from spacecraft_telemetry.core.config import Settings
+        from spacecraft_telemetry.model.dataset import first_target_offset, window_span
+
+        cfg = Settings(model={
+            "window_size": 250, "prediction_horizon": 1, "forecast_steps": 10
+        }).model
+        assert window_span(cfg) == 250 + 1 + 10 - 1
+        # The first target does NOT move — only the span extends past it.
+        assert first_target_offset(cfg) == 250
+
+    def test_longer_horizon_yields_fewer_windows(self) -> None:
+        """A longer horizon consumes more timesteps, so fewer windows fit."""
+        n, W = 60, 10
+        seg = np.zeros(n, dtype=np.int32)
+        anom = np.zeros(n, dtype=bool)
+        one = _build_window_index(seg, anom, W, 1, False, forecast_steps=1)
+        ten = _build_window_index(seg, anom, W, 1, False, forecast_steps=10)
+        assert len(one) == n - W  # 50
+        assert len(ten) == len(one) - 9
+
+    def test_multivariate_target_is_channel_major(self) -> None:
+        """y[i] must be channel i's trajectory, matching TelemanomLSTM's
+        (B, C, H) output so the MSE is elementwise with no transpose."""
+        W, F, C = 3, 4, 2
+        n = 30
+        values = np.stack(
+            [np.arange(n, dtype=np.float32), np.arange(n, dtype=np.float32) + 100], axis=1
+        )
+        idx = _build_window_index(
+            np.zeros(n, dtype=np.int32), np.zeros(n, dtype=bool), W, 1, False, forecast_steps=F
+        )
+        ds = WindowedSequenceDataset(values, idx, W, 1, F)
+        x, y = ds[0]
+        assert x.shape == (W, C)
+        assert y.shape == (C, F)
+        t0 = 0 + W + 1 - 1
+        np.testing.assert_allclose(y[0].numpy(), values[t0 : t0 + F, 0])
+        np.testing.assert_allclose(y[1].numpy(), values[t0 : t0 + F, 1])
+
+    def test_univariate_multi_step_target_shape(self) -> None:
+        W, F = 3, 4
+        n = 30
+        values = np.arange(n, dtype=np.float32)
+        idx = _build_window_index(
+            np.zeros(n, dtype=np.int32), np.zeros(n, dtype=bool), W, 1, False, forecast_steps=F
+        )
+        ds = WindowedSequenceDataset(values, idx, W, 1, F)
+        x, y = ds[0]
+        assert x.shape == (W, 1)
+        assert y.shape == (1, F)
+        np.testing.assert_allclose(y[0].numpy(), values[W : W + F])
+
+    def test_f1_shapes_are_unchanged(self) -> None:
+        """The whole point of branching at F==1: no trailing axis appears."""
+        W = 3
+        n = 20
+        idx = _build_window_index(
+            np.zeros(n, dtype=np.int32), np.zeros(n, dtype=bool), W, 1, False
+        )
+        uni = WindowedSequenceDataset(np.arange(n, dtype=np.float32), idx, W, 1, 1)
+        assert uni[0][1].shape == torch.Size([])
+        multi_vals = np.stack([np.arange(n, dtype=np.float32)] * 2, axis=1)
+        multi = WindowedSequenceDataset(multi_vals, idx, W, 1, 1)
+        assert multi[0][1].shape == (2,)
+
+    def test_targets_never_read_past_the_array(self) -> None:
+        """The last valid window's final target must be the last element —
+        an off-by-one in the span would silently read garbage or crash."""
+        W, F = 5, 6
+        n = 40
+        values = np.arange(n, dtype=np.float32)
+        idx = _build_window_index(
+            np.zeros(n, dtype=np.int32), np.zeros(n, dtype=bool), W, 1, False, forecast_steps=F
+        )
+        ds = WindowedSequenceDataset(values, idx, W, 1, F)
+        _x, y = ds[len(ds) - 1]
+        assert float(y[0, -1]) == float(values[-1])
+
+    def test_end_to_end_dataloader_shapes(self, tmp_path: Path) -> None:
+        from spacecraft_telemetry.core.config import Settings
+
+        mission = "ESA-Mission1"
+        processed_dir = tmp_path / "processed"
+        chans = ["channel_1", "channel_2"]
+        for i, ch in enumerate(chans):
+            _write_synthetic_channel(
+                processed_dir, mission, ch, "train", 40, value_offset=float(i) * 100
+            )
+        settings = Settings(
+            model={
+                "window_size": 5, "prediction_horizon": 1, "forecast_steps": 4,
+                "input_channels": chans, "target_channels": chans, "batch_size": 3,
+            },
+            preprocess={"processed_data_dir": str(processed_dir)},
+        )
+        train_loader, _ = make_dataloaders(settings, mission, "subsystem_1")
+        x, y = next(iter(train_loader))
+        assert x.shape[1:] == (5, 2)
+        assert y.shape[1:] == (2, 4)
+
+
 def test_input_channels_single_item_matches_default_univariate_path(
     tiny_series_parquet: SeriesParquetFixture,
 ) -> None:
