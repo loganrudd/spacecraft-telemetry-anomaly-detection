@@ -89,7 +89,14 @@ def predict(
     with torch.no_grad():
         for i, (x, y) in enumerate(loader):
             x = x.to(device)
-            pred: torch.Tensor = model(x).squeeze(1)
+            pred: torch.Tensor = model(x)
+            # Squeeze ONLY the univariate single-step case, where the model
+            # emits (B, 1) and every pre-021 caller expects (B,). A blanket
+            # .squeeze(1) would also collapse the channel axis of a univariate
+            # MULTI-step output (B, 1, H) -> (B, H), silently disagreeing with
+            # its (B, 1, F) targets. Explicit beats incidental here.
+            if pred.ndim == 2 and pred.shape[1] == 1:
+                pred = pred.squeeze(1)
             all_preds.append(pred.cpu().numpy())
             all_targets.append(y.numpy())
             if log_every and (i + 1) % log_every == 0:
@@ -352,6 +359,47 @@ def evaluate_overlap(
     }
 
 
+def collapse_forecast_errors(
+    errors: np.ndarray[Any, Any],
+    reduction: str,
+) -> np.ndarray[Any, Any]:
+    """Collapse a multi-step error tensor's horizon axis: (..., H) -> (...).
+
+    The whole downstream pipeline — EWMA smoothing, dynamic threshold,
+    run-length flagging, esa_adb interval reconstruction — assumes exactly ONE
+    error per window per channel. Plan 021's discipline is to change the
+    forecaster only, so the H forecast errors collapse here, at the forecaster
+    boundary, rather than by generalising the scorer.
+
+    Reductions (all on |error|, matching smooth_errors' own use of magnitude):
+
+    - ``"mean"``  every forecast step contributes, so a fault that only becomes
+      visible at longer lead times still raises the score.
+    - ``"first"`` the 1-step-ahead error alone. Reproduces the forecast_steps=1
+      error series exactly, which makes a longer horizon a pure ablation of the
+      TRAINING signal: the model learns from H-step supervision but is scored
+      identically to the H=1 model.
+    - ``"max"``   worst error over the horizon; most sensitive, and noisiest.
+
+    A 1-D or 2-D input (single-step models) is returned unchanged, so this is a
+    no-op on every pre-021.7 path rather than a branch its callers must guard.
+    """
+    if errors.ndim < 3:
+        return errors
+    if reduction == "first":
+        result: np.ndarray[Any, Any] = np.abs(errors[..., 0])
+    elif reduction == "max":
+        result = np.abs(errors).max(axis=-1)
+    elif reduction == "mean":
+        result = np.abs(errors).mean(axis=-1)
+    else:
+        raise ValueError(
+            f"Unknown forecast_error_reduction {reduction!r}; "
+            "expected one of 'mean', 'first', 'max'."
+        )
+    return result
+
+
 def _score_series(
     errors: np.ndarray[Any, Any],
     is_anomaly: np.ndarray[Any, Any],
@@ -519,6 +567,22 @@ def score_channel(
     log.info("model.score.predict_done", channel=channel)
     errors = preds - targets
 
+    # Multi-step horizon (021.7): errors are (N, C, H) — or (N, 1, H) when
+    # univariate — and collapse to one value per window per channel BEFORE any
+    # of the scoring pipeline runs. No-op for single-step models.
+    if errors.ndim >= 3:
+        errors = collapse_forecast_errors(errors, cfg.forecast_error_reduction)
+        log.info(
+            "model.score.forecast_collapsed",
+            channel=channel,
+            forecast_steps=cfg.forecast_steps,
+            reduction=cfg.forecast_error_reduction,
+        )
+        # A univariate multi-step model leaves a length-1 channel axis behind;
+        # drop it so the downstream univariate branch sees the (N,) it expects.
+        if not cfg.input_channels and errors.ndim == 2 and errors.shape[1] == 1:
+            errors = errors[:, 0]
+
     # Multivariate (docs/plans/021-multivariate-telemanom.md): `channel` is
     # the joint model's registry key (a subsystem name); `errors`/`targets`/
     # `is_anomaly` are (N, C). Extract column i as channel group[i]'s error
@@ -642,6 +706,11 @@ def score_channel(
             # Logged so esa_adb/detections.py can reconstruct flags exactly.
             "min_error_value": cfg.min_error_value,
             "eval_split": eval_split,
+            # 021.7: two scoring runs off the SAME H=10 model differ only by
+            # this, so without it the runs are indistinguishable in MLflow and
+            # the mean-vs-first comparison cannot be reconstructed later.
+            "forecast_steps": cfg.forecast_steps,
+            "forecast_error_reduction": cfg.forecast_error_reduction,
         })
         if is_multivariate:
             # log_metrics_final wants a flat {name: float} dict; MLflow has no

@@ -431,6 +431,87 @@ def test_predict_sets_eval_mode() -> None:
     assert not model.training, "predict() should leave the model in eval mode"
 
 
+class TestCollapseForecastErrors:
+    """Multi-step error collapse (docs/plans/021, stage 021.7c).
+
+    The downstream pipeline assumes ONE error per window per channel, so H
+    errors collapse at the forecaster boundary. Reductions operate on |error|
+    to match smooth_errors' own use of magnitude.
+    """
+
+    def test_noop_on_single_step_shapes(self) -> None:
+        """1-D and 2-D inputs are pre-021.7 paths — must pass through
+        untouched, including keeping their SIGN (no abs applied)."""
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        one_d = np.array([-1.0, 2.0, -3.0])
+        np.testing.assert_array_equal(collapse_forecast_errors(one_d, "mean"), one_d)
+        two_d = np.array([[-1.0, 2.0], [3.0, -4.0]])
+        np.testing.assert_array_equal(collapse_forecast_errors(two_d, "mean"), two_d)
+
+    def test_first_takes_the_one_step_ahead_error(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.array([[[-1.0, 5.0, 9.0], [2.0, -8.0, 0.0]]])  # (1, 2, 3)
+        np.testing.assert_allclose(
+            collapse_forecast_errors(e, "first"), [[1.0, 2.0]]
+        )
+
+    def test_mean_and_max_use_magnitude(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.array([[[-3.0, 3.0]]])  # (1, 1, 2) — cancels to 0 if sign kept
+        np.testing.assert_allclose(collapse_forecast_errors(e, "mean"), [[3.0]])
+        np.testing.assert_allclose(collapse_forecast_errors(e, "max"), [[3.0]])
+
+    def test_shape_reduces_by_one_axis(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.zeros((7, 6, 10))
+        for mode in ("mean", "first", "max"):
+            assert collapse_forecast_errors(e, mode).shape == (7, 6)
+
+    def test_first_reproduces_h1_error_series(self) -> None:
+        """The property that makes 'first' a clean ablation: scoring an H=10
+        model with it yields exactly the |error| series an H=1 model would,
+        so only the TRAINING signal differs."""
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        rng = np.random.default_rng(0)
+        multi = rng.standard_normal((20, 3, 10))
+        np.testing.assert_allclose(
+            collapse_forecast_errors(multi, "first"), np.abs(multi[:, :, 0])
+        )
+
+    def test_unknown_reduction_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        with pytest.raises(ValueError, match="Unknown forecast_error_reduction"):
+            collapse_forecast_errors(np.zeros((2, 2, 2)), "median")
+
+
+def test_predict_multi_step_keeps_horizon_axis() -> None:
+    """predict() must NOT squeeze a univariate multi-step (B, 1, H) output —
+    doing so would collapse the channel axis and silently disagree with the
+    (B, 1, F) targets."""
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, forecast_steps=4)
+    model = build_model(cfg)
+    n, W, F = 6, cfg.window_size, 4
+    rng = np.random.default_rng(0)
+    x = torch.from_numpy(rng.standard_normal((n, W, 1)).astype(np.float32))
+    y = torch.from_numpy(rng.standard_normal((n, 1, F)).astype(np.float32))
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x, y), batch_size=3, shuffle=False
+    )
+    preds, targets = predict(model, loader, torch.device("cpu"))
+    assert preds.shape == (n, 1, F)
+    assert targets.shape == (n, 1, F)
+
+
 def test_predict_output_shape_multivariate() -> None:
     """A multivariate model's predict() output is (N, C) — docs/plans/021.
 
@@ -658,6 +739,91 @@ def test_score_channel_multivariate(
     assert "threshold" in artifact_names, "per-channel threshold/ dir not logged"
     assert "threshold_config.json" in artifact_names
     assert "metrics" in artifact_names
+
+
+@pytest.mark.slow
+def test_score_channel_multi_step_horizon(mlflow_uri: str, tmp_path: Path) -> None:
+    """End-to-end H=10: train, score, and confirm the horizon collapses to the
+    same one-error-per-window contract the rest of the pipeline requires.
+
+    Also scores the SAME model twice with different reductions — the property
+    that makes the mean-vs-first comparison one training run rather than two.
+    """
+    import json as _json
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from mlflow.tracking import MlflowClient
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+
+    mission, channel = "ESA-Mission1", "channel_1"
+    processed_dir = tmp_path / "processed"
+    W, F = 10, 4
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+
+    def _write(split: str, n: int, anomaly_tail: int = 0) -> None:
+        ts = [
+            pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+                pa.timestamp("us", tz="UTC")
+            )
+            for i in range(n)
+        ]
+        flags = [False] * (n - anomaly_tail) + [True] * anomaly_tail
+        table = pa.table({
+            "telemetry_timestamp": pa.array(ts, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(
+                [float(i % 7) for i in range(n)], type=pa.float32()
+            ),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array(flags),
+        })
+        d = processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, d / "part.parquet")
+
+    _write("train", 80)
+    _write("test", 60, anomaly_tail=8)
+    norm = processed_dir / mission / "normalization_params.json"
+    norm.parent.mkdir(parents=True, exist_ok=True)
+    norm.write_text(_json.dumps({channel: {"mean": 0.0, "std": 1.0}}))
+
+    b = load_settings("test")
+    settings = b.model_copy(update={
+        "mlflow": b.mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+        "preprocess": b.preprocess.model_copy(update={"processed_data_dir": processed_dir}),
+        "model": b.model.model_copy(update={
+            "artifacts_dir": tmp_path / "models", "window_size": W,
+            "forecast_steps": F, "hidden_dim": 4, "batch_size": 4,
+        }),
+    })
+
+    train_channel(settings, mission, channel)
+
+    metrics_mean = score_channel(settings, mission, channel)
+    assert 0.0 <= metrics_mean["f0_5"] <= 1.0
+
+    # Same trained model, different reduction — no retraining involved.
+    settings_first = settings.model_copy(update={
+        "model": settings.model.model_copy(update={"forecast_error_reduction": "first"})
+    })
+    metrics_first = score_channel(settings_first, mission, channel)
+    assert 0.0 <= metrics_first["f0_5"] <= 1.0
+
+    # Both runs must record which reduction produced them, or they are
+    # indistinguishable in MLflow afterwards.
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    exp = client.get_experiment_by_name(
+        experiment_name(settings.model.model_type, "scoring", mission)
+    )
+    runs = client.search_runs([exp.experiment_id], order_by=["attributes.start_time DESC"])
+    reductions = {r.data.params.get("forecast_error_reduction") for r in runs}
+    assert reductions == {"mean", "first"}
+    assert all(r.data.params.get("forecast_steps") == str(F) for r in runs)
 
 
 @pytest.mark.slow

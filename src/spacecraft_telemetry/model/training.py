@@ -209,6 +209,10 @@ def train_channel(
             "batch_size": cfg.batch_size,
             "window_size": cfg.window_size,
             "prediction_horizon": cfg.prediction_horizon,
+            # 021.7: recorded so a model version states its own horizon. Without
+            # it, an H=10 and an H=1 model are indistinguishable in the registry
+            # yet produce different-length error series at scoring time.
+            "forecast_steps": cfg.forecast_steps,
             "early_stopping_patience": cfg.early_stopping_patience,
             "seed": cfg.seed,
         })
@@ -223,7 +227,12 @@ def train_channel(
                 y = y.to(device=device, dtype=_io_dtype)
                 optimizer.zero_grad(set_to_none=True)
                 with _amp_ctx:
-                    pred = model(x).squeeze(1)
+                    pred = model(x)
+                    # Squeeze ONLY the univariate single-step (B, 1) case —
+                    # see model.scoring.predict for why a blanket squeeze(1)
+                    # corrupts a univariate MULTI-step (B, 1, H) output.
+                    if pred.ndim == 2 and pred.shape[1] == 1:
+                        pred = pred.squeeze(1)
                     loss = loss_fn(pred, y)
                 loss.backward()
                 optimizer.step()
@@ -240,7 +249,9 @@ def train_channel(
                     x = x.to(device=device, dtype=_io_dtype)
                     y = y.to(device=device, dtype=_io_dtype)
                     with _amp_ctx:
-                        pred = model(x).squeeze(1)
+                        pred = model(x)
+                        if pred.ndim == 2 and pred.shape[1] == 1:
+                            pred = pred.squeeze(1)
                         epoch_val_loss += loss_fn(pred, y).item() * len(x)
                     n_val += len(x)
             epoch_val_loss /= n_val
