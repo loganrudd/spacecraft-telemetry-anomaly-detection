@@ -9,6 +9,7 @@ and the tuning-parity check (docs/plans/021 stage 021.5b) silently lies.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from spacecraft_telemetry.model.scoring import dynamic_threshold
@@ -128,6 +129,72 @@ class TestSweepGroup:
         with pytest.raises(ValueError, match="empty"):
             sweep_group({}, threshold_window=10, min_run_length=1,
                         z_values=[3.0], floor_values=[0.0])
+
+
+class TestSweepGroupMissionLevel:
+    """The correction to 021.5b attempt 1: selecting on per-channel seg_f0_5
+    and reporting mission-level corrected event-wise F0.5 are different
+    objectives, and a config optimal on the first was catastrophic on the
+    second (33 -> 112 detections, 0.376 -> 0.123)."""
+
+    def _fixture(self) -> tuple[dict, dict]:
+        n = 400
+        ts = pd.date_range("2000-01-01", periods=n, freq="90s").to_numpy()
+        per_channel = {
+            "channel_41": (_series(seed=1), _labels_for()),
+            "channel_42": (_series(seed=2), _labels_for()),
+        }
+        stamps = {"channel_41": ts, "channel_42": ts}
+        return per_channel, stamps
+
+    def test_requires_timestamps_for_every_channel(self) -> None:
+        """A channel without timestamps would silently drop out of the
+        OR-aggregation, computing the mission metric on a subset."""
+        from spacecraft_telemetry.ray_fanout.threshold_grid import (
+            sweep_group_mission_level,
+        )
+
+        per_channel, stamps = self._fixture()
+        del stamps["channel_42"]
+        with pytest.raises(ValueError, match="channel_timestamps missing"):
+            sweep_group_mission_level(
+                per_channel, stamps, [], None,
+                threshold_window=40, min_run_length=2,
+                z_values=[3.0], floor_values=[0.0],
+            )
+
+    def test_empty_group_raises(self) -> None:
+        from spacecraft_telemetry.ray_fanout.threshold_grid import (
+            sweep_group_mission_level,
+        )
+
+        with pytest.raises(ValueError, match="empty"):
+            sweep_group_mission_level(
+                {}, {}, [], None,
+                threshold_window=40, min_run_length=2,
+                z_values=[3.0], floor_values=[0.0],
+            )
+
+    def test_covers_full_grid_and_returns_scores(self) -> None:
+        """With no ground-truth events the metric is well-defined (0.0) — the
+        point here is that every grid point is evaluated and the aggregation
+        pipeline runs end to end."""
+        from spacecraft_telemetry.ray_fanout.threshold_grid import (
+            sweep_group_mission_level,
+        )
+
+        per_channel, stamps = self._fixture()
+        timeline = [
+            (pd.Timestamp("2000-01-01", tz="UTC"),
+             pd.Timestamp("2000-01-01", tz="UTC") + pd.Timedelta(hours=10))
+        ]
+        grid = sweep_group_mission_level(
+            per_channel, stamps, [], timeline,
+            threshold_window=40, min_run_length=2,
+            z_values=[2.0, 3.0], floor_values=[0.0, 0.1],
+        )
+        assert set(grid) == {(z, f) for z in (2.0, 3.0) for f in (0.0, 0.1)}
+        assert all(isinstance(v, float) for v in grid.values())
 
 
 class TestBestPointAndBounds:

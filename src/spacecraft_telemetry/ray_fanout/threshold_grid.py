@@ -142,6 +142,85 @@ def sweep_group(
     return {point: float(np.mean(scores)) for point, scores in totals.items()}
 
 
+def sweep_group_mission_level(
+    per_channel: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]],
+    channel_timestamps: dict[str, np.ndarray[Any, Any]],
+    mission_events: Any,
+    mission_timeline: Any,
+    *,
+    threshold_window: int,
+    min_run_length: int,
+    z_values: list[float],
+    floor_values: list[float],
+    eval_slice: slice | None = None,
+) -> dict[GridPoint, float]:
+    """Grid sweep scored on MISSION-LEVEL corrected event-wise F0.5.
+
+    :func:`sweep_group` optimises mean per-channel seg_f0_5, which is what Ray
+    Tune optimises — and which **diverges sharply** from the mission-level
+    metric the ESA-ADB report actually publishes. Measured on plan 021's arms:
+    a config that maximised per-channel seg_f0_5 drove mission-level detections
+    from 33 to 112 and F0.5 from 0.376 to 0.123, because per-channel-optimal
+    thresholds fire on correlated events that compound under OR-aggregation.
+    Selecting on the reported metric requires scoring on the reported metric.
+
+    Reproduces the same aggregation ray_fanout.tune's trial function performs
+    for its observational mission_f0_5 (stage 021.4b): per-channel flags ->
+    time intervals -> OR-aggregated mission detections -> corrected_event_wise
+    over the "all_events" scope (excludes only Communication Gap, the paper's
+    primary table).
+
+    Costs interval math per grid point rather than array ops, so it is
+    materially slower than :func:`sweep_group` — seed it from a coarse
+    neighbourhood around that sweep's optimum rather than sweeping wide.
+
+    ``channel_timestamps`` must be index-aligned with each channel's arrays in
+    ``per_channel`` and sliced identically by ``eval_slice``.
+    """
+    from spacecraft_telemetry.esa_adb.detections import (
+        _flags_to_intervals,
+        mission_intervals_from_per_channel,
+    )
+    from spacecraft_telemetry.esa_adb.metrics import corrected_event_wise
+
+    if not per_channel:
+        raise ValueError("per_channel is empty — nothing to sweep.")
+    missing = set(per_channel) - set(channel_timestamps)
+    if missing:
+        raise ValueError(
+            f"channel_timestamps missing for {sorted(missing)} — every channel "
+            "must supply timestamps, or its detections silently vanish from the "
+            "OR-aggregation and the mission metric is computed on a subset."
+        )
+
+    sl = eval_slice if eval_slice is not None else slice(None)
+    prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]]
+    prepared = {}
+    for channel, (smoothed, _labels) in per_channel.items():
+        mean, std = precompute_threshold_terms(smoothed, threshold_window)
+        prepared[channel] = (smoothed, mean, std)
+
+    out: dict[GridPoint, float] = {}
+    for z in z_values:
+        thresholds = {
+            ch: threshold_from_terms(mean, std, z) for ch, (_s, mean, std) in prepared.items()
+        }
+        for floor in floor_values:
+            per_channel_intervals = {}
+            for channel, (smoothed, _m, _s) in prepared.items():
+                flags = flag_anomalies(smoothed, thresholds[channel], min_run_length, floor)
+                per_channel_intervals[channel] = _flags_to_intervals(
+                    flags[sl], channel_timestamps[channel][sl]
+                )
+            detections = mission_intervals_from_per_channel(per_channel_intervals)
+            cew = corrected_event_wise(
+                mission_events, detections, mission_timeline,
+                excluded_categories=frozenset({"Communication Gap"}),
+            )
+            out[(z, floor)] = float(cew["f_beta"])
+    return out
+
+
 def best_point(grid: dict[GridPoint, float]) -> tuple[GridPoint, float]:
     """Return ((z, floor), score) for the grid's maximum.
 
