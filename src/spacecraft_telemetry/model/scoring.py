@@ -416,6 +416,7 @@ def score_channel(
     *,
     eval_split: Literal["full_test", "hpo_portion", "final_portion"] = "full_test",
     parent_hpo_run_id: str | None = None,
+    tuned_source: str | None = None,
     data_source: Literal["nominal", "injected"] = "nominal",
 ) -> dict[str, Any]:
     """Load model + test Parquet → predict → score → persist artifacts.
@@ -438,6 +439,17 @@ def score_channel(
         mission:           Mission name, e.g. "ESA-Mission1".
         channel:           Channel ID, e.g. "channel_1".
         eval_split:        Which temporal slice of the test set to evaluate.
+        tuned_source:      Provenance for tuned params that did NOT come from a
+                           Ray Tune trial (e.g. an exhaustive grid — see
+                           scripts/threshold_ceiling.py). Recorded as the
+                           ``tuned_source`` tag. Consumers that ask "was this
+                           scored with tuned params or Hundman defaults?"
+                           (esa_adb.detections.find_scoring_run) must treat
+                           EITHER this or ``tuned_from_run`` as tuned —
+                           otherwise a grid-selected run is silently
+                           misclassified as the untuned baseline, which is
+                           exactly the protocol-matched row the ESA-ADB report
+                           compares against the paper.
         parent_hpo_run_id: MLflow run ID of the HPO trial that produced the
                            scoring params (used to set ``tuned_from_run`` tag).
         data_source:       "nominal" (default) or "injected" — recorded as the
@@ -553,6 +565,8 @@ def score_channel(
     _extra: dict[str, str] = {"eval_split": eval_split, "data_source": data_source}
     if parent_hpo_run_id is not None:
         _extra["tuned_from_run"] = parent_hpo_run_id
+    if tuned_source is not None:
+        _extra["tuned_source"] = tuned_source
     if is_multivariate:
         _extra["channels"] = ",".join(group)
 

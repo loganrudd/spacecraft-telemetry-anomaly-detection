@@ -201,6 +201,73 @@ class TestFindScoringRun:
         assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == tuned_run_id
 
 
+class TestTunedRunClassification:
+    """A run scored with grid-selected params must NOT read as the untuned
+    baseline. score_channel writes `tuned_from_run` only when given an HPO run
+    id; a config from scripts/threshold_ceiling.py has provenance but no such
+    run, so it carries `tuned_source` instead. If only the former counted, that
+    run would be filed as the protocol-matched Hundman-defaults row the ESA-ADB
+    report compares against the paper — a tuned config masquerading as untuned.
+    """
+
+    def _run_with(self, tags: dict[str, str]) -> object:
+        class _Run:
+            def __init__(self, t: dict[str, str]) -> None:
+                class _D:
+                    def __init__(self, tt: dict[str, str]) -> None:
+                        self.tags = tt
+
+                self.data = _D(t)
+
+        return _Run(tags)
+
+    def test_tuned_from_run_counts_as_tuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"tuned_from_run": "abc"})) is True
+
+    def test_tuned_source_counts_as_tuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"tuned_source": "grid"})) is True
+
+    def test_neither_tag_is_untuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"eval_split": "full_test"})) is False
+
+    def test_grid_tuned_run_is_not_returned_as_the_untuned_baseline(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """End-to-end: a genuine untuned run and a NEWER grid-tuned run coexist.
+        Asking for untuned must return the older genuine baseline, not the
+        newer grid run — recency must not override the tuned/untuned split."""
+        import mlflow
+
+        settings = _settings(tmp_path / "processed", mlflow_uri)
+        baseline_id = _log_scoring_run(
+            settings, _MISSION, "channel_41",
+            smoothed=np.zeros(5), threshold=np.ones(5), min_run_length=1, tuned=False,
+        )
+        # A later grid-tuned run, tagged the way runner.py now tags one.
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        tags = common_tags(
+            model_type=settings.model.model_type, mission=_MISSION, phase="scoring",
+            channel="channel_41",
+            extra={"eval_split": "full_test", "tuned_source": "threshold_ceiling grid"},
+        )
+        with open_run(experiment=exp, run_name="channel_41", tags=tags) as run:
+            assert run is not None
+            log_params({"threshold_min_anomaly_len": 1})
+            log_artifact_bytes(errors_to_bytes(np.zeros(5)), "errors.npy")
+            log_artifact_bytes(threshold_to_bytes(np.ones(5)), "threshold.npy")
+            grid_id = run.info.run_id
+        assert mlflow.MlflowClient(tracking_uri=mlflow_uri).get_run(grid_id) is not None
+
+        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=False) == baseline_id
+        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == grid_id
+
+
 def _log_multivariate_scoring_run(
     settings: Settings,
     mission: str,

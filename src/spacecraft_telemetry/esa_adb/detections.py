@@ -60,11 +60,10 @@ def find_scoring_run(
 ) -> str:
     """Return the run_id of the most recent matching scoring run for a channel.
 
-    ``tuned=False`` selects the Hundman-defaults baseline — score_channel()
-    only writes the ``tuned_from_run`` tag when called with a
-    ``parent_hpo_run_id`` (see ray_fanout/tune.py), so "no tag" means
-    "untuned". ``tuned=True`` selects the most recent run that does carry
-    the tag.
+    ``tuned=False`` selects the Hundman-defaults baseline, ``tuned=True`` the
+    most recent tuned run. "Tuned" means carrying either the ``tuned_from_run``
+    tag (Ray Tune) or ``tuned_source`` (another search, e.g. the exhaustive
+    grid in scripts/threshold_ceiling.py) — see :func:`_is_tuned_run`.
 
     Raises:
         RuntimeError: No experiment, or no run matches — states the exact
@@ -86,8 +85,7 @@ def find_scoring_run(
         order_by=["attributes.start_time DESC"],
     )
     for run in runs:
-        has_tag = "tuned_from_run" in run.data.tags
-        if has_tag == tuned:
+        if _is_tuned_run(run) == tuned:
             return str(run.info.run_id)
 
     kind = "tuned" if tuned else "untuned (Hundman-defaults)"
@@ -95,9 +93,27 @@ def find_scoring_run(
     raise RuntimeError(
         f"No {kind} scoring run found for channel={channel!r} in "
         f"experiment={experiment!r} (searched tags.channel_id='{channel}', "
-        f"{'presence' if tuned else 'absence'} of the tuned_from_run tag). "
+        f"{'presence' if tuned else 'absence'} of the tuned_from_run / "
+        f"tuned_source tags). "
         f"Run `spacecraft-telemetry ray score` for this channel {flag}."
     )
+
+
+def _is_tuned_run(run: Any) -> bool:
+    """True when a scoring run used tuned params rather than Hundman defaults.
+
+    Two tags can carry that, and BOTH must count:
+
+    - ``tuned_from_run`` — params came from a Ray Tune trial (the common case).
+    - ``tuned_source``   — params came from another search with no MLflow run
+      behind it, e.g. the exhaustive grid in scripts/threshold_ceiling.py.
+
+    Checking only the first silently files a grid-tuned run as the *untuned*
+    baseline, which is the row this report compares against the paper's
+    no-tuning protocol — it would look spectacular and mean nothing.
+    """
+    tags = run.data.tags
+    return "tuned_from_run" in tags or "tuned_source" in tags
 
 
 def _find_multivariate_scoring_run(
@@ -139,9 +155,10 @@ def _find_multivariate_scoring_run(
         order_by=["attributes.start_time DESC"],
     )
     for run in runs:
-        # Same tuned/untuned convention as find_scoring_run: score_channel only
-        # writes tuned_from_run when given a parent_hpo_run_id.
-        if ("tuned_from_run" in run.data.tags) != tuned:
+        # Same tuned/untuned convention as find_scoring_run — via the shared
+        # predicate, so the multivariate path can't drift from the univariate
+        # one on what counts as "tuned".
+        if _is_tuned_run(run) != tuned:
             continue
         members = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
         if channel in members:
