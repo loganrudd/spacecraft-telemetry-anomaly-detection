@@ -45,6 +45,7 @@ from spacecraft_telemetry.ray_fanout.threshold_grid import (
     best_point,
     bounds_report,
     sweep_group,
+    sweep_group_mission_level,
 )
 
 log = get_logger(__name__)
@@ -55,6 +56,76 @@ _DEFAULT_CHANNELS = [f"channel_{i}" for i in range(41, 47)]
 # the ceiling is a lower bound, which is the answer nobody wants.
 _DEFAULT_Z = [2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 _DEFAULT_FLOORS = [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+
+def _sweep_mission(
+    settings: Any,
+    mission: str,
+    channels: list[str],
+    per_channel: dict[str, tuple[Any, Any]],
+    eval_slice: slice,
+    *,
+    select_on: str,
+    threshold_window: int,
+    min_run_length: int,
+    z_values: list[float],
+    floor_values: list[float],
+) -> dict[tuple[float, float], float]:
+    """Assemble ESA-ADB ground truth and sweep on the mission-level metric.
+
+    Mirrors ray_fanout.tune.run_hpo_sweep's 021.4b preparation exactly — same
+    timeline, same cutoff, same event grouping — so a config chosen here means
+    the same thing a tune trial's ``mission_f0_5`` would have meant. Building
+    it differently would reintroduce precisely the objective mismatch this
+    mode exists to remove.
+
+    The timeline must match ``select_on``: scoring detections from the HPO
+    portion against the FULL timeline would count the held-out portion's
+    nominal time as un-alarmed, inflating TNR_t and therefore precision.
+    """
+    import pandas as pd
+
+    from spacecraft_telemetry.esa_adb.events import group_events, load_events
+    from spacecraft_telemetry.esa_adb.intervals import intersect, subtract
+    from spacecraft_telemetry.esa_adb.report import _hpo_cutoff
+    from spacecraft_telemetry.esa_adb.timeline import mission_timeline
+    from spacecraft_telemetry.model.dataset import window_target_timestamps
+
+    timeline_full = mission_timeline(settings, mission, channels)
+    cutoff = _hpo_cutoff(settings, mission, channels)
+    far_past = pd.Timestamp.min.tz_localize("UTC")
+    if select_on == "hpo_portion":
+        timeline = intersect(timeline_full, [(far_past, cutoff)])
+    else:
+        # The held-out remainder: the complement of the HPO portion, which is
+        # what esa_adb.report.tuned_eval_window computes for the tuned rows.
+        timeline = subtract(timeline_full, [(far_past, cutoff)])
+    events = group_events(load_events(settings, mission), channels, timeline)
+    log.info(
+        "threshold_ceiling.mission_prep",
+        select_on=select_on, n_events=len(events), n_timeline_spans=len(timeline),
+    )
+
+    channel_timestamps = {
+        channel: window_target_timestamps(settings, mission, channel) for channel in channels
+    }
+    for channel, stamps in channel_timestamps.items():
+        n = len(per_channel[channel][0])
+        if len(stamps) != n:
+            raise SystemExit(
+                f"Channel {channel!r}: {len(stamps)} target timestamps but {n} saved "
+                "error windows. They must be index-aligned or detections map to the "
+                "wrong instants — re-check window_size/prediction_horizon."
+            )
+
+    return sweep_group_mission_level(
+        per_channel, channel_timestamps, events, timeline,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+        z_values=z_values,
+        floor_values=floor_values,
+        eval_slice=eval_slice,
+    )
 
 
 def _parse_floats(raw: str | None, default: list[float]) -> list[float]:
@@ -71,6 +142,13 @@ def main() -> None:
     p.add_argument("--z-values", default=None, help="Comma-separated threshold_z grid.")
     p.add_argument("--floor-values", default=None, help="Comma-separated min_error_value grid.")
     p.add_argument("--processed-dir", default=None)
+    p.add_argument(
+        "--sample-dir",
+        default=None,
+        help="Override settings.data.sample_data_dir (holds labels.csv + "
+        "anomaly_types.csv). Required with --objective mission, which needs "
+        "ESA-ADB ground truth; unused by --objective per_channel.",
+    )
     p.add_argument("--tracking-uri", default=None)
     p.add_argument(
         "--untuned",
@@ -105,6 +183,17 @@ def main() -> None:
         help="Subsystem key for --emit-tuned-configs. tuned_configs.json is keyed "
         "by subsystem (see ray_fanout/runner.py's schema).",
     )
+    p.add_argument(
+        "--objective",
+        choices=("per_channel", "mission"),
+        default="per_channel",
+        help="What the grid maximises. 'per_channel' (default) = mean seg_f0_5, "
+        "what Ray Tune optimises. 'mission' = mission-level corrected event-wise "
+        "F0.5, what scripts/esa_adb_report.py publishes. THEY DIVERGE: a config "
+        "optimal on the first drove mission detections 33 -> 112 and F0.5 "
+        "0.3759 -> 0.1232 on plan 021's univariate arm. Select on whichever "
+        "metric you intend to report.",
+    )
     p.add_argument("--out", default=None, metavar="JSON")
     args = p.parse_args()
 
@@ -121,6 +210,10 @@ def main() -> None:
     if args.processed_dir:
         updates["preprocess"] = settings.preprocess.model_copy(
             update={"processed_data_dir": args.processed_dir}
+        )
+    if args.sample_dir:
+        updates["data"] = settings.data.model_copy(
+            update={"sample_data_dir": args.sample_dir}
         )
     if args.tracking_uri:
         updates["mlflow"] = settings.mlflow.model_copy(
@@ -195,14 +288,24 @@ def main() -> None:
         slice(n_hpo, None) if args.select_on == "final_portion" else slice(None, n_hpo)
     )
 
-    grid = sweep_group(
-        per_channel,
-        threshold_window=threshold_window,
-        min_run_length=min_run_length,
-        z_values=z_values,
-        floor_values=floor_values,
-        eval_slice=eval_slice,
-    )
+    if args.objective == "mission":
+        grid = _sweep_mission(
+            settings, args.mission, channels, per_channel, eval_slice,
+            select_on=args.select_on,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            z_values=z_values,
+            floor_values=floor_values,
+        )
+    else:
+        grid = sweep_group(
+            per_channel,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            z_values=z_values,
+            floor_values=floor_values,
+            eval_slice=eval_slice,
+        )
     (best_z, best_floor), best_score = best_point(grid)
     report = bounds_report(grid, z_values, floor_values)
 
@@ -214,8 +317,13 @@ def main() -> None:
     for z in z_values:
         print(f"{z:>9}" + "".join(f"{grid[(z, f)]:8.3f}" for f in floor_values))
     label = "CEILING" if args.select_on == "final_portion" else "BEST-ON-HPO-PORTION"
-    print(f"\n{label}  mean segF0.5 = {best_score:.3f}  at z={best_z}, floor={best_floor}")
-    print(f"  (selected on {args.select_on})")
+    metric = (
+        "mission-level corrected event-wise F0.5"
+        if args.objective == "mission"
+        else "mean per-channel segF0.5"
+    )
+    print(f"\n{label}  {metric} = {best_score:.3f}  at z={best_z}, floor={best_floor}")
+    print(f"  (objective={args.objective}, selected on {args.select_on})")
     if report["is_lower_bound"]:
         print("  ⚠  optimum sits on a GRID EDGE — this is a LOWER BOUND. "
               "Widen --z-values / --floor-values before quoting it.")
@@ -240,8 +348,9 @@ def main() -> None:
                 "error_smoothing_window": smoothing_window,
                 "_meta": {
                     "seg_f0_5": best_score,
-                    "source": "scripts/threshold_ceiling.py exhaustive grid",
+                    "source": f"scripts/threshold_ceiling.py exhaustive grid ({args.objective})",
                     "selected_on": args.select_on,
+                    "objective": args.objective,
                 },
             }
         }
@@ -258,6 +367,8 @@ def main() -> None:
             "mission": args.mission,
             "variant": settings.variant,
             "tuned": tuned,
+            "objective": args.objective,
+            "select_on": args.select_on,
             "channels": channels,
             "threshold_window": threshold_window,
             "min_run_length": min_run_length,
