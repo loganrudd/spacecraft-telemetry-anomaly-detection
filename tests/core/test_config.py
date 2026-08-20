@@ -325,6 +325,33 @@ class TestModelChannelGroup:
         with pytest.raises(ValidationError, match="both be None or both be set"):
             Settings(model={"input_channels": ["channel_41"]})
 
+    def test_forecast_steps_defaults_to_one(self) -> None:
+        """1 = the pre-021.7 scalar-target model."""
+        assert Settings().model.forecast_steps == 1
+
+    def test_forecast_steps_accepts_ten(self) -> None:
+        assert Settings(model={"forecast_steps": 10}).model.forecast_steps == 10
+
+    def test_forecast_steps_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match=">= 1"):
+            Settings(model={"forecast_steps": 0})
+
+    def test_forecast_error_reduction_default_and_choices(self) -> None:
+        assert Settings().model.forecast_error_reduction == "mean"
+        for mode in ("mean", "first", "max"):
+            assert Settings(model={"forecast_error_reduction": mode}).model. \
+                forecast_error_reduction == mode
+
+    def test_forecast_error_reduction_rejects_unknown(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(model={"forecast_error_reduction": "median"})
+
+    def test_forecast_steps_is_independent_of_prediction_horizon(self) -> None:
+        """They are different knobs — a COUNT of forecast steps versus an
+        OFFSET to the first one — and must both be settable."""
+        cfg = Settings(model={"forecast_steps": 10, "prediction_horizon": 3}).model
+        assert (cfg.forecast_steps, cfg.prediction_horizon) == (10, 3)
+
     def test_rejects_target_channels_not_matching_input(self) -> None:
         with pytest.raises(ValidationError, match="must equal input_channels"):
             Settings(

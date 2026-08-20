@@ -107,3 +107,66 @@ def test_build_model_input_channels_none_is_univariate() -> None:
     cfg = ModelConfig(hidden_dim=16, num_layers=1)
     model = build_model(cfg)
     assert model.n_channels == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-step horizon (docs/plans/021, stage 021.7)
+# ---------------------------------------------------------------------------
+
+
+class TestForecastSteps:
+    def test_default_is_one_and_keeps_2d_output(self) -> None:
+        """H=1 must keep the pre-021.7 rank. A gratuitous trailing axis would
+        break every existing caller silently via broadcasting."""
+        model = TelemanomLSTM(hidden_dim=16, num_layers=1)
+        assert model.forecast_steps == 1
+        assert model(torch.zeros(4, 10, 1)).shape == (4, 1)
+
+    def test_h1_head_is_identical_to_pre_021_7(self) -> None:
+        """A single flat Linear means H=1 is provably the SAME architecture,
+        not merely a similar one — same shape, same parameter count."""
+        a = TelemanomLSTM(hidden_dim=16, num_layers=1, n_channels=6)
+        b = TelemanomLSTM(hidden_dim=16, num_layers=1, n_channels=6, forecast_steps=1)
+        assert a.fc.weight.shape == b.fc.weight.shape
+        assert sum(p.numel() for p in a.parameters()) == sum(
+            p.numel() for p in b.parameters()
+        )
+
+    @pytest.mark.parametrize(("c", "h"), [(1, 10), (6, 10), (6, 2), (3, 5)])
+    def test_multi_step_output_shape(self, c: int, h: int) -> None:
+        model = TelemanomLSTM(hidden_dim=16, num_layers=1, n_channels=c, forecast_steps=h)
+        assert model(torch.zeros(4, 10, c)).shape == (4, c, h)
+
+    def test_channel_major_layout(self) -> None:
+        """out[:, i, :] must be channel i's trajectory over the horizon, which
+        is the axis order scoring slices to build a per-channel error series.
+        Verified against the flat head rather than assumed from the reshape."""
+        c, h = 3, 4
+        model = TelemanomLSTM(hidden_dim=8, num_layers=1, n_channels=c, forecast_steps=h)
+        model.eval()
+        x = torch.randn(2, 10, c)
+        with torch.no_grad():
+            reshaped = model(x)
+            flat = model.fc(model.lstm(x)[0][:, -1, :])
+        # Channel i occupies the contiguous block [i*h, (i+1)*h) of the flat head.
+        for i in range(c):
+            torch.testing.assert_close(reshaped[:, i, :], flat[:, i * h : (i + 1) * h])
+
+    def test_build_model_threads_forecast_steps(self) -> None:
+        cfg = ModelConfig(
+            hidden_dim=16, num_layers=1, forecast_steps=10,
+            input_channels=[f"channel_{i}" for i in range(41, 47)],
+            target_channels=[f"channel_{i}" for i in range(41, 47)],
+        )
+        model = build_model(cfg)
+        assert (model.n_channels, model.forecast_steps) == (6, 10)
+        assert model(torch.zeros(2, 10, 6)).shape == (2, 6, 10)
+
+    def test_params_scale_only_in_the_head(self) -> None:
+        """H widens the output Linear and nothing else — the LSTM is untouched,
+        so this stays a forecaster change rather than a bigger model."""
+        h1 = TelemanomLSTM(hidden_dim=80, num_layers=2, n_channels=6, forecast_steps=1)
+        h10 = TelemanomLSTM(hidden_dim=80, num_layers=2, n_channels=6, forecast_steps=10)
+        lstm_params = lambda m: sum(p.numel() for p in m.lstm.parameters())  # noqa: E731
+        assert lstm_params(h1) == lstm_params(h10)
+        assert h10.fc.out_features == 10 * h1.fc.out_features
