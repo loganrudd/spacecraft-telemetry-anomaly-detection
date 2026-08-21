@@ -333,6 +333,11 @@ def train_channel(
             _vtags: dict[str, str] = {
                 "window_size": str(cfg.window_size),
                 "mission_id": mission,
+                # Dual-sourced exactly like window_size (run param + version
+                # tag) so model.io.load_model_contract can read the horizon
+                # even for a version whose run link is missing. Scoring refuses
+                # a mismatch — see model/scoring.py.
+                "forecast_steps": str(cfg.forecast_steps),
             }
             if _is_multivariate:
                 # No real channel_id for a multivariate model — cli.py

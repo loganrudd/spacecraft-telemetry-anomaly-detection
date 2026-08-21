@@ -491,6 +491,91 @@ class TestCollapseForecastErrors:
             collapse_forecast_errors(np.zeros((2, 2, 2)), "median")
 
 
+class TestTrainingContractGuard:
+    """docs/reviews/021-multivariate-telemanom.md items A1 + C1.
+
+    ``window_size`` has been guarded at the scoring boundary since Phase 3.
+    Plan 021 added two attributes with the same property — wrong value, no
+    crash, meaningless number — and neither was guarded. These pin that they
+    now are, including the ORDER-sensitivity plan 021's Validation list asked
+    for and never got.
+    """
+
+    @staticmethod
+    def _contract(**kwargs: Any) -> Any:
+        from spacecraft_telemetry.model.io import ModelContract
+
+        return ModelContract(**{"window_size": 250, **kwargs})
+
+    @staticmethod
+    def _cfg(**kwargs: Any) -> Any:
+        from spacecraft_telemetry.core.config import ModelConfig
+
+        return ModelConfig(**kwargs)
+
+    def test_matching_contract_passes(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        group = ["channel_41", "channel_42"]
+        _check_training_contract(
+            self._contract(forecast_steps=10, channels=tuple(group)),
+            self._cfg(forecast_steps=10, input_channels=group, target_channels=group),
+            "m",
+        )
+
+    def test_forecast_steps_mismatch_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        with pytest.raises(ValueError, match="forecast_steps"):
+            _check_training_contract(
+                self._contract(forecast_steps=10), self._cfg(forecast_steps=1), "m"
+            )
+
+    def test_shuffled_input_channels_raises(self) -> None:
+        """Same membership, different order — every shape still matches, so
+        nothing else in the pipeline would notice."""
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        trained = ("channel_41", "channel_42", "channel_43")
+        shuffled = ["channel_43", "channel_41", "channel_42"]
+        with pytest.raises(ValueError, match="ORDER-SENSITIVE"):
+            _check_training_contract(
+                self._contract(channels=trained),
+                self._cfg(input_channels=shuffled, target_channels=shuffled),
+                "m",
+            )
+
+    def test_scoring_a_multivariate_model_univariately_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        with pytest.raises(ValueError, match="input_channels"):
+            _check_training_contract(
+                self._contract(channels=("channel_41", "channel_42")),
+                self._cfg(),
+                "m",
+            )
+
+    def test_scoring_a_univariate_model_as_a_group_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        group = ["channel_41", "channel_42"]
+        with pytest.raises(ValueError, match="input_channels"):
+            _check_training_contract(
+                self._contract(),
+                self._cfg(input_channels=group, target_channels=group),
+                "m",
+            )
+
+    def test_pre_021_univariate_model_still_scores(self) -> None:
+        """Open question 2, resolved in the safe direction: a version with no
+        `channels` tag IS univariate, so scoring it univariately must not
+        error — otherwise every model registered before 021 becomes
+        unscoreable."""
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        _check_training_contract(self._contract(), self._cfg(), "m")
+
+
 class TestFirstReductionScoresAsH1:
     """`first` must be scored IDENTICALLY to an H=1 model's error series.
 
@@ -833,6 +918,22 @@ def test_score_channel_multivariate(
     assert "threshold_config.json" in artifact_names
     assert "metrics" in artifact_names
 
+    # Scoring the SAME model with the group reversed must be refused. Every
+    # shape still matches under a reorder — only the channel->column mapping
+    # moves — so without this guard each channel's metrics would be reported
+    # under the other channel's name (docs/reviews/021, item C1).
+    shuffled = list(reversed(channels))
+    settings_shuffled = settings.model_copy(update={
+        "model": settings.model.model_copy(
+            update={"input_channels": shuffled, "target_channels": shuffled}
+        )
+    })
+    with pytest.raises(ValueError, match="ORDER-SENSITIVE"):
+        score_channel(settings_shuffled, mission, subsystem_key)
+    assert len(client.search_runs([exp.experiment_id])) == 1, (
+        "the guard must fire before inference — no scoring run should be created"
+    )
+
 
 @pytest.mark.slow
 def test_score_channel_multi_step_horizon(mlflow_uri: str, tmp_path: Path) -> None:
@@ -917,6 +1018,19 @@ def test_score_channel_multi_step_horizon(mlflow_uri: str, tmp_path: Path) -> No
     reductions = {r.data.params.get("forecast_error_reduction") for r in runs}
     assert reductions == {"mean", "first"}
     assert all(r.data.params.get("forecast_steps") == str(F) for r in runs)
+
+    # ...but the HORIZON is not a scoring-time knob: the trained head emits F
+    # steps per channel, so scoring the same model under a different
+    # forecast_steps must be refused rather than silently compared against
+    # differently-shaped targets (docs/reviews/021, item A1).
+    settings_wrong_h = settings.model_copy(update={
+        "model": settings.model.model_copy(update={"forecast_steps": F - 1})
+    })
+    with pytest.raises(ValueError, match="forecast_steps"):
+        score_channel(settings_wrong_h, mission, channel)
+    # The guard must fire BEFORE inference — no extra scoring run was created.
+    runs_after = client.search_runs([exp.experiment_id])
+    assert len(runs_after) == len(runs)
 
 
 @pytest.mark.slow

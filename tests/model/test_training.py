@@ -281,6 +281,11 @@ def test_train_channel_registers_model_version(
     model_name = registered_model_name(settings.model.model_type, fx.mission, fx.channel)
     versions = list(client.search_model_versions(f"name='{model_name}'"))
     assert len(versions) >= 1, f"no registered versions found for {model_name!r}"
+    # forecast_steps must be mirrored onto the VERSION, not only the run:
+    # load_model_contract falls back to version tags for versions whose run
+    # link is missing, and a missing tag there would silently report H=1 —
+    # scoring would then accept an H=10 model under H=1 settings.
+    assert versions[0].tags.get("forecast_steps") == str(settings.model.forecast_steps)
 
 
 @pytest.mark.slow

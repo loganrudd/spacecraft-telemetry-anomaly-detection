@@ -352,6 +352,128 @@ def test_load_model_for_scoring_without_champion_loads_latest(_mlflow_uri: str) 
 
 
 # ---------------------------------------------------------------------------
+# load_model_contract — what the model was TRAINED with (docs/reviews/021, 2.1)
+# ---------------------------------------------------------------------------
+
+
+def _register_model(
+    tracking_uri: str,
+    name: str,
+    *,
+    window_size: int = 20,
+    forecast_steps: int | None = None,
+    channels: list[str] | None = None,
+    version_tags: dict[str, str] | None = None,
+) -> None:
+    """Register one model version, logging the contract the way training does.
+
+    ``forecast_steps=None`` / ``channels=None`` omit the entries entirely,
+    reproducing a pre-021.7 / pre-021 model version rather than writing a
+    default — the point of the absent-key tests is that those versions exist
+    in the real registry and must keep loading.
+    """
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, window_size=window_size)
+    model = build_model(cfg)
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(f"test-training-{name}")
+    run_tags = {"channels": ",".join(channels)} if channels else {}
+    with mlflow.start_run(tags=run_tags):
+        mlflow.log_param("window_size", str(window_size))
+        if forecast_steps is not None:
+            mlflow.log_param("forecast_steps", str(forecast_steps))
+        mlflow.pytorch.log_model(
+            pytorch_model=model, artifact_path="model", registered_model_name=name
+        )
+    if version_tags:
+        client = mlflow.MlflowClient(tracking_uri)
+        for k, v in version_tags.items():
+            client.set_model_version_tag(name, "1", k, v)
+
+
+def test_load_model_contract_round_trips_group_and_horizon(_mlflow_uri: str) -> None:
+    """A multivariate H=10 model must report back exactly what it trained on."""
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    group = ["channel_41", "channel_42", "channel_43"]
+    _register_model(
+        _mlflow_uri, "contract-mv", window_size=20, forecast_steps=10, channels=group
+    )
+
+    contract = load_model_contract("contract-mv", _mlflow_uri)
+
+    assert contract.window_size == 20
+    assert contract.forecast_steps == 10
+    assert contract.channels == tuple(group)
+
+
+def test_load_model_contract_preserves_channel_ORDER(_mlflow_uri: str) -> None:
+    """Order is the contract, not membership — a reordered group is a
+    different model (docs/plans/021: a silent reorder is 'catastrophic')."""
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    group = ["channel_43", "channel_41", "channel_42"]
+    _register_model(_mlflow_uri, "contract-order", forecast_steps=3, channels=group)
+
+    assert load_model_contract("contract-order", _mlflow_uri).channels == tuple(group)
+
+
+def test_load_model_contract_defaults_for_pre_021_version(_mlflow_uri: str) -> None:
+    """A version with neither key is a genuinely H=1 univariate model — it must
+    keep loading, and describe itself accurately."""
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    _register_model(_mlflow_uri, "contract-legacy", window_size=250)
+
+    contract = load_model_contract("contract-legacy", _mlflow_uri)
+
+    assert contract.window_size == 250
+    assert contract.forecast_steps == 1
+    assert contract.channels is None
+
+
+def test_load_model_contract_falls_back_to_version_tags(_mlflow_uri: str) -> None:
+    """Version tags are the second source, for versions whose run link is
+    missing — the same dual-sourcing window_size already relies on."""
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    _register_model(
+        _mlflow_uri,
+        "contract-vtags",
+        window_size=20,
+        version_tags={"forecast_steps": "7", "channels": "channel_1,channel_2"},
+    )
+
+    contract = load_model_contract("contract-vtags", _mlflow_uri)
+
+    assert contract.forecast_steps == 7
+    assert contract.channels == ("channel_1", "channel_2")
+
+
+def test_load_model_contract_raises_when_no_version(_mlflow_uri: str) -> None:
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    with pytest.raises(ModelNotFoundError, match="No registered versions found"):
+        load_model_contract("contract-missing", _mlflow_uri)
+
+
+def test_load_model_contract_agrees_with_load_model_for_scoring(_mlflow_uri: str) -> None:
+    """The two functions must describe the SAME version — they share
+    _resolve_model_version precisely so this cannot drift."""
+    from spacecraft_telemetry.model.io import load_model_contract
+
+    _register_model(_mlflow_uri, "contract-agree", window_size=20, forecast_steps=4)
+
+    _model, window_size = load_model_for_scoring(
+        "contract-agree", torch.device("cpu"), _mlflow_uri, require_champion=False
+    )
+    assert load_model_contract("contract-agree", _mlflow_uri).window_size == window_size
+
+
+# ---------------------------------------------------------------------------
 # load_scoring_params — reads threshold hyperparams from the scoring run
 # ---------------------------------------------------------------------------
 

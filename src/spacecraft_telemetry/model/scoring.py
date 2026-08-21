@@ -457,6 +457,64 @@ def _score_series(
     return metrics, smoothed, threshold
 
 
+def _check_training_contract(
+    contract: Any,
+    cfg: ModelConfig,
+    name: str,
+) -> None:
+    """Refuse to score a model under a configuration it was not trained with.
+
+    ``window_size`` has been guarded at this boundary since Phase 3; plan 021
+    introduced two more attributes with exactly the same property — get them
+    wrong and inference still *runs*, producing a plausible number that means
+    nothing:
+
+    - ``forecast_steps`` decides the dataloader's target geometry and the
+      model head's output rank. Scoring an H=10 model under H=1 settings
+      compares a (C, 10) head's output against 1-step targets.
+    - ``input_channels`` ORDER decides which output column is which channel.
+      A reorder mislabels every per-channel metric while every shape still
+      matches — plan 021 calls this "a catastrophic, silent failure mode."
+
+    Order-sensitivity is the point: train and score both derive the group from
+    channels.csv today, so the orders agree by construction. This guard is what
+    makes that a guarantee instead of a coincidence.
+
+    Args:
+        contract: model.io.ModelContract for the version just loaded.
+        cfg:      The ModelConfig scoring is about to run with.
+        name:     Registered model name, for the error message.
+
+    Raises:
+        ValueError: On any mismatch, before inference runs.
+    """
+    if cfg.forecast_steps != contract.forecast_steps:
+        raise ValueError(
+            f"settings.model.forecast_steps={cfg.forecast_steps} does not match the "
+            f"value model {name!r} was trained with "
+            f"(forecast_steps={contract.forecast_steps}). The forecast head emits "
+            f"{contract.forecast_steps} step(s) per channel, so scoring under a "
+            "different horizon compares predictions against the wrong targets. "
+            "Set SPACECRAFT_MODEL__FORECAST_STEPS to the trained value, or re-train."
+        )
+
+    # A version registered before plan 021 carries no `channels`, which is an
+    # accurate statement that it is univariate — not missing metadata. Scoring
+    # such a model univariately (input_channels unset) is correct and must keep
+    # working; scoring it as a GROUP is the mismatch worth catching.
+    trained_group = list(contract.channels) if contract.channels else None
+    configured_group = list(cfg.input_channels) if cfg.input_channels else None
+    if trained_group != configured_group:
+        raise ValueError(
+            f"settings.model.input_channels={configured_group} does not match the "
+            f"channel group model {name!r} was trained on ({trained_group}). "
+            "This comparison is ORDER-SENSITIVE: the model's output columns are "
+            "positional, so a reordered group would silently attribute every "
+            "channel's errors to the wrong channel. Score with the trained order, "
+            "or re-train on the order you want."
+        )
+
+
 def score_channel(
     settings: Settings,
     mission: str,
@@ -531,6 +589,7 @@ def score_channel(
     from spacecraft_telemetry.model.device import resolve_device
     from spacecraft_telemetry.model.io import (
         errors_to_bytes,
+        load_model_contract,
         load_model_for_scoring,
         threshold_to_bytes,
     )
@@ -557,6 +616,9 @@ def score_channel(
             f"value the model was trained on (window_size={saved_window_size}). "
             "Re-train with consistent settings."
         )
+    _check_training_contract(
+        load_model_contract(name, settings.mlflow.tracking_uri), cfg, name
+    )
     log.info("model.score.model_loaded", channel=channel)
 
     loader, _target_timestamps, is_anomaly = make_test_dataloader(
