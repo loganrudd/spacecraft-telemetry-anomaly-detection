@@ -406,11 +406,34 @@ def main() -> None:
                 # otherwise use the settings default, producing a different
                 # array for which the chosen (z, floor) was never evaluated.
                 "error_smoothing_window": smoothing_window,
+                # Schema shared with ray_fanout.tune's Ray Tune writer — see
+                # write_tuned_configs' docstring (docs/plans/022, stage 022.2).
                 "_meta": {
-                    "seg_f0_5": best_score,
-                    "source": f"scripts/threshold_ceiling.py exhaustive grid ({args.objective})",
+                    "provenance": "exhaustive_grid",
+                    "source": (
+                        f"scripts/threshold_ceiling.py exhaustive grid ({args.objective})"
+                    ),
+                    # No HPO run backs a grid-selected config — fabricating an
+                    # id would corrupt the tuned_from_run lineage tag.
+                    "run_id": None,
+                    "objective_name": (
+                        "mission_corrected_event_wise_f0_5"
+                        if args.objective == "mission"
+                        else "mean_per_channel_seg_f0_5"
+                    ),
+                    "objective_value": best_score,
                     "selected_on": args.select_on,
-                    "objective": args.objective,
+                    "hpo_eval_fraction": settings.tune.hpo_eval_fraction,
+                    "outer_split": "chronological_50_50",
+                    "error_smoothing_window": smoothing_window,
+                    "threshold_window": threshold_window,
+                    "min_run_length": min_run_length,
+                    "axes": {"threshold_z": z_values, "min_error_value": floor_values},
+                    # This hand-driven CLI has no widening driver yet
+                    # (docs/plans/022, stage 022.1) — a manually re-run grid
+                    # is not a recorded expansion.
+                    "expansions": 0,
+                    "interior": not report["is_lower_bound"],
                 },
             }
         }
