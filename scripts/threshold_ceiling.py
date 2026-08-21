@@ -213,6 +213,14 @@ def main() -> None:
         "metric you intend to report.",
     )
     p.add_argument("--out", default=None, metavar="JSON")
+    p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the local artifact cache (model.io.download_artifact_bytes) "
+        "entirely — re-fetches every errors.npy over the network. Use to "
+        "re-validate a suspected-poisoned cache, or to re-run the byte-identity "
+        "check that validates the cache against an uncached run.",
+    )
     args = p.parse_args()
 
     if args.emit_tuned_configs and args.select_on != "hpo_portion":
@@ -286,7 +294,10 @@ def main() -> None:
         client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         params = client.get_run(run_id).data.params
         smoothed = bytes_to_errors(
-            download_artifact_bytes(run_id, errors_artifact, settings.mlflow.tracking_uri)
+            download_artifact_bytes(
+                run_id, errors_artifact, settings.mlflow.tracking_uri,
+                use_cache=not args.no_cache,
+            )
         )
         metadata = load_series_metadata(
             settings.preprocess.processed_data_dir, args.mission, channel, "test",

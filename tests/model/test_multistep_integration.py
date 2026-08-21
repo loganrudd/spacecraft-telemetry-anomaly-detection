@@ -160,10 +160,14 @@ def test_multistep_multivariate_train_then_score(
 
     for channel in _CHANNELS:
         errors = bytes_to_errors(
-            download_artifact_bytes(run_id, f"errors/{channel}.npy", mlflow_uri)
+            download_artifact_bytes(
+                run_id, f"errors/{channel}.npy", mlflow_uri, use_cache=False
+            )
         )
         threshold = bytes_to_errors(
-            download_artifact_bytes(run_id, f"threshold/{channel}.npy", mlflow_uri)
+            download_artifact_bytes(
+                run_id, f"threshold/{channel}.npy", mlflow_uri, use_cache=False
+            )
         )
         assert errors.ndim == 1, (
             f"{channel}: saved errors are {errors.shape}, not collapsed to one "

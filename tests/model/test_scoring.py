@@ -1159,7 +1159,7 @@ def test_score_channel_errors_npy_unaffected_by_eval_split(
     run_full = find_latest_run_for_channel(scoring_exp, fx.channel, mlflow_uri)
     assert run_full is not None, "No scoring run for full_test found in MLflow"
     errors_full = bytes_to_errors(
-        download_artifact_bytes(run_full.info.run_id, "errors.npy", mlflow_uri)
+        download_artifact_bytes(run_full.info.run_id, "errors.npy", mlflow_uri, use_cache=False)
     )
 
     score_channel(settings, fx.mission, fx.channel, eval_split="final_portion")
@@ -1170,7 +1170,7 @@ def test_score_channel_errors_npy_unaffected_by_eval_split(
         "Expected a new run to be created for final_portion scoring"
     )
     errors_final = bytes_to_errors(
-        download_artifact_bytes(run_final.info.run_id, "errors.npy", mlflow_uri)
+        download_artifact_bytes(run_final.info.run_id, "errors.npy", mlflow_uri, use_cache=False)
     )
 
     np.testing.assert_array_equal(

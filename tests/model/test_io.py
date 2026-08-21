@@ -113,11 +113,13 @@ def _log_artifact_in_run(tracking_uri: str, channel: str, artifact_name: str, da
     return run.info.run_id
 
 
-def test_download_artifact_bytes_retrieves_data(_mlflow_uri: str) -> None:
+def test_download_artifact_bytes_retrieves_data(_mlflow_uri: str, tmp_path: Path) -> None:
     """download_artifact_bytes must return the exact bytes that were logged."""
     payload = b"hello artifact"
     run_id = _log_artifact_in_run(_mlflow_uri, "channel_1", "test.bin", payload)
-    result = download_artifact_bytes(run_id, "test.bin", _mlflow_uri)
+    result = download_artifact_bytes(
+        run_id, "test.bin", _mlflow_uri, cache_dir=tmp_path / "cache"
+    )
     assert result == payload
 
 
@@ -165,7 +167,9 @@ def test_download_artifact_bytes_reads_directly_from_gs(
 
     monkeypatch.setattr("spacecraft_telemetry.core.paths.to_upath", _fake_to_upath)
 
-    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", use_cache=False
+    )
 
     assert result == b"gcs-bytes"
     assert captured["value"] == "gs://bucket/mlflow/1/run123/artifacts/errors.npy"
@@ -199,9 +203,146 @@ def test_download_artifact_bytes_falls_back_to_proxy_for_non_gs_uri(
 
     monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
 
-    result = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", use_cache=False
+    )
 
     assert result == b"proxied-bytes"
+
+
+# ---------------------------------------------------------------------------
+# download_artifact_bytes' local cache (docs/plans/022, stage 022.3)
+# ---------------------------------------------------------------------------
+
+
+class _FakeGsInfo:
+    artifact_uri = "gs://bucket/mlflow/1/run123/artifacts"
+
+
+class _FakeGsRun:
+    info = _FakeGsInfo()
+
+
+def _patch_gs_fetch(monkeypatch: pytest.MonkeyPatch, data: bytes) -> dict[str, int]:
+    """Patch the network fetch path to return ``data``; return a call counter."""
+    import mlflow
+
+    calls = {"get_run": 0}
+
+    class _FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            del tracking_uri
+
+        def get_run(self, run_id: str) -> _FakeGsRun:
+            del run_id
+            calls["get_run"] += 1
+            return _FakeGsRun()
+
+    class _FakeUPath:
+        def read_bytes(self) -> bytes:
+            return data
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _FakeClient)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.core.paths.to_upath", lambda _value: _FakeUPath()
+    )
+    return calls
+
+
+def test_artifact_cache_miss_fetches_and_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cold cache fetches over the network and populates the cache file."""
+    calls = _patch_gs_fetch(monkeypatch, b"fresh-bytes")
+    cache_dir = tmp_path / "cache"
+
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert result == b"fresh-bytes"
+    assert calls["get_run"] == 1
+    cached_file = cache_dir / "run123" / "errors.npy"
+    assert cached_file.read_bytes() == b"fresh-bytes"
+
+
+def test_artifact_cache_hit_never_touches_the_network(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A warm cache must not construct an MlflowClient at all."""
+    import mlflow
+
+    cache_dir = tmp_path / "cache"
+    cached_file = cache_dir / "run123" / "errors.npy"
+    cached_file.parent.mkdir(parents=True)
+    cached_file.write_bytes(b"cached-bytes")
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("MlflowClient must not be constructed on a cache hit")
+
+    monkeypatch.setattr(mlflow, "MlflowClient", _raise)
+
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert result == b"cached-bytes"
+
+
+def test_artifact_cache_second_call_is_a_hit_and_matches_the_first(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: miss then hit return identical bytes, and only the first fetches."""
+    calls = _patch_gs_fetch(monkeypatch, b"identical-bytes")
+    cache_dir = tmp_path / "cache"
+
+    first = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+    second = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert first == second == b"identical-bytes"
+    assert calls["get_run"] == 1, "second call should have been served from the cache"
+
+
+def test_no_cache_bypasses_both_read_and_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """use_cache=False ignores a stale cache entry and does not overwrite it."""
+    calls = _patch_gs_fetch(monkeypatch, b"fresh-bytes")
+    cache_dir = tmp_path / "cache"
+    cached_file = cache_dir / "run123" / "errors.npy"
+    cached_file.parent.mkdir(parents=True)
+    cached_file.write_bytes(b"stale-bytes")
+
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app",
+        use_cache=False, cache_dir=cache_dir,
+    )
+
+    assert result == b"fresh-bytes"
+    assert calls["get_run"] == 1
+    assert cached_file.read_bytes() == b"stale-bytes", "bypass must not overwrite the cache"
+
+
+def test_env_var_disables_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """SPACECRAFT_ARTIFACT_CACHE=0 is the same escape hatch as use_cache=False."""
+    monkeypatch.setenv("SPACECRAFT_ARTIFACT_CACHE", "0")
+    calls = _patch_gs_fetch(monkeypatch, b"fresh-bytes")
+    cache_dir = tmp_path / "cache"
+    cached_file = cache_dir / "run123" / "errors.npy"
+    cached_file.parent.mkdir(parents=True)
+    cached_file.write_bytes(b"stale-bytes")
+
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert result == b"fresh-bytes"
+    assert calls["get_run"] == 1
+    assert cached_file.read_bytes() == b"stale-bytes"
 
 
 def test_find_latest_run_for_channel_returns_most_recent(_mlflow_uri: str) -> None:

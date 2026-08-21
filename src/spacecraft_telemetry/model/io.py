@@ -206,10 +206,31 @@ def read_artifact_bytes(path: str) -> bytes:
     return p.read_bytes()
 
 
+# docs/plans/022, stage 022.3: MLflow run artifacts are immutable once
+# written, so (run_id, artifact_path) is a genuinely content-stable cache
+# key. Lives here — not in scripts/threshold_ceiling.py — because this
+# function is the single funnel every error-array read passes through
+# (.claude/rules/pytorch.md names model.io as *the* I/O indirection point);
+# caching anywhere else would leave other callers uncached.
+_DEFAULT_ARTIFACT_CACHE_ROOT = Path(".cache/artifacts")
+
+
+def _artifact_cache_enabled() -> bool:
+    """SPACECRAFT_ARTIFACT_CACHE=0 is the environment-variable escape hatch
+    (alongside download_artifact_bytes' use_cache=False parameter) — see its
+    docstring."""
+    import os
+
+    return os.environ.get("SPACECRAFT_ARTIFACT_CACHE", "1") != "0"
+
+
 def download_artifact_bytes(
     run_id: str,
     artifact_path: str,
     tracking_uri: str,
+    *,
+    use_cache: bool = True,
+    cache_dir: str | Path | None = None,
 ) -> bytes:
     """Download a named artifact from an MLflow run and return its raw bytes.
 
@@ -225,10 +246,24 @@ def download_artifact_bytes(
     scheme (e.g. local ``file://`` runs used in tests, or a genuinely proxied
     store) — same behaviour as before this optimisation.
 
+    A local cache sits in front of the network fetch, keyed on
+    ``(run_id, artifact_path)`` under ``cache_dir``
+    (``.cache/artifacts/{run_id}/{artifact_path}`` by default, gitignored).
+    Read-path only: a cache hit returns exactly the bytes a prior fetch wrote,
+    so no computed number can change — see scripts/threshold_ceiling.py's
+    byte-identity gate (docs/plans/022, stage 022.3).
+
     Args:
         run_id:        MLflow run ID.
         artifact_path: Path within the run's artifact store, e.g. "errors.npy".
         tracking_uri:  MLflow tracking server URI.
+        use_cache:     Check/populate the local cache. Set False (or the
+            ``SPACECRAFT_ARTIFACT_CACHE=0`` environment variable, checked when
+            this is True) to bypass it entirely — the escape hatch for
+            re-validating a suspected-poisoned cache.
+        cache_dir:     Cache root directory. Defaults to
+            :data:`_DEFAULT_ARTIFACT_CACHE_ROOT` relative to the current
+            working directory.
 
     Returns:
         Raw bytes of the artifact.
@@ -236,6 +271,24 @@ def download_artifact_bytes(
     Raises:
         OSError: If the artifact cannot be downloaded.
     """
+    enabled = use_cache and _artifact_cache_enabled()
+    root = Path(cache_dir) if cache_dir is not None else _DEFAULT_ARTIFACT_CACHE_ROOT
+    cached_path = root / run_id / artifact_path
+
+    if enabled and cached_path.exists():
+        return cached_path.read_bytes()
+
+    data = _fetch_artifact_bytes(run_id, artifact_path, tracking_uri)
+
+    if enabled:
+        cached_path.parent.mkdir(parents=True, exist_ok=True)
+        cached_path.write_bytes(data)
+
+    return data
+
+
+def _fetch_artifact_bytes(run_id: str, artifact_path: str, tracking_uri: str) -> bytes:
+    """The uncached network fetch behind download_artifact_bytes' cache."""
     import mlflow
 
     from spacecraft_telemetry.core.paths import to_upath
