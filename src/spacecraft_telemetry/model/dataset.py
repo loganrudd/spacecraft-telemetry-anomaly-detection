@@ -194,6 +194,23 @@ def load_series_metadata(
 # that is a finding, not a detail."
 _ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
 
+# Upper bound on a multivariate group (docs/reviews/021, item A4).
+#
+# _align_multi_channel materialises ALL C channels densely: peak memory is
+# roughly C * N * 17 bytes (float32 values + int32 segment ids + bool flags)
+# plus the DatetimeIndex overhead of the join. Measured ~800 MB for 6 channels
+# x 7.7 M rows, i.e. ~130 MB per channel at ESA-Mission1 scale — so 32
+# channels is already ~4 GB, at the ceiling of a small worker, and passing a
+# whole ~100-channel mission as one group would need ~13 GB.
+#
+# Nothing bounded this before. Subsystem-sized groups (6-30 channels, see
+# ray_fanout/tune.py) fit under the limit, so the guard exists to catch the
+# pathological call — a whole mission handed in as one group — rather than to
+# constrain normal use. Note a subsystem at the TOP of that documented range
+# is already near the limit; raise this deliberately (and size the worker to
+# match) rather than by reflex if a legitimate group ever exceeds it.
+_MAX_MULTIVARIATE_CHANNELS = 32
+
 
 def _joint_segment_ids(
     per_channel_segment_ids: np.ndarray[Any, np.dtype[np.int32]],
@@ -232,6 +249,7 @@ def _align_multi_channel(
         ]
     ],
     channels: list[str],
+    max_channels: int = _MAX_MULTIVARIATE_CHANNELS,
 ) -> tuple[
     np.ndarray[Any, np.dtype[np.float32]],
     np.ndarray[Any, np.dtype[np.int32]],
@@ -254,9 +272,27 @@ def _align_multi_channel(
                                        so callers can report per-channel recall.
         timestamps:  (N,) datetime64[ns] — the aligned, sorted timestamp index.
 
+    Args:
+        max_channels: Refuse groups larger than this — see
+            _MAX_MULTIVARIATE_CHANNELS for the memory arithmetic. An OOM on a
+            spot worker is an expensive and confusing way to discover the
+            limit; this fails immediately with the number that was asked for.
+
     Raises:
-        ValueError: If the intersection is empty.
+        ValueError: If the group exceeds ``max_channels``, or the intersection
+            is empty.
     """
+    if len(channels) > max_channels:
+        raise ValueError(
+            f"Multivariate group has {len(channels)} channels, above the "
+            f"max_channels={max_channels} limit. _align_multi_channel "
+            "materialises every channel densely (~130 MB per channel at "
+            f"ESA-Mission1 scale), so this group would need roughly "
+            f"{len(channels) * 130 / 1024:.1f} GB and is likely to OOM the "
+            "worker. Group by subsystem rather than passing a whole mission, "
+            "or raise max_channels deliberately and size the worker to match."
+        )
+
     indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
     common = indices[0]
     for idx in indices[1:]:

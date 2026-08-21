@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -609,6 +610,57 @@ def test_align_multi_channel_zero_overlap_raises() -> None:
     ch_b = (zeros_f32, zeros_i32, zeros_bool, ts_b)
     with pytest.raises(ValueError, match="No overlapping timestamps"):
         _align_multi_channel([ch_a, ch_b], ["a", "b"])
+
+
+class TestMultivariateGroupSizeGuard:
+    """docs/reviews/021 item A4 — nothing bounded the group size.
+
+    _align_multi_channel materialises all C channels densely; a whole mission
+    passed as one group would need ~13 GB. An OOM on a spot worker is an
+    expensive way to learn that, so the group size is checked up front.
+    """
+
+    @staticmethod
+    def _channels(n: int) -> tuple[list[Any], list[str]]:
+        ts = np.array([0, 60, 120], dtype="datetime64[s]")
+        one = (
+            np.zeros(3, dtype=np.float32),
+            np.zeros(3, dtype=np.int32),
+            np.zeros(3, dtype=bool),
+            ts,
+        )
+        return [one] * n, [f"channel_{i}" for i in range(n)]
+
+    def test_group_at_the_limit_is_accepted(self) -> None:
+        """The boundary is inclusive — a group exactly at the limit must not
+        be refused, or the documented maximum is off by one."""
+        from spacecraft_telemetry.model.dataset import _MAX_MULTIVARIATE_CHANNELS
+
+        per_channel, names = self._channels(_MAX_MULTIVARIATE_CHANNELS)
+        values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
+        assert values.shape == (3, _MAX_MULTIVARIATE_CHANNELS)
+
+    def test_group_above_the_limit_raises_with_the_size_and_the_remedy(self) -> None:
+        from spacecraft_telemetry.model.dataset import _MAX_MULTIVARIATE_CHANNELS
+
+        n = _MAX_MULTIVARIATE_CHANNELS + 1
+        per_channel, names = self._channels(n)
+        with pytest.raises(ValueError, match=rf"{n} channels, above the") as exc:
+            _align_multi_channel(per_channel, names)
+        # The message must name the remedy, not just the rule.
+        assert "Group by subsystem" in str(exc.value)
+
+    def test_limit_is_overridable_for_a_deliberate_large_group(self) -> None:
+        per_channel, names = self._channels(3)
+        with pytest.raises(ValueError, match="above the max_channels=2"):
+            _align_multi_channel(per_channel, names, max_channels=2)
+
+    def test_six_channel_path_is_untouched(self) -> None:
+        """The size plan 021 actually runs — pinned so tightening the limit
+        later cannot silently break the published configuration."""
+        per_channel, names = self._channels(6)
+        values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
+        assert values.shape == (3, 6)
 
 
 def test_load_multichannel_series_parquet_missing_channel_raises(tmp_path: Path) -> None:

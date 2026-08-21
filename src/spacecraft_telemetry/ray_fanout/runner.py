@@ -81,6 +81,42 @@ _TUNABLE_SCORING_FIELDS = frozenset(
 )
 
 
+def _tuned_meta(entry: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    """Read ``(hpo_run_id, tuned_source)`` out of a tuned_configs entry's ``_meta``.
+
+    Both fan-outs (score_all_channels and score_all_subsystems) need this, and
+    both had their own copy — the subsystem one carrying a comment reading
+    "See _get_tuned_source in score_all_channels", which is an acknowledgement
+    of the duplication rather than a fix (docs/reviews/021, item B4).
+
+    The two fields are deliberately independent, not alternatives:
+
+    - ``run_id`` is present when a Ray Tune trial produced the config, and
+      becomes score_channel's ``parent_hpo_run_id`` (the ``tuned_from_run``
+      lineage tag).
+    - ``source`` is present when an exhaustive grid produced it
+      (scripts/threshold_ceiling.py), which has NO HPO run to point at —
+      fabricating one would corrupt the lineage tag.
+
+    A run carrying neither tag is read downstream as an untuned Hundman-defaults
+    baseline, which is why a grid-produced config must still carry provenance:
+    otherwise esa_adb's report files it as the protocol-matched untuned row.
+
+    Returns ``(None, None)`` for a missing or malformed ``_meta``.
+    """
+    if not entry:
+        return None, None
+    meta = entry.get("_meta")
+    if not isinstance(meta, dict):
+        return None, None
+    run_id = meta.get("run_id")
+    source = meta.get("source")
+    return (
+        str(run_id) if run_id is not None else None,
+        str(source) if source is not None else None,
+    )
+
+
 def discover_channels(settings: Settings, mission: str) -> list[str]:
     """Return sorted channel IDs found in the preprocessed train output for a mission.
 
@@ -330,38 +366,18 @@ def score_all_channels(
             settings_refs[subsystem] = ray.put(tuned_settings)
         return settings_refs[subsystem]
 
-    def _get_meta(channel: str) -> dict[str, Any] | None:
+    def _channel_meta(channel: str) -> tuple[str | None, str | None]:
+        """(hpo_run_id, tuned_source) for this channel's subsystem entry.
+
+        Only the channel->subsystem indirection is local; the ``_meta`` reading
+        itself is shared with score_all_subsystems via _tuned_meta.
+        """
         if not tuned_configs:
-            return None
+            return None, None
         subsystem = ch_to_sub.get(channel)
         if not subsystem:
-            return None
-        meta = tuned_configs.get(subsystem, {}).get("_meta")
-        return meta if isinstance(meta, dict) else None
-
-    def _get_hpo_run_id(channel: str) -> str | None:
-        """Return the HPO MLflow run_id for this channel's subsystem, or None."""
-        meta = _get_meta(channel)
-        if not meta:
-            return None
-        run_id = meta.get("run_id")
-        return str(run_id) if run_id is not None else None
-
-    def _get_tuned_source(channel: str) -> str | None:
-        """Provenance for tuned params with no HPO run behind them.
-
-        A config produced by an exhaustive grid (scripts/threshold_ceiling.py)
-        carries `_meta.source` but deliberately no `_meta.run_id` — there is no
-        Ray Tune run to point at, and fabricating one would corrupt the
-        tuned_from_run lineage. Without this the resulting scoring run carries
-        NEITHER tag and is indistinguishable from a Hundman-defaults baseline,
-        so esa_adb's report would file it as the protocol-matched untuned row.
-        """
-        meta = _get_meta(channel)
-        if not meta:
-            return None
-        source = meta.get("source")
-        return str(source) if source is not None else None
+            return None, None
+        return _tuned_meta(tuned_configs.get(subsystem))
 
     # eval_split (default "final_portion") selects which temporal slice the
     # reported metrics cover. "final_portion" is the held-out last 40%: HPO only
@@ -382,13 +398,15 @@ def score_all_channels(
         num_gpus=settings.ray.num_gpus_per_task,
         max_retries=settings.ray.max_retries,
     )
-    futures = [
-        score_task.remote(
-            _get_settings_ref(ch), mission, ch, eval_split, _get_hpo_run_id(ch), data_source,
-            _get_tuned_source(ch),
+    futures = []
+    for ch in work:
+        _hpo_run_id, _tuned_source = _channel_meta(ch)
+        futures.append(
+            score_task.remote(
+                _get_settings_ref(ch), mission, ch, eval_split, _hpo_run_id, data_source,
+                _tuned_source,
+            )
         )
-        for ch in work
-    ]
     results: list[dict[str, Any]] = ray.get(futures)
 
     n_ok = sum(1 for r in results if r["status"] == "ok")
@@ -572,20 +590,12 @@ def score_all_subsystems(
     for subsystem in subsystems:
         group_channels = groups[subsystem]
         overrides: dict[str, Any] = {}
-        hpo_run_id: str | None = None
-        tuned_source: str | None = None
         entry = (tuned_configs or {}).get(subsystem)
         if entry:
             overrides = {k: v for k, v in entry.items() if k in _TUNABLE_SCORING_FIELDS}
-            meta = entry.get("_meta")
-            if isinstance(meta, dict):
-                if meta.get("run_id") is not None:
-                    hpo_run_id = str(meta["run_id"])
-                # See _get_tuned_source in score_all_channels: a grid-produced
-                # config has provenance but no HPO run, and a run carrying
-                # neither tag reads as an untuned baseline downstream.
-                if meta.get("source") is not None:
-                    tuned_source = str(meta["source"])
+        # tuned_configs is already subsystem-keyed, so unlike score_all_channels
+        # there is no channel->subsystem indirection to do first.
+        hpo_run_id, tuned_source = _tuned_meta(entry)
         sub_settings = abs_settings.model_copy(
             update={
                 "model": abs_settings.model.model_copy(

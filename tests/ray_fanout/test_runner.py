@@ -431,3 +431,53 @@ def test_min_error_value_is_a_tunable_scoring_field() -> None:
 
     assert "min_error_value" in _TUNABLE_SCORING_FIELDS
     assert "prune_min_decrease" not in _TUNABLE_SCORING_FIELDS
+
+
+class TestTunedMeta:
+    """The `_meta` provenance reader, shared by both score fan-outs.
+
+    Extracted from two copies (docs/reviews/021 item B4) — the subsystem one
+    carried a comment pointing at the channel one, which acknowledged the
+    duplication rather than fixing it. Timed for extraction because plan 022.2b
+    adds provenance fields, which is now a one-place edit.
+    """
+
+    def test_reads_both_fields(self) -> None:
+        from spacecraft_telemetry.ray_fanout.runner import _tuned_meta
+
+        assert _tuned_meta({"_meta": {"run_id": "abc123", "source": "ray tune"}}) == (
+            "abc123",
+            "ray tune",
+        )
+
+    def test_grid_config_has_source_but_no_run_id(self) -> None:
+        """scripts/threshold_ceiling.py writes provenance with NO run_id —
+        there is no Ray Tune run to point at, and fabricating one would corrupt
+        the tuned_from_run lineage tag."""
+        from spacecraft_telemetry.ray_fanout.runner import _tuned_meta
+
+        run_id, source = _tuned_meta(
+            {"_meta": {"source": "scripts/threshold_ceiling.py exhaustive grid"}}
+        )
+        assert run_id is None
+        assert source == "scripts/threshold_ceiling.py exhaustive grid"
+
+    @pytest.mark.parametrize(
+        "entry",
+        [None, {}, {"threshold_z": 3.0}, {"_meta": None}, {"_meta": "not-a-dict"}],
+        ids=["none", "empty", "no-meta", "null-meta", "malformed-meta"],
+    )
+    def test_missing_or_malformed_meta_yields_no_provenance(self, entry: object) -> None:
+        """Absent provenance must degrade to (None, None) rather than raise —
+        an untuned channel is an ordinary case, not an error."""
+        from spacecraft_telemetry.ray_fanout.runner import _tuned_meta
+
+        assert _tuned_meta(entry) == (None, None)  # type: ignore[arg-type]
+
+    def test_values_are_coerced_to_str(self) -> None:
+        """score_channel writes these straight into MLflow tags, which are
+        strings — a numeric run_id from hand-edited JSON must not leak through
+        as an int."""
+        from spacecraft_telemetry.ray_fanout.runner import _tuned_meta
+
+        assert _tuned_meta({"_meta": {"run_id": 12345}}) == ("12345", None)
