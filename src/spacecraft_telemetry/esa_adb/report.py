@@ -140,7 +140,7 @@ FOOTNOTES = [
 ]
 
 
-def _hpo_cutoff(
+def hpo_cutoff(
     settings: Settings,
     mission: str,
     channels: list[str],
@@ -188,6 +188,15 @@ def _hpo_cutoff(
     return max(cutoffs)
 
 
+# Private alias, kept so nothing breaks mid-migration. This function has two
+# consumers OUTSIDE this module (ray_fanout/tune.py and
+# scripts/threshold_ceiling.py), which made a leading underscore a false
+# statement about its scope — a private name with external consumers is a
+# likely source of a future silent break. Rename only: no behaviour changed,
+# which is what keeps this inside plan 021's "esa_adb is frozen" rule.
+_hpo_cutoff = hpo_cutoff
+
+
 def tuned_eval_window(
     settings: Settings,
     mission: str,
@@ -199,16 +208,16 @@ def tuned_eval_window(
     """The held-out portion of ``timeline_full`` the "tuned" row is scored against.
 
     This is the leakage boundary: everything before the HPO cutoff (see
-    _hpo_cutoff) was used to select hyperparameters, so scoring against it
+    hpo_cutoff) was used to select hyperparameters, so scoring against it
     would contaminate every tuned number this report produces. Single source
     for both build_report() and scripts/diag_tp_duration.py, which must
     reproduce the exact same window to classify the same detections.
 
     Args:
-        metadata_by_channel: See _hpo_cutoff — preloaded per-channel arrays
+        metadata_by_channel: See hpo_cutoff — preloaded per-channel arrays
             to avoid re-reading the parquet partition.
     """
-    cutoff = _hpo_cutoff(settings, mission, channels, metadata_by_channel=metadata_by_channel)
+    cutoff = hpo_cutoff(settings, mission, channels, metadata_by_channel=metadata_by_channel)
     far_future = pd.Timestamp.max.tz_localize("UTC")
     return intersect(timeline_full, [(cutoff, far_future)])
 
@@ -302,7 +311,7 @@ def build_report(
 
     # Preloaded once per channel and threaded explicitly through every call
     # below that would otherwise re-read the same parquet partition
-    # (mission_timeline, _hpo_cutoff, and per_channel_detection_intervals for
+    # (mission_timeline, hpo_cutoff, and per_channel_detection_intervals for
     # both the untuned and tuned variants) — 4 reads per channel down to 1.
     # Deliberately NOT an lru_cache: at ~100-channel production scale, caching
     # full load_series_parquet() output (which also includes the large

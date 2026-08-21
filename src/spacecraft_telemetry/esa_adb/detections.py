@@ -33,6 +33,13 @@ from spacecraft_telemetry.model.io import (
     download_artifact_bytes,
     read_artifact_bytes,
 )
+
+# Aliased: channel_detection_intervals takes `errors_artifact` /
+# `threshold_artifact` as keyword PARAMETERS (callers pass them by name), so
+# importing the model.io helpers under their own names would shadow them
+# inside that function.
+from spacecraft_telemetry.model.io import errors_artifact as _errors_artifact
+from spacecraft_telemetry.model.io import threshold_artifact as _threshold_artifact
 from spacecraft_telemetry.model.scoring import flag_anomalies
 
 if TYPE_CHECKING:
@@ -218,10 +225,10 @@ def find_scoring_run_and_artifacts(
         )
         return (
             multivariate_run_id,
-            f"errors/{channel}.npy",
-            f"threshold/{channel}.npy",
+            _errors_artifact(channel),
+            _threshold_artifact(channel),
         )
-    return run_id, "errors.npy", "threshold.npy"
+    return run_id, _errors_artifact(), _threshold_artifact()
 
 
 def _true_runs(flags: np.ndarray[Any, Any]) -> list[tuple[int, int]]:
@@ -331,8 +338,8 @@ def channel_detection_intervals(
     run_id: str,
     *,
     metadata: SeriesMetadata | None = None,
-    errors_artifact: str = "errors.npy",
-    threshold_artifact: str = "threshold.npy",
+    errors_artifact: str | None = None,
+    threshold_artifact: str | None = None,
 ) -> list[Interval]:
     """Reconstruct one channel's flagged-anomaly intervals from a scoring run.
 
@@ -348,12 +355,18 @@ def channel_detection_intervals(
         metadata: See _intervals_from_arrays — preloaded (segment_ids,
             is_anomaly, timestamps) to avoid re-reading the parquet partition.
         errors_artifact / threshold_artifact: Artifact paths within the run.
-            Default to the univariate run-root arrays; a multivariate run
-            stores them per channel (``errors/{channel}.npy``) since one run
-            covers a whole subsystem group — see
-            find_scoring_run_and_artifacts.
+            ``None`` (the default) resolves to the univariate run-root arrays
+            via model.io; a multivariate run stores them per channel since one
+            run covers a whole subsystem group — see
+            find_scoring_run_and_artifacts, which supplies those paths from the
+            same model.io helpers the writer uses.
     """
     import mlflow
+
+    errors_path = errors_artifact if errors_artifact is not None else _errors_artifact()
+    threshold_path = (
+        threshold_artifact if threshold_artifact is not None else _threshold_artifact()
+    )
 
     tracking_uri = settings.mlflow.tracking_uri
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
@@ -363,9 +376,9 @@ def channel_detection_intervals(
     # behaviour those runs had, so the default reproduces them faithfully.
     min_error_value = float(run.data.params.get("min_error_value", 0.0))
 
-    smoothed = bytes_to_errors(download_artifact_bytes(run_id, errors_artifact, tracking_uri))
+    smoothed = bytes_to_errors(download_artifact_bytes(run_id, errors_path, tracking_uri))
     threshold = bytes_to_errors(
-        download_artifact_bytes(run_id, threshold_artifact, tracking_uri)
+        download_artifact_bytes(run_id, threshold_path, tracking_uri)
     )
 
     return _intervals_from_arrays(

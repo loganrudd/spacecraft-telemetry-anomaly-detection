@@ -87,12 +87,12 @@ def _sweep_mission(
 
     from spacecraft_telemetry.esa_adb.events import group_events, load_events
     from spacecraft_telemetry.esa_adb.intervals import intersect, subtract
-    from spacecraft_telemetry.esa_adb.report import _hpo_cutoff
+    from spacecraft_telemetry.esa_adb.report import hpo_cutoff
     from spacecraft_telemetry.esa_adb.timeline import mission_timeline
     from spacecraft_telemetry.model.dataset import window_target_timestamps
 
     timeline_full = mission_timeline(settings, mission, channels)
-    cutoff = _hpo_cutoff(settings, mission, channels)
+    cutoff = hpo_cutoff(settings, mission, channels)
     far_past = pd.Timestamp.min.tz_localize("UTC")
     if select_on == "hpo_portion":
         timeline = intersect(timeline_full, [(far_past, cutoff)])

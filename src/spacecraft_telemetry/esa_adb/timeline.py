@@ -96,7 +96,7 @@ def mission_timeline(
             shape — instead of re-reading the parquet partition (see
             esa_adb.report.build_report, docs/plans/019 P2/P3). is_anomaly is
             accepted but unused here; the shared shape lets one preload serve
-            mission_timeline, _hpo_cutoff, and detection reconstruction alike.
+            mission_timeline, hpo_cutoff, and detection reconstruction alike.
     """
     result: list[Interval] = []
     for channel in channels:

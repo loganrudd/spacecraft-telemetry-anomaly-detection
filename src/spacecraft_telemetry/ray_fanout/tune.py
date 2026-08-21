@@ -93,6 +93,7 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
+    errors_artifact,
     find_latest_run_by_tag,
     find_latest_run_for_channel,
 )
@@ -295,13 +296,13 @@ def _find_channel_errors_run(
         scoring_exp, channel, settings.mlflow.tracking_uri, extra_filter
     )
     if run is not None:
-        return run, "errors.npy"
+        return run, errors_artifact()
     with suppress(Exception):
         run = _find_multivariate_scoring_run(
             settings, mission, channel, scoring_exp, extra_filter
         )
         if run is not None:
-            return run, f"errors/{channel}.npy"
+            return run, errors_artifact(channel)
     return None
 
 
@@ -836,14 +837,14 @@ def run_hpo_sweep(
 
         from spacecraft_telemetry.esa_adb.events import group_events, load_events
         from spacecraft_telemetry.esa_adb.intervals import intersect as _intersect
-        from spacecraft_telemetry.esa_adb.report import _hpo_cutoff
+        from spacecraft_telemetry.esa_adb.report import hpo_cutoff
         from spacecraft_telemetry.esa_adb.timeline import mission_timeline as _mission_timeline
         from spacecraft_telemetry.model.dataset import (
             window_target_timestamps as _window_target_timestamps,
         )
 
         _timeline_full = _mission_timeline(settings_abs, mission, channels)
-        _cutoff = _hpo_cutoff(settings_abs, mission, channels)
+        _cutoff = hpo_cutoff(settings_abs, mission, channels)
         _far_past = pd.Timestamp.min.tz_localize("UTC")
         _timeline_hpo = _intersect(_timeline_full, [(_far_past, _cutoff)])
         _events_df = load_events(settings_abs, mission)

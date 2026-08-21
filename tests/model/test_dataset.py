@@ -441,7 +441,7 @@ def test_window_target_timestamps_from_metadata_matches_disk_read(
     Regression for docs/plans/019 P2/P3: esa_adb.report.build_report preloads
     (segment_ids, is_anomaly, timestamps) once per channel via
     load_series_metadata() and reuses them across mission_timeline,
-    _hpo_cutoff, and detection reconstruction instead of re-reading the
+    hpo_cutoff, and detection reconstruction instead of re-reading the
     partition each time — this must be a pure refactor with no behaviour
     change.
     """

@@ -338,7 +338,7 @@ class TestBuildReport:
     ) -> None:
         """Regression for P2/P3: the test partition must be read once per channel.
 
-        Before P2/P3, mission_timeline, _hpo_cutoff, and per-channel detection
+        Before P2/P3, mission_timeline, hpo_cutoff, and per-channel detection
         reconstruction (untuned + tuned) each independently re-read the full
         parquet partition — up to 4 reads per channel. build_report now
         preloads (segment_ids, is_anomaly, timestamps) once per channel via
@@ -348,7 +348,7 @@ class TestBuildReport:
         would fall back to if a caller forgot to pass metadata_by_channel
         through (esa_adb.timeline's own load_series_metadata reference, and
         the window_target_timestamps disk-reading path in both report.py's
-        _hpo_cutoff and detections.py's _intervals_from_arrays) — a single
+        hpo_cutoff and detections.py's _intervals_from_arrays) — a single
         counter shared across all of them, so a regression in any one of
         those call sites is caught, not just the top-level preload.
         """

@@ -588,9 +588,11 @@ def score_channel(
     from spacecraft_telemetry.model.dataset import make_test_dataloader
     from spacecraft_telemetry.model.device import resolve_device
     from spacecraft_telemetry.model.io import (
+        errors_artifact,
         errors_to_bytes,
         load_model_contract,
         load_model_for_scoring,
+        threshold_artifact,
         threshold_to_bytes,
     )
 
@@ -665,16 +667,18 @@ def score_channel(
                 errors[:, i], is_anomaly[:, i], cfg, eval_split, settings.tune.hpo_eval_fraction
             )
             metrics[ch] = ch_metrics
-            _artifact_writes.append((errors_to_bytes(ch_smoothed), f"errors/{ch}.npy"))
-            _artifact_writes.append((threshold_to_bytes(ch_threshold), f"threshold/{ch}.npy"))
+            _artifact_writes.append((errors_to_bytes(ch_smoothed), errors_artifact(ch)))
+            _artifact_writes.append(
+                (threshold_to_bytes(ch_threshold), threshold_artifact(ch))
+            )
     else:
         _flat_metrics, _smoothed, _threshold = _score_series(
             errors, is_anomaly, cfg, eval_split, settings.tune.hpo_eval_fraction
         )
         metrics.update(_flat_metrics)
         _artifact_writes = [
-            (errors_to_bytes(_smoothed), "errors.npy"),
-            (threshold_to_bytes(_threshold), "threshold.npy"),
+            (errors_to_bytes(_smoothed), errors_artifact()),
+            (threshold_to_bytes(_threshold), threshold_artifact()),
         ]
     _threshold_config_bytes = json.dumps(
         {"window": cfg.threshold_window, "z": cfg.threshold_z}, indent=2

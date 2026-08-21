@@ -352,6 +352,59 @@ def test_load_model_for_scoring_without_champion_loads_latest(_mlflow_uri: str) 
 
 
 # ---------------------------------------------------------------------------
+# Scoring-artifact layout (docs/reviews/021, item B1)
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactLayout:
+    """The writer and both readers must agree on where arrays live.
+
+    Before this, the two path strings were spelled independently in three
+    modules. A layout change would not have surfaced as a clean error:
+    esa_adb/detections.py falls into its `except RuntimeError` branch and
+    reports "searched for a multivariate scoring run and found none", pointing
+    at run discovery when only the naming moved.
+    """
+
+    def test_univariate_paths_are_the_pre_021_spellings(self) -> None:
+        """Pinned as literals — these name artifacts already in the registry,
+        so they are a storage format, not an implementation detail."""
+        from spacecraft_telemetry.model.io import errors_artifact, threshold_artifact
+
+        assert errors_artifact() == "errors.npy"
+        assert threshold_artifact() == "threshold.npy"
+
+    def test_multivariate_paths_are_nested_per_channel(self) -> None:
+        from spacecraft_telemetry.model.io import errors_artifact, threshold_artifact
+
+        assert errors_artifact("channel_41") == "errors/channel_41.npy"
+        assert threshold_artifact("channel_41") == "threshold/channel_41.npy"
+
+    def test_detections_reader_agrees_with_the_writer(self) -> None:
+        """esa_adb.detections resolves the multivariate paths through the same
+        helpers score_channel writes with."""
+        from spacecraft_telemetry.esa_adb import detections
+        from spacecraft_telemetry.model.io import errors_artifact, threshold_artifact
+
+        assert detections._errors_artifact is errors_artifact
+        assert detections._threshold_artifact is threshold_artifact
+
+    def test_tune_reader_agrees_with_the_writer(self) -> None:
+        from spacecraft_telemetry.model.io import errors_artifact
+        from spacecraft_telemetry.ray_fanout import tune
+
+        assert tune.errors_artifact is errors_artifact
+
+    def test_scoring_writes_through_the_helpers(self) -> None:
+        """No independent spelling survives in the writer — the rule
+        .claude/rules/pytorch.md states for all artifact I/O."""
+        source = Path("src/spacecraft_telemetry/model/scoring.py").read_text()
+        assert 'f"errors/{ch}.npy"' not in source
+        assert 'f"threshold/{ch}.npy"' not in source
+        assert '(errors_to_bytes(_smoothed), errors_artifact())' in source
+
+
+# ---------------------------------------------------------------------------
 # load_model_contract — what the model was TRAINED with (docs/reviews/021, 2.1)
 # ---------------------------------------------------------------------------
 

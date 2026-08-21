@@ -74,6 +74,38 @@ def bytes_to_errors(data: bytes) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Scoring-artifact layout — ONE definition (docs/reviews/021, item B1)
+# ---------------------------------------------------------------------------
+#
+# .claude/rules/pytorch.md mandates that artifact I/O funnel through model.io
+# so a layout change is a one-file change. These two path strings escaped that
+# rule and were spelled independently in three modules (scoring.py writes them,
+# esa_adb/detections.py and ray_fanout/tune.py read them). The failure mode is
+# not a clean error: detections.py falls into its `except RuntimeError` branch
+# and reports "searched for a multivariate scoring run and found none", which
+# points at run discovery when only the naming moved.
+
+
+def errors_artifact(channel: str | None = None) -> str:
+    """Artifact path of a scoring run's smoothed-error array.
+
+    ``channel=None`` is the univariate layout: one array at the run root.
+    A channel name gives the multivariate layout, where one run covers a whole
+    subsystem group and each member's array is stored separately.
+    """
+    return "errors.npy" if channel is None else f"errors/{channel}.npy"
+
+
+def threshold_artifact(channel: str | None = None) -> str:
+    """Artifact path of a scoring run's dynamic-threshold array.
+
+    Same univariate/multivariate split as :func:`errors_artifact`; the two
+    always move together, which is the reason they live side by side here.
+    """
+    return "threshold.npy" if channel is None else f"threshold/{channel}.npy"
+
+
+# ---------------------------------------------------------------------------
 # MLflow run lookup
 # ---------------------------------------------------------------------------
 
