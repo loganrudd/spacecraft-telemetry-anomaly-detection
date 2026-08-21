@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,10 @@ from spacecraft_telemetry.core.config import load_settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.esa_adb.detections import find_scoring_run_and_artifacts
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
-from spacecraft_telemetry.model.dataset import load_window_labels
+from spacecraft_telemetry.model.dataset import (
+    load_series_metadata,
+    load_window_labels_from_metadata,
+)
 from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
 from spacecraft_telemetry.ray_fanout.threshold_grid import (
     best_point,
@@ -65,6 +69,7 @@ def _sweep_mission(
     per_channel: dict[str, tuple[Any, Any]],
     eval_slice: slice,
     *,
+    metadata_by_channel: dict[str, Any],
     select_on: str,
     threshold_window: int,
     min_run_length: int,
@@ -82,6 +87,11 @@ def _sweep_mission(
     The timeline must match ``select_on``: scoring detections from the HPO
     portion against the FULL timeline would count the held-out portion's
     nominal time as un-alarmed, inflating TNR_t and therefore precision.
+
+    ``metadata_by_channel`` carries each channel's preloaded
+    (segment_ids, is_anomaly, timestamps) so the three derivations below —
+    timeline, HPO cutoff, target timestamps — reuse one read instead of
+    issuing three more (docs/reviews/021, item D1).
     """
     import pandas as pd
 
@@ -89,10 +99,14 @@ def _sweep_mission(
     from spacecraft_telemetry.esa_adb.intervals import intersect, subtract
     from spacecraft_telemetry.esa_adb.report import hpo_cutoff
     from spacecraft_telemetry.esa_adb.timeline import mission_timeline
-    from spacecraft_telemetry.model.dataset import window_target_timestamps
+    from spacecraft_telemetry.model.dataset import window_target_timestamps_from_metadata
 
-    timeline_full = mission_timeline(settings, mission, channels)
-    cutoff = hpo_cutoff(settings, mission, channels)
+    timeline_full = mission_timeline(
+        settings, mission, channels, metadata_by_channel=metadata_by_channel
+    )
+    cutoff = hpo_cutoff(
+        settings, mission, channels, metadata_by_channel=metadata_by_channel
+    )
     far_past = pd.Timestamp.min.tz_localize("UTC")
     if select_on == "hpo_portion":
         timeline = intersect(timeline_full, [(far_past, cutoff)])
@@ -107,7 +121,10 @@ def _sweep_mission(
     )
 
     channel_timestamps = {
-        channel: window_target_timestamps(settings, mission, channel) for channel in channels
+        channel: window_target_timestamps_from_metadata(
+            settings, *metadata_by_channel[channel]
+        )
+        for channel in channels
     }
     for channel, stamps in channel_timestamps.items():
         n = len(per_channel[channel][0])
@@ -235,6 +252,14 @@ def main() -> None:
     tuned = not args.untuned
 
     per_channel: dict[str, tuple[Any, Any]] = {}
+    # One parquet read per channel, reused by every downstream derivation.
+    # Previously this script read each channel's test partition FOUR times —
+    # load_window_labels here, plus mission_timeline, hpo_cutoff and
+    # window_target_timestamps inside _sweep_mission — even though all four
+    # derive from the same (segment_ids, is_anomaly, timestamps). The codebase
+    # already solved this for esa_adb.report (docs/plans/019 P2/P3); this
+    # script, written later, called the re-reading variants.
+    metadata_by_channel: dict[str, Any] = {}
     threshold_window: int | None = None
     min_run_length: int | None = None
     # Captured so --emit-tuned-configs can pin it. The grid sweeps a saved
@@ -243,14 +268,49 @@ def main() -> None:
     # otherwise fall back to the settings default (30), silently invalidating
     # the chosen (z, floor).
     smoothing_window: int | None = None
-    for channel in channels:
+
+    def _load_channel(channel: str) -> dict[str, Any]:
+        """Fetch one channel's errors + metadata. Pure I/O, no shared state.
+
+        Runs on a worker thread (see below), so it must not touch the
+        threshold_window/min_run_length/smoothing_window accumulators — those
+        are reconciled afterwards, in channel order, to keep the "first channel
+        wins, the rest must agree" semantics deterministic.
+        """
+        import mlflow
+
         run_id, errors_artifact, _threshold_artifact = find_scoring_run_and_artifacts(
             settings, args.mission, exp, channel, tuned=tuned
         )
-        import mlflow
-
         client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         params = client.get_run(run_id).data.params
+        smoothed = bytes_to_errors(
+            download_artifact_bytes(run_id, errors_artifact, settings.mlflow.tracking_uri)
+        )
+        metadata = load_series_metadata(
+            settings.preprocess.processed_data_dir, args.mission, channel, "test",
+            variant=settings.variant,
+        )
+        return {
+            "channel": channel,
+            "run_id": run_id,
+            "params": params,
+            "smoothed": smoothed,
+            "metadata": metadata,
+        }
+
+    # This tool is I/O-bound, not compute-bound: ~40-70 s of network per
+    # channel at 0.6-3% CPU, against a 4-7 min sweep (docs/reviews/021, D2).
+    # PyArrow and the GCS client both release the GIL, so threads recover most
+    # of the serial cost. ThreadPoolExecutor.map yields in SUBMISSION order, so
+    # `loaded` stays aligned with `channels` — completion order would silently
+    # attribute each channel's errors to a different channel.
+    with ThreadPoolExecutor(max_workers=min(6, len(channels))) as pool:
+        loaded = list(pool.map(_load_channel, channels))
+
+    for entry in loaded:
+        channel = entry["channel"]
+        params = entry["params"]
         # All channels in one arm share these; capture from the first and
         # verify the rest agree, so a mixed-config arm can't be averaged
         # together silently.
@@ -267,14 +327,13 @@ def main() -> None:
                 "Averaging across differing configs would not describe any single "
                 "achievable operating point."
             )
-        smoothed = bytes_to_errors(
-            download_artifact_bytes(run_id, errors_artifact, settings.mlflow.tracking_uri)
-        )
-        labels = load_window_labels(settings, args.mission, channel)
-        per_channel[channel] = (smoothed, labels)
+        metadata = entry["metadata"]
+        metadata_by_channel[channel] = metadata
+        labels = load_window_labels_from_metadata(settings, metadata[0], metadata[1])
+        per_channel[channel] = (entry["smoothed"], labels)
         log.info(
             "threshold_ceiling.channel_loaded",
-            channel=channel, run_id=run_id, n_windows=len(smoothed),
+            channel=channel, run_id=entry["run_id"], n_windows=len(entry["smoothed"]),
         )
 
     assert threshold_window is not None and min_run_length is not None
@@ -291,6 +350,7 @@ def main() -> None:
     if args.objective == "mission":
         grid = _sweep_mission(
             settings, args.mission, channels, per_channel, eval_slice,
+            metadata_by_channel=metadata_by_channel,
             select_on=args.select_on,
             threshold_window=threshold_window,
             min_run_length=min_run_length,

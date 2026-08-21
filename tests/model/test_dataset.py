@@ -612,6 +612,219 @@ def test_align_multi_channel_zero_overlap_raises() -> None:
         _align_multi_channel([ch_a, ch_b], ["a", "b"])
 
 
+def test_load_window_labels_from_metadata_matches_the_reading_variant(
+    tmp_path: Path,
+) -> None:
+    """The preload variant must be indistinguishable from the re-reading one.
+
+    docs/reviews/021 item D1: threshold_ceiling.py read each channel's test
+    partition four times because the labels call had no preload counterpart.
+    Adding one is only safe if it computes exactly the same thing — this pins
+    that, since a divergence would misalign errors against labels rather than
+    fail.
+    """
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.model.dataset import (
+        load_series_metadata,
+        load_window_labels,
+        load_window_labels_from_metadata,
+    )
+
+    mission, channel = "ESA-Mission1", "channel_1"
+    processed_dir = tmp_path / "processed"
+    n = 60
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    ts = [
+        pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+            pa.timestamp("us", tz="UTC")
+        )
+        for i in range(n)
+    ]
+    # Two segments and a mid-series anomaly run, so the window index is not
+    # trivially "every start" and the OR actually has something to find.
+    segments = np.array([0] * 35 + [1] * 25, dtype=np.int32)
+    flags = [False] * 20 + [True] * 6 + [False] * 34
+    table = pa.table({
+        "telemetry_timestamp": pa.array(ts, type=pa.timestamp("us", tz="UTC")),
+        "value_normalized": pa.array([float(i % 5) for i in range(n)], type=pa.float32()),
+        "segment_id": pa.array(segments),
+        "is_anomaly": pa.array(flags),
+    })
+    part = (
+        processed_dir / mission / "test" / f"mission_id={mission}" / f"channel_id={channel}"
+    )
+    part.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, part / "part.parquet")
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(update={
+        "preprocess": base_settings.preprocess.model_copy(
+            update={"processed_data_dir": processed_dir}
+        ),
+        "model": base_settings.model.model_copy(
+            update={"window_size": 5, "forecast_steps": 3}
+        ),
+    })
+
+    segment_ids, is_anomaly, _timestamps = load_series_metadata(
+        processed_dir, mission, channel, "test"
+    )
+    expected = load_window_labels(settings, mission, channel)
+    actual = load_window_labels_from_metadata(settings, segment_ids, is_anomaly)
+
+    assert len(expected) > 0
+    np.testing.assert_array_equal(actual, expected)
+
+
+class TestChannelKeyPairing:
+    """docs/reviews/021 item A2 — `channel` means two different things.
+
+    A real channel_id univariately; a group KEY (subsystem name) when
+    input_channels is set. The typed fix was deliberately declined (~8 modules,
+    immediately before DC-VAE reuses that boundary); this cheap assert catches
+    the one confusion the duality actually enables, which would otherwise
+    register a whole-group model under a real channel's name and pollute the
+    univariate registry with no shape error anywhere.
+    """
+
+    @staticmethod
+    def _cfg(**kwargs: Any) -> Any:
+        from spacecraft_telemetry.core.config import ModelConfig
+
+        return ModelConfig(**kwargs)
+
+    def test_group_key_is_accepted(self) -> None:
+        from spacecraft_telemetry.model.dataset import check_channel_key_pairing
+
+        group = ["channel_41", "channel_42"]
+        check_channel_key_pairing(
+            self._cfg(input_channels=group, target_channels=group), "subsystem_5"
+        )
+
+    def test_group_member_as_key_raises(self) -> None:
+        from spacecraft_telemetry.model.dataset import check_channel_key_pairing
+
+        group = ["channel_41", "channel_42"]
+        with pytest.raises(ValueError, match="is a MEMBER of input_channels"):
+            check_channel_key_pairing(
+                self._cfg(input_channels=group, target_channels=group), "channel_41"
+            )
+
+    def test_univariate_path_is_unaffected(self) -> None:
+        """With input_channels unset, `channel` IS a real channel and must
+        always pass — the guard must not touch the pre-021 path."""
+        from spacecraft_telemetry.model.dataset import check_channel_key_pairing
+
+        check_channel_key_pairing(self._cfg(), "channel_41")
+
+
+class TestConcurrentChannelLoadOrder:
+    """docs/reviews/021 item D2 — channel loads run concurrently now.
+
+    ``_align_multi_channel`` indexes ``channels`` by POSITION, so a result list
+    ordered by completion instead of submission would attribute every channel's
+    values to a different channel: identical shapes, no exception, every metric
+    silently wrong. These pin submission order under deliberately adversarial
+    completion order.
+    """
+
+    def test_results_follow_input_order_not_completion_order(self) -> None:
+        import time
+
+        from spacecraft_telemetry.model.dataset import _load_channels_ordered
+
+        channels = [f"channel_{i}" for i in range(6)]
+
+        def _slow_first(channel: str) -> str:
+            # The FIRST channel is slowest, so completion order is the exact
+            # reverse of submission order — the worst case for the bug.
+            time.sleep(0.05 * (len(channels) - channels.index(channel)))
+            return channel
+
+        assert _load_channels_ordered(_slow_first, channels) == channels
+
+    def test_single_channel_skips_the_pool(self) -> None:
+        """The univariate path must take on no thread-pool behaviour."""
+        import threading
+
+        from spacecraft_telemetry.model.dataset import _load_channels_ordered
+
+        calling_thread: list[int] = []
+
+        def _record(channel: str) -> str:
+            calling_thread.append(threading.get_ident())
+            return channel
+
+        assert _load_channels_ordered(_record, ["channel_1"]) == ["channel_1"]
+        assert calling_thread == [threading.get_ident()]
+
+    def test_a_failing_channel_propagates(self) -> None:
+        """A missing partition must still raise, not be swallowed by the pool."""
+        from spacecraft_telemetry.model.dataset import _load_channels_ordered
+
+        def _boom(channel: str) -> str:
+            if channel == "channel_2":
+                raise FileNotFoundError(channel)
+            return channel
+
+        with pytest.raises(FileNotFoundError, match="channel_2"):
+            _load_channels_ordered(_boom, ["channel_1", "channel_2", "channel_3"])
+
+
+def test_multichannel_columns_match_requested_order_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: column i of the loaded array is channels[i]'s data.
+
+    Each channel is written with a distinct constant value, so a mis-ordered
+    result is detectable by value rather than only by shape. The requested
+    order is deliberately NOT the on-disk/sorted order.
+    """
+    from spacecraft_telemetry.model.dataset import load_multichannel_series_parquet
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    n = 12
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+    ts = [
+        pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+            pa.timestamp("us", tz="UTC")
+        )
+        for i in range(n)
+    ]
+    written = [f"channel_{i}" for i in range(6)]
+    for marker, channel in enumerate(written):
+        table = pa.table({
+            "telemetry_timestamp": pa.array(ts, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array([float(marker)] * n, type=pa.float32()),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array([marker == 3] * n),
+        })
+        part = (
+            processed_dir / mission / "test"
+            / f"mission_id={mission}" / f"channel_id={channel}"
+        )
+        part.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, part / "part.parquet")
+
+    requested = ["channel_4", "channel_0", "channel_5", "channel_2", "channel_3", "channel_1"]
+    values, _seg, is_anom, _out_ts = load_multichannel_series_parquet(
+        processed_dir, mission, requested, "test"
+    )
+
+    assert values.shape == (n, len(requested))
+    for i, channel in enumerate(requested):
+        expected_marker = float(written.index(channel))
+        np.testing.assert_array_equal(
+            values[:, i],
+            np.full(n, expected_marker, dtype=np.float32),
+            err_msg=f"column {i} should hold {channel}'s values",
+        )
+    # The per-channel anomaly flag must follow the same positional mapping.
+    assert is_anom[:, requested.index("channel_3")].all()
+    assert not is_anom[:, requested.index("channel_0")].any()
+
+
 class TestMultivariateGroupSizeGuard:
     """docs/reviews/021 item A4 — nothing bounded the group size.
 

@@ -585,7 +585,10 @@ def score_channel(
         {pruned_seg_precision, pruned_seg_recall, pruned_seg_f0_5,
         pruned_n_pred_seqs}.
     """
-    from spacecraft_telemetry.model.dataset import make_test_dataloader
+    from spacecraft_telemetry.model.dataset import (
+        check_channel_key_pairing,
+        make_test_dataloader,
+    )
     from spacecraft_telemetry.model.device import resolve_device
     from spacecraft_telemetry.model.io import (
         errors_artifact,
@@ -597,6 +600,7 @@ def score_channel(
     )
 
     cfg = settings.model
+    check_channel_key_pairing(cfg, channel)
     device = resolve_device(cfg.device)
 
     # Guard so a misconfigured tracking URI never aborts scoring (open_run is

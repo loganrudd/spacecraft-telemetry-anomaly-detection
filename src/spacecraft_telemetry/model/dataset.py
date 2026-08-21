@@ -55,6 +55,40 @@ def _resolve_channel_group(settings: Settings, channel: str) -> list[str]:
     return list(group) if group is not None else [channel]
 
 
+def check_channel_key_pairing(cfg: Any, channel: str) -> None:
+    """Assert ``channel`` is a group KEY, not a group MEMBER, when multivariate.
+
+    ``channel`` carries two meanings (docs/reviews/021, item A2): a real
+    channel_id in the univariate path, and a group key — a subsystem name — in
+    the multivariate one. The typed fix (distinct Channel / Subsystem value
+    types) would touch ~8 modules and rewrite the multivariate boundary right
+    before DC-VAE reuses it, so the duality is accepted deliberately; this is
+    the cheap guard that catches the one confusion it actually enables.
+
+    Lives here, beside ``_resolve_channel_group``, because that function is
+    where the duality is interpreted — the check and the interpretation should
+    not drift apart.
+
+    Passing a member channel as the key would train or score a model registered
+    under a real channel's name whose weights cover the whole group — polluting
+    the univariate registry that cli.py's promote/demote discovery depends on,
+    with no shape error anywhere to reveal it.
+
+    Takes a ``ModelConfig``-shaped object (``Any``, matching window_span's
+    convention in this module).
+
+    Raises:
+        ValueError: If ``channel`` appears in ``cfg.input_channels``.
+    """
+    if cfg.input_channels and channel in cfg.input_channels:
+        raise ValueError(
+            f"channel={channel!r} is a MEMBER of input_channels={list(cfg.input_channels)}, "
+            "but with input_channels set it is used as the group's registry/experiment "
+            "KEY (e.g. a subsystem name), not a channel to load. Pass the subsystem "
+            "name instead — see docs/plans/021-multivariate-telemanom.md."
+        )
+
+
 def _read_partition_table(
     processed_dir: Path | UPath | str,
     mission: str,
@@ -336,6 +370,46 @@ def _align_multi_channel(
     return values, _joint_segment_ids(segment_ids_2d), is_anomaly, common.to_numpy()
 
 
+# Concurrency for per-channel parquet reads (docs/reviews/021, item D2).
+#
+# Channel loads are network-bound, not compute-bound: measured ~40-70 s per
+# channel against GCS at 0.6-3% CPU. PyArrow releases the GIL while reading, so
+# threads (not processes) recover most of that — no pickling of large arrays,
+# and no interaction with the Ray worker's process model.
+#
+# Capped rather than unbounded: each in-flight load holds a full channel's
+# arrays in memory, so the cap is a memory bound as much as a concurrency one.
+_CHANNEL_LOAD_WORKERS = 6
+
+
+def _load_channels_ordered(
+    load_one: Any,
+    channels: list[str],
+) -> list[Any]:
+    """Load every channel concurrently, returning results in INPUT order.
+
+    Order is load-bearing: ``_align_multi_channel`` indexes ``channels`` by
+    position, so a result list ordered by completion would silently attribute
+    every channel's values to a different channel — same shapes, no error, all
+    metrics wrong. ``ThreadPoolExecutor.map`` is used precisely because it
+    yields in submission order regardless of which future finishes first.
+
+    A single channel skips the pool entirely, so the univariate path takes on
+    no thread-pool overhead or behaviour change.
+    """
+    if len(channels) == 1:
+        return [load_one(channels[0])]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(
+        max_workers=min(_CHANNEL_LOAD_WORKERS, len(channels))
+    ) as pool:
+        # list() forces completion inside the context so exceptions surface
+        # here, attached to the channel that raised, rather than at teardown.
+        return list(pool.map(load_one, channels))
+
+
 def load_multichannel_series_parquet(
     processed_dir: Path | UPath | str,
     mission: str,
@@ -370,10 +444,10 @@ def load_multichannel_series_parquet(
             from load_series_parquet).
         ValueError: If the channels share no common timestamps.
     """
-    per_channel = [
-        load_series_parquet(processed_dir, mission, ch, split, variant=variant)
-        for ch in channels
-    ]
+    per_channel = _load_channels_ordered(
+        lambda ch: load_series_parquet(processed_dir, mission, ch, split, variant=variant),
+        channels,
+    )
     return _align_multi_channel(per_channel, channels)
 
 
@@ -398,10 +472,10 @@ def load_multichannel_series_metadata(
         is_anomaly:  (N, C) bool — per-channel anomaly flag, not OR'd.
         timestamps:  (N,) datetime64[ns] — aligned, sorted timestamps.
     """
-    per_channel_meta = [
-        load_series_metadata(processed_dir, mission, ch, split, variant=variant)
-        for ch in channels
-    ]
+    per_channel_meta = _load_channels_ordered(
+        lambda ch: load_series_metadata(processed_dir, mission, ch, split, variant=variant),
+        channels,
+    )
     # _align_multi_channel expects a values column; synthesize a dummy one so
     # the exact same alignment code path (and its logging) is reused rather
     # than duplicated for the metadata-only case.
@@ -806,6 +880,36 @@ def load_window_labels(
     )
     span = window_span(cfg)
     return _window_any_anomalous(is_anomaly, indices, span)
+
+
+def load_window_labels_from_metadata(
+    settings: Settings,
+    segment_ids: np.ndarray[Any, np.dtype[np.int32]],
+    is_anomaly: np.ndarray[Any, np.dtype[np.bool_]],
+) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    """Pure computation of load_window_labels given preloaded metadata arrays.
+
+    The labels counterpart of window_target_timestamps_from_metadata, and the
+    piece that was missing from the preload API: a caller holding a channel's
+    (segment_ids, is_anomaly, timestamps) could already avoid re-reading the
+    partition for timeline, cutoff, and target timestamps, but not for labels
+    — so it re-read anyway (docs/reviews/021, item D1).
+
+    Uses the same ``_build_window_index`` / ``_window_any_anomalous`` pair as
+    load_window_labels, so the two agree by construction rather than by being
+    kept in step.
+
+    Note this is the SINGLE-channel shape. A multivariate group's labels come
+    from load_window_labels, which resolves the group and joins first; HPO and
+    the threshold grid both operate on saved per-channel 1-D error arrays and
+    therefore run without input_channels set.
+    """
+    cfg = settings.model
+    indices = _build_window_index(
+        segment_ids, is_anomaly, cfg.window_size, cfg.prediction_horizon,
+        skip_anomalous_windows=False, forecast_steps=cfg.forecast_steps,
+    )
+    return _window_any_anomalous(is_anomaly, indices, window_span(cfg))
 
 
 def window_target_timestamps_from_metadata(

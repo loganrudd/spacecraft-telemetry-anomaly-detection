@@ -45,7 +45,7 @@ from spacecraft_telemetry.mlflow_tracking import (
     training_data_hash,
 )
 from spacecraft_telemetry.model.architecture import build_model
-from spacecraft_telemetry.model.dataset import make_dataloaders
+from spacecraft_telemetry.model.dataset import check_channel_key_pairing, make_dataloaders
 from spacecraft_telemetry.model.device import resolve_device
 
 log = get_logger(__name__)
@@ -93,6 +93,9 @@ def train_channel(
 
     device = resolve_device(settings.model.device)
     cfg = settings.model
+    # `channel` is a group KEY when multivariate, never a group member — the
+    # cheap guard on the two meanings `channel` carries (docs/reviews/021, A2).
+    check_channel_key_pairing(cfg, channel)
     # Multivariate (docs/plans/021-multivariate-telemanom.md): None (default)
     # means `channel` is a real channel_id and the group is just [channel] —
     # byte-identical to pre-021. A non-None input_channels makes `channel` the
