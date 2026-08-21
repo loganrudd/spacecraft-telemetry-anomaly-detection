@@ -778,8 +778,9 @@ standing demonstration.
 | 17 | Live telemetry pump | Complete |
 | 18 | ISS deployment + docs polish | Complete |
 | 19 | ESA-ADB-comparable evaluation (paper metric + split) | Complete |
-| 20 | Experiment variant axis (separate mission from experiment config) | Planned |
-| 21 | 6-in/6-out multivariate Telemanom | Planned |
+| 20 | Experiment variant axis (separate mission from experiment config) | Complete |
+| 21 | 6-in/6-out multivariate Telemanom | Complete |
+| 22 | Tuning layer | In progress |
 
 Phases 19–21 are post-18 workstreams rather than new platform capabilities: 19 is
 evaluation credibility (implementing ESA-ADB's own corrected event-wise metric and
