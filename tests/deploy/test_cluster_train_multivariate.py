@@ -18,12 +18,18 @@ Asserts on the *parsed* YAML entrypoint, not the rendered text: the flag sits
 in a `>-` folded block scalar, where an empty substitution leaves a
 whitespace-only line. Whether that folds away cleanly is exactly the thing
 worth testing, and only a YAML parse can tell us.
+
+This file also holds the general head/worker env-parity invariant
+(TestEnvParityAcrossHeadAndWorkers), which covers every cluster_*.yaml rather
+than the two flags this module started with — see that class for why the
+per-variable version of the same check was retired.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
@@ -35,17 +41,22 @@ _CLUSTER_TRAIN = _DEPLOY_DIR / "cluster_train.yaml"
 # to one branch and missed in the other — so these are asserted per-occurrence,
 # never on "the first match".
 _CLUSTER_SCORES = [_DEPLOY_DIR / "cluster_score.yaml", _DEPLOY_DIR / "cluster_score_cpu.yaml"]
+# Every RayJob manifest, discovered rather than enumerated: the head/worker env
+# parity invariant (TestEnvParityAcrossHeadAndWorkers) applies to all of them,
+# and a list would only cover the ones someone remembered to add — which is the
+# exact failure mode that invariant exists to retire.
+_ALL_CLUSTER_YAMLS = sorted(_DEPLOY_DIR.glob("cluster_*.yaml"))
 # Every cluster whose entrypoint can group channels by subsystem, and therefore
-# needs the channels.csv fallback reachable — see TestSubsystemMapEnvParity.
+# needs the channels.csv fallback reachable — see TestEnvValueContracts.
 _SUBSYSTEM_AWARE_YAMLS = [
     _DEPLOY_DIR / "cluster_train.yaml",
     _DEPLOY_DIR / "cluster_tune.yaml",
     *_CLUSTER_SCORES,
 ]
 # Every cluster that trains or scores a forecaster, and therefore needs the
-# 021.7 horizon — see TestForecastStepsEnvParity. cluster_tune.yaml is absent
-# deliberately: HPO searches thresholds over saved error arrays, so it never
-# builds a forecast head.
+# 021.7 horizon present at all. cluster_tune.yaml is absent deliberately: HPO
+# searches thresholds over saved error arrays, so it never builds a forecast
+# head. (Parity for the key is covered generally; this list is about PRESENCE.)
 _FORECAST_AWARE_YAMLS = [
     _DEPLOY_DIR / "cluster_train.yaml",
     _DEPLOY_DIR / "cluster_train_cpu.yaml",
@@ -71,6 +82,14 @@ _ENV = {
     "PROCESSED_DATA_DIR": "gs://test-proj-processed-data",
     "FORECAST_STEPS": "10",
     "FORECAST_ERROR_REDUCTION": "mean",
+    # Interpolated only by cluster_preprocess.yaml, which the glob-discovered
+    # parity tests also render. Kept in one dict so every manifest renders
+    # fully — a partially-rendered manifest would fail the placeholder check
+    # for a reason that has nothing to do with the manifest.
+    "TRAIN_FRACTION": "0.8",
+    "TRAIN_LOOKBACK": "730D",
+    "RAY_IMAGE_TAG": "latest",
+    "MULTIVARIATE_ARG": "",
 }
 
 
@@ -149,48 +168,166 @@ class TestMultivariateFlagThreading:
         )
 
 
-class TestSubsystemMapEnvParity:
-    """`--subsystem` / `--multivariate` group channels by subsystem, which for
-    an ESA mission resolves ONLY through the channels.csv fallback in
-    core/metadata.py — the channel_subsystems.json branch is written by the ISS
-    pipeline alone and never exists for ESA. configs/cloud.yaml points
-    data.sample_data_dir at a LOCAL path absent from the image, so every cluster
-    YAML whose entrypoint can group by subsystem must override it to the GCS
-    bucket. cluster_tune.yaml always did; cluster_train.yaml did not, which is
-    what made the first --multivariate submission abort with
-    'cannot resolve --subsystem'.
+class TestEnvParityAcrossHeadAndWorkers:
+    """EVERY ``SPACECRAFT_*`` key on a head container must reach every worker
+    container of the same manifest, with an identical value.
 
-    Parity between head and worker is asserted separately because the
-    @ray.remote fan-out splits inside worker tasks — a head-only override
-    diverges silently (plan 019 B2, the same rule SPACECRAFT_VARIANT follows).
+    This is a general invariant, not a list of keys, because the per-variable
+    version of it failed twice: ``SPACECRAFT_DATA__SAMPLE_DATA_DIR`` was
+    head-only in cluster_train.yaml (021.5-prep — the first ``--multivariate``
+    submission aborted with 'cannot resolve --subsystem'), and
+    ``SPACECRAFT_MODEL__FORECAST_STEPS`` was missing from workers in 021.7,
+    which silently trained H=1 while reporting success. A guard that only
+    covers the variables someone remembered to add is the same defect one
+    level up.
+
+    Why parity is the right rule: the ``@ray.remote`` fan-out does its real
+    work inside WORKER tasks — make_dataloaders, the (C, H) output head,
+    collapse_forecast_errors, the subsystem grouping all run there — while the
+    RayJob entrypoint runs on the head. A head-only value therefore configures
+    the driver and nothing that computes (plan 019 B2, the rule
+    SPACECRAFT_VARIANT already follows).
+
+    Manifests are globbed, not enumerated, so a NEW cluster YAML is covered the
+    day it lands rather than when someone remembers to add it here.
     """
 
-    _KEY = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+    # Keys that are deliberately head-only. Each entry needs a reason: the
+    # setting must be read by the DRIVER and never inside a @ray.remote task,
+    # which makes a worker copy dead config rather than a safety net.
+    _HEAD_ONLY: ClassVar[dict[str, str]] = {
+        # run_all_sweeps reads this in the driver to decide how many subsystem
+        # sweeps to launch concurrently; trial functions never read it.
+        "SPACECRAFT_TUNE__MAX_PARALLEL_SUBSYSTEMS": "driver-only sweep concurrency",
+    }
 
     @staticmethod
     def _container_envs(template: dict) -> dict[str, str]:
         containers = template["spec"]["containers"]
         return {e["name"]: e.get("value") for e in containers[0].get("env", [])}
 
-    @pytest.mark.parametrize("yaml_path", _SUBSYSTEM_AWARE_YAMLS, ids=lambda p: p.name)
-    def test_sample_data_dir_set_on_head_and_every_worker(self, yaml_path: Path) -> None:
-        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+    @classmethod
+    def _spacecraft_envs(cls, template: dict) -> dict[str, str]:
+        return {
+            k: v
+            for k, v in cls._container_envs(template).items()
+            if k.startswith("SPACECRAFT_")
+        }
 
-        head = self._container_envs(spec["headGroupSpec"]["template"])
-        assert self._KEY in head, f"{yaml_path.name}: head is missing {self._KEY}"
-        assert head[self._KEY].startswith("gs://"), (
-            f"{yaml_path.name}: head {self._KEY}={head[self._KEY]!r} is not a GCS URI; "
+    @pytest.mark.parametrize("yaml_path", _ALL_CLUSTER_YAMLS, ids=lambda p: p.name)
+    def test_every_spacecraft_key_reaches_every_worker(self, yaml_path: Path) -> None:
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        head = self._spacecraft_envs(spec["headGroupSpec"]["template"])
+
+        # Vacuous-pass guard: a parse that silently yielded {} would make every
+        # assertion below trivially true, which is how this class would stop
+        # protecting anything without failing.
+        assert head, f"{yaml_path.name}: parsed zero SPACECRAFT_* keys on the head"
+
+        # cluster_score_cpu.yaml and cluster_train_cpu.yaml are deliberately
+        # single-node (no workerGroupSpecs), so head-only is correct there.
+        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
+            wenv = self._spacecraft_envs(worker["template"])
+            group = worker.get("groupName", i)
+            for key, head_value in head.items():
+                if key in self._HEAD_ONLY:
+                    assert key not in wenv, (
+                        f"{yaml_path.name}: worker[{group}] sets {key}, which is "
+                        f"documented head-only ({self._HEAD_ONLY[key]}). Either the "
+                        "setting is now read inside a @ray.remote task — in which "
+                        "case remove it from _HEAD_ONLY — or this is dead config."
+                    )
+                    continue
+                assert key in wenv, (
+                    f"{yaml_path.name}: worker[{group}] is missing {key}, which the "
+                    f"head sets to {head_value!r}. The @ray.remote fan-out reads "
+                    "settings inside worker tasks, so the workers would run a "
+                    "DIFFERENT configuration than the one submitted."
+                )
+                assert wenv[key] == head_value, (
+                    f"{yaml_path.name}: worker[{group}] {key}={wenv[key]!r} diverges "
+                    f"from head {head_value!r}"
+                )
+
+    @pytest.mark.parametrize("yaml_path", _ALL_CLUSTER_YAMLS, ids=lambda p: p.name)
+    def test_no_worker_sets_a_spacecraft_key_the_head_lacks(self, yaml_path: Path) -> None:
+        """The reverse direction. A worker-only key is the same divergence
+        viewed from the other side — the driver's own reads (channel discovery,
+        experiment naming) would use a different value than the tasks."""
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        head = self._spacecraft_envs(spec["headGroupSpec"]["template"])
+        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
+            wenv = self._spacecraft_envs(worker["template"])
+            extra = sorted(set(wenv) - set(head))
+            assert not extra, (
+                f"{yaml_path.name}: worker[{worker.get('groupName', i)}] sets "
+                f"{extra} which the head does not"
+            )
+
+    @pytest.mark.parametrize("yaml_path", _ALL_CLUSTER_YAMLS, ids=lambda p: p.name)
+    def test_no_unresolved_placeholders_in_spacecraft_values(self, yaml_path: Path) -> None:
+        """Generalises the old per-key 'did FORECAST_STEPS interpolate?' check:
+        a ``${...}`` surviving into a rendered value means the submitting
+        script never exported it, and the pod would take the config default
+        while the manifest looks correct."""
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        templates = [spec["headGroupSpec"]["template"]] + [
+            w["template"] for w in (spec.get("workerGroupSpecs") or [])
+        ]
+        for template in templates:
+            for key, value in self._spacecraft_envs(template).items():
+                assert "${" not in str(value), (
+                    f"{yaml_path.name}: {key}={value!r} kept an unresolved placeholder"
+                )
+
+
+class TestEnvValueContracts:
+    """Value-shape assertions that parity alone cannot make.
+
+    Parity says head and workers agree; it says nothing about whether the
+    agreed value is usable. These two are the ones with a known failure
+    behind them.
+    """
+
+    _ENVS = TestEnvParityAcrossHeadAndWorkers._spacecraft_envs
+
+    @pytest.mark.parametrize("yaml_path", _SUBSYSTEM_AWARE_YAMLS, ids=lambda p: p.name)
+    def test_sample_data_dir_is_a_gcs_uri(self, yaml_path: Path) -> None:
+        """`--subsystem` / `--multivariate` group channels by subsystem, which
+        for an ESA mission resolves ONLY through the channels.csv fallback in
+        core/metadata.py — the channel_subsystems.json branch is written by the
+        ISS pipeline alone and never exists for ESA. configs/cloud.yaml points
+        data.sample_data_dir at a LOCAL path absent from the image, so every
+        subsystem-aware manifest must override it to the GCS bucket."""
+        key = "SPACECRAFT_DATA__SAMPLE_DATA_DIR"
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        head = self._ENVS(spec["headGroupSpec"]["template"])
+        assert key in head, f"{yaml_path.name}: head is missing {key}"
+        assert head[key].startswith("gs://"), (
+            f"{yaml_path.name}: head {key}={head[key]!r} is not a GCS URI; "
             "the image has no local data/ tree"
         )
 
-        # cluster_score_cpu.yaml is deliberately single-node (no workerGroupSpecs),
-        # so head-only is correct there — assert parity only where workers exist.
-        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
-            wenv = self._container_envs(worker["template"])
-            assert wenv.get(self._KEY) == head[self._KEY], (
-                f"{yaml_path.name}: worker[{i}] {self._KEY}={wenv.get(self._KEY)!r} "
-                f"diverges from head {head[self._KEY]!r}"
-            )
+    @pytest.mark.parametrize("yaml_path", _FORECAST_AWARE_YAMLS, ids=lambda p: p.name)
+    def test_forecast_steps_present_and_interpolated(self, yaml_path: Path) -> None:
+        """Presence on the head is not implied by parity — a key absent
+        everywhere is perfectly consistent, and would train H=1 silently."""
+        key = "SPACECRAFT_MODEL__FORECAST_STEPS"
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        head = self._ENVS(spec["headGroupSpec"]["template"])
+        assert head.get(key) == "10", (
+            f"{yaml_path.name}: head {key}={head.get(key)!r} did not interpolate "
+            "FORECAST_STEPS"
+        )
+
+    @pytest.mark.parametrize("yaml_path", _CLUSTER_SCORES, ids=lambda p: p.name)
+    def test_error_reduction_present_wherever_scoring_happens(self, yaml_path: Path) -> None:
+        """The reduction is scoring-time only, so it belongs on the score
+        YAMLs alone — collapse_forecast_errors reads it inside the worker."""
+        key = "SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION"
+        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
+        head = self._ENVS(spec["headGroupSpec"]["template"])
+        assert head.get(key) == "mean", f"{yaml_path.name}: head {key}={head.get(key)!r}"
 
 
 class TestScoreYamlsFlagBothBranches:
@@ -221,55 +358,3 @@ class TestScoreYamlsFlagBothBranches:
         assert "${" not in rendered, "unresolved placeholder in rendered score YAML"
 
 
-class TestForecastStepsEnvParity:
-    """``SPACECRAFT_MODEL__FORECAST_STEPS`` must reach head AND every worker.
-
-    Plan 021.7's horizon has no CLI flag — the only knob is this env var, and
-    the RayJob YAMLs enumerate env vars one by one, so exporting it in the
-    shell that runs `make cloud-train` reaches the submitting script and NOT
-    the pods. The @ray.remote fan-out builds its dataloaders and its (C, H)
-    output head inside the WORKER, so a missing or head-only value trains
-    H=1 and reports success — a wrong answer that looks like a right one,
-    which is the worst failure mode this experiment has.
-
-    Same rule and same rationale as TestSubsystemMapEnvParity above; kept as
-    a separate class because the acceptable values differ (an int, not a URI).
-    """
-
-    _KEY = "SPACECRAFT_MODEL__FORECAST_STEPS"
-
-    @pytest.mark.parametrize("yaml_path", _FORECAST_AWARE_YAMLS, ids=lambda p: p.name)
-    def test_forecast_steps_set_on_head_and_every_worker(self, yaml_path: Path) -> None:
-        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
-        envs = TestSubsystemMapEnvParity._container_envs
-
-        head = envs(spec["headGroupSpec"]["template"])
-        assert self._KEY in head, f"{yaml_path.name}: head is missing {self._KEY}"
-        assert head[self._KEY] == "10", (
-            f"{yaml_path.name}: head {self._KEY}={head[self._KEY]!r} did not "
-            "interpolate FORECAST_STEPS"
-        )
-
-        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
-            wenv = envs(worker["template"])
-            assert wenv.get(self._KEY) == head[self._KEY], (
-                f"{yaml_path.name}: worker[{i}] {self._KEY}={wenv.get(self._KEY)!r} "
-                f"diverges from head {head[self._KEY]!r} — the fan-out would "
-                "train a different horizon than requested"
-            )
-
-    @pytest.mark.parametrize("yaml_path", _CLUSTER_SCORES, ids=lambda p: p.name)
-    def test_error_reduction_set_wherever_scoring_happens(self, yaml_path: Path) -> None:
-        """The reduction is scoring-time only, so it belongs on the score
-        YAMLs alone — but there it has the same head/worker parity rule:
-        collapse_forecast_errors runs inside the worker task."""
-        key = "SPACECRAFT_MODEL__FORECAST_ERROR_REDUCTION"
-        spec = yaml.safe_load(_render(yaml_path))["spec"]["rayClusterSpec"]
-        envs = TestSubsystemMapEnvParity._container_envs
-
-        head = envs(spec["headGroupSpec"]["template"])
-        assert head.get(key) == "mean", f"{yaml_path.name}: head {key}={head.get(key)!r}"
-        for i, worker in enumerate(spec.get("workerGroupSpecs") or []):
-            assert envs(worker["template"]).get(key) == head[key], (
-                f"{yaml_path.name}: worker[{i}] {key} diverges from head"
-            )
