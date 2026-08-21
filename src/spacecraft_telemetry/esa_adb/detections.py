@@ -123,6 +123,85 @@ def _is_tuned_run(run: Any) -> bool:
     return "tuned_from_run" in tags or "tuned_source" in tags
 
 
+def tuned_provenance(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    *,
+    run_map: OfflineRunMap | None = None,
+) -> str | None:
+    """Human-readable provenance of the tuned scoring runs behind ``channels``.
+
+    docs/plans/022, stage 022.2b: the report used to hardcode "per-subsystem
+    Ray Tune HPO scoring" for every tuned row, which was false whenever the
+    config actually came from ``scripts/threshold_ceiling.py``'s exhaustive
+    grid (as it did for every 021.7 row). This reads what actually produced
+    each channel's tuned run from its MLflow tags instead of asserting it:
+
+    - ``tuned_source`` present (a grid-produced config, or any future
+      non-Tune search) -> that string verbatim, e.g. "scripts/
+      threshold_ceiling.py exhaustive grid (mission)".
+    - Only ``tuned_from_run`` present (a Ray Tune trial) -> "per-subsystem
+      Ray Tune HPO scoring", the one case where the old hardcoded claim was
+      actually true.
+    - Neither tag on any channel -> None (report renders an honest
+      "provenance unavailable" line rather than falling back to the old
+      claim).
+
+    All channels normally share one tuned config — one subsystem's Ray Tune
+    sweep, or threshold_ceiling.py's "first channel wins, the rest must
+    agree" grid (docs/plans/022 stage 022.2b, Open Question 2) — so every
+    channel is read and required to agree, rather than trusting one. A
+    mismatch raises: asserting uniformity without checking it would be the
+    same class of misstatement this function exists to fix.
+
+    Args:
+        run_map: Offline mode (esa_adb/offline.py) — MLflow is never
+            contacted, and run *tags* live only in the tracking backend, so
+            this returns None unconditionally. The caller must render an
+            honest "provenance unavailable in offline mode" line, not fall
+            back to the old hardcoded claim behind a harder-to-see branch.
+
+    Raises:
+        RuntimeError: channels disagree on provenance (a mixed-config arm —
+            should be unreachable given run_all_sweeps' one-config-per-
+            subsystem and threshold_ceiling.py's mixed-config hard-fail).
+    """
+    if run_map is not None or not channels:
+        return None
+
+    import mlflow
+
+    try:
+        configure_mlflow(settings)
+    except Exception as exc:
+        log.warning(
+            "esa_adb.detections.tuned_provenance.configure_mlflow_failed", error=str(exc)
+        )
+
+    exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+
+    provenance_by_channel: dict[str, str] = {}
+    for channel in channels:
+        run_id, _errors_artifact_path, _threshold_artifact_path = find_scoring_run_and_artifacts(
+            settings, mission, exp, channel, tuned=True
+        )
+        tags = client.get_run(run_id).data.tags
+        source = tags.get("tuned_source")
+        provenance_by_channel[channel] = source if source else "per-subsystem Ray Tune HPO scoring"
+
+    distinct = set(provenance_by_channel.values())
+    if len(distinct) > 1:
+        raise RuntimeError(
+            f"Channels disagree on tuned-scoring provenance: {provenance_by_channel}. "
+            "A mixed-config arm cannot be described by a single footnote — this "
+            "should be unreachable (run_all_sweeps writes one config per "
+            "subsystem, and threshold_ceiling.py hard-fails a mixed-config arm)."
+        )
+    return next(iter(distinct))
+
+
 def _find_multivariate_scoring_run(
     settings: Settings,
     mission: str,

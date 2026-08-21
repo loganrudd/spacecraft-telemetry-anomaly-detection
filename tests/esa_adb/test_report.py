@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from spacecraft_telemetry.core.config import Settings, load_settings
+from spacecraft_telemetry.esa_adb.offline import OfflineRunMap, RunSpec
 from spacecraft_telemetry.esa_adb.report import _PAPER_REFERENCE, build_report
 from spacecraft_telemetry.mlflow_tracking import (
     common_tags,
@@ -171,8 +172,15 @@ def _settings(processed_dir: Path, sample_dir: Path, mlflow_uri: str) -> Setting
     )
 
 
-def _log_scoring_run(settings: Settings, *, tuned: bool) -> None:
-    """Flag window index 14 alone — well after the hpo_eval_fraction=0.6 cutoff (idx 10)."""
+def _log_scoring_run(
+    settings: Settings, *, tuned: bool, tuned_source: str | None = None
+) -> None:
+    """Flag window index 14 alone — well after the hpo_eval_fraction=0.6 cutoff (idx 10).
+
+    ``tuned_source`` sets the ``tuned_source`` tag instead of ``tuned_from_run``
+    — i.e. simulates a grid-produced (scripts/threshold_ceiling.py) config
+    rather than a Ray Tune trial. Ignored when ``tuned`` is False.
+    """
     smoothed = np.zeros(17, dtype=np.float64)
     smoothed[14] = 5.0
     threshold = np.ones(17, dtype=np.float64)
@@ -180,7 +188,10 @@ def _log_scoring_run(settings: Settings, *, tuned: bool) -> None:
     exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
     extra = {"eval_split": "final_portion" if tuned else "full_test"}
     if tuned:
-        extra["tuned_from_run"] = "fake-hpo-run"
+        if tuned_source is not None:
+            extra["tuned_source"] = tuned_source
+        else:
+            extra["tuned_from_run"] = "fake-hpo-run"
     tags = common_tags(
         model_type=settings.model.model_type,
         mission=_MISSION,
@@ -255,6 +266,7 @@ class TestBuildReport:
 
         with pytest.raises(RuntimeError, match="tuned scoring run"):
             build_report(settings, _MISSION, channels=[_CHANNEL])
+
 
     def test_configure_mlflow_failure_is_logged_not_silently_swallowed(
         self,
@@ -447,6 +459,113 @@ class TestBuildReport:
                 assert row["channel_aware_f0_5"] is None
                 assert row["n_events"] is None
 
+
+class TestTunedRowProvenance:
+    """docs/plans/022 stage 022.2b: the report renders each row's ACTUAL
+    provenance rather than an asserted "per-subsystem Ray Tune HPO" claim."""
+
+    def test_grid_provenance_renders_in_footnote_and_params(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(
+            settings,
+            tuned=True,
+            tuned_source="scripts/threshold_ceiling.py exhaustive grid (mission)",
+        )
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL])
+
+        tuned_rows = [r for r in report["rows"] if r["label"] == "ours (tuned)"]
+        assert tuned_rows
+        for row in tuned_rows:
+            assert row["params"] == "scripts/threshold_ceiling.py exhaustive grid (mission)"
+        assert any(
+            "scripts/threshold_ceiling.py exhaustive grid (mission)" in note
+            for note in report["footnotes"]
+        )
+        assert not any("Ray Tune" in note for note in report["footnotes"])
+
+    def test_ray_tune_provenance_renders_in_footnote_and_params(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        _log_scoring_run(settings, tuned=False)
+        _log_scoring_run(settings, tuned=True)  # tuned_from_run only -> Ray Tune
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL])
+
+        tuned_rows = [r for r in report["rows"] if r["label"] == "ours (tuned)"]
+        assert tuned_rows
+        for row in tuned_rows:
+            assert row["params"] == "per-subsystem Ray Tune HPO scoring"
+        assert any(
+            "per-subsystem Ray Tune HPO scoring" in note for note in report["footnotes"]
+        )
+
+    def test_run_map_mode_renders_neither_claim(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """--run-map mode never contacts MLflow, so tags are unreadable — the
+        report must degrade to an honest "provenance unavailable" line rather
+        than falling back to either hardcoded claim (the old bug, reintroduced
+        behind a harder-to-see branch, per docs/plans/022 stage 022.2b)."""
+        processed_dir = tmp_path / "processed"
+        sample_dir = tmp_path / "sample"
+        _write_series(processed_dir)
+        _write_labels(sample_dir)
+        settings = _settings(processed_dir, sample_dir, mlflow_uri)
+
+        smoothed = np.zeros(17, dtype=np.float64)
+        smoothed[14] = 5.0
+        threshold = np.ones(17, dtype=np.float64)
+        runs_dir = tmp_path / "offline_runs"
+        for run_id in ("baseline-run", "tuned-run"):
+            run_dir = runs_dir / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "errors.npy").write_bytes(errors_to_bytes(smoothed))
+            (run_dir / "threshold.npy").write_bytes(threshold_to_bytes(threshold))
+
+        run_map = OfflineRunMap(
+            mission=_MISSION,
+            baseline={
+                _CHANNEL: RunSpec(
+                    run_id="baseline-run",
+                    errors_path=str(runs_dir / "baseline-run" / "errors.npy"),
+                    threshold_path=str(runs_dir / "baseline-run" / "threshold.npy"),
+                    threshold_min_anomaly_len=1,
+                )
+            },
+            tuned={
+                _CHANNEL: RunSpec(
+                    run_id="tuned-run",
+                    errors_path=str(runs_dir / "tuned-run" / "errors.npy"),
+                    threshold_path=str(runs_dir / "tuned-run" / "threshold.npy"),
+                    threshold_min_anomaly_len=1,
+                )
+            },
+        )
+
+        report = build_report(settings, _MISSION, channels=[_CHANNEL], run_map=run_map)
+
+        tuned_rows = [r for r in report["rows"] if r["label"] == "ours (tuned)"]
+        assert tuned_rows
+        for row in tuned_rows:
+            assert "provenance unavailable in offline mode" in row["params"]
+        assert not any("Ray Tune" in note for note in report["footnotes"])
+        assert not any("threshold_ceiling.py" in note for note in report["footnotes"])
+        assert any(
+            "provenance unavailable in offline mode" in note for note in report["footnotes"]
+        )
 
 class TestScopeInvariants:
     """Two invariants that hold on every row of both the arm-A and production
