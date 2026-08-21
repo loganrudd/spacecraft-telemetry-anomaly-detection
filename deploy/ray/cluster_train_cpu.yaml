@@ -71,6 +71,11 @@ spec:
                   value: "0"
                 - name: SPACECRAFT_MODEL__WINDOW_SIZE
                   value: "${WINDOW_SIZE_OVERRIDE}"
+                # Multi-step forecast horizon (plan 021.7); 1 = pre-021.7 head.
+                # See cluster_train.yaml for why this is set explicitly rather
+                # than left to propagate via the pickled Settings.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
                 - name: MLFLOW_HTTP_REQUEST_TIMEOUT
                   value: "30"
               resources:

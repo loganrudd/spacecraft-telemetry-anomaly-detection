@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -431,6 +432,296 @@ def test_predict_sets_eval_mode() -> None:
     assert not model.training, "predict() should leave the model in eval mode"
 
 
+class TestCollapseForecastErrors:
+    """Multi-step error collapse (docs/plans/021, stage 021.7c).
+
+    The downstream pipeline assumes ONE error per window per channel, so H
+    errors collapse at the forecaster boundary. Reductions operate on |error|
+    to match smooth_errors' own use of magnitude.
+    """
+
+    def test_noop_on_single_step_shapes(self) -> None:
+        """1-D and 2-D inputs are pre-021.7 paths — must pass through
+        untouched, including keeping their SIGN (no abs applied)."""
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        one_d = np.array([-1.0, 2.0, -3.0])
+        np.testing.assert_array_equal(collapse_forecast_errors(one_d, "mean"), one_d)
+        two_d = np.array([[-1.0, 2.0], [3.0, -4.0]])
+        np.testing.assert_array_equal(collapse_forecast_errors(two_d, "mean"), two_d)
+
+    def test_first_takes_the_one_step_ahead_error(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.array([[[-1.0, 5.0, 9.0], [2.0, -8.0, 0.0]]])  # (1, 2, 3)
+        np.testing.assert_allclose(
+            collapse_forecast_errors(e, "first"), [[1.0, 2.0]]
+        )
+
+    def test_mean_and_max_use_magnitude(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.array([[[-3.0, 3.0]]])  # (1, 1, 2) — cancels to 0 if sign kept
+        np.testing.assert_allclose(collapse_forecast_errors(e, "mean"), [[3.0]])
+        np.testing.assert_allclose(collapse_forecast_errors(e, "max"), [[3.0]])
+
+    def test_shape_reduces_by_one_axis(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        e = np.zeros((7, 6, 10))
+        for mode in ("mean", "first", "max"):
+            assert collapse_forecast_errors(e, mode).shape == (7, 6)
+
+    def test_first_reproduces_h1_error_series(self) -> None:
+        """The property that makes 'first' a clean ablation: scoring an H=10
+        model with it yields exactly the |error| series an H=1 model would,
+        so only the TRAINING signal differs."""
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        rng = np.random.default_rng(0)
+        multi = rng.standard_normal((20, 3, 10))
+        np.testing.assert_allclose(
+            collapse_forecast_errors(multi, "first"), np.abs(multi[:, :, 0])
+        )
+
+    def test_unknown_reduction_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import collapse_forecast_errors
+
+        with pytest.raises(ValueError, match="Unknown forecast_error_reduction"):
+            collapse_forecast_errors(np.zeros((2, 2, 2)), "median")
+
+
+class TestTrainingContractGuard:
+    """docs/reviews/021-multivariate-telemanom.md items A1 + C1.
+
+    ``window_size`` has been guarded at the scoring boundary since Phase 3.
+    Plan 021 added two attributes with the same property — wrong value, no
+    crash, meaningless number — and neither was guarded. These pin that they
+    now are, including the ORDER-sensitivity plan 021's Validation list asked
+    for and never got.
+    """
+
+    @staticmethod
+    def _contract(**kwargs: Any) -> Any:
+        from spacecraft_telemetry.model.io import ModelContract
+
+        return ModelContract(**{"window_size": 250, **kwargs})
+
+    @staticmethod
+    def _cfg(**kwargs: Any) -> Any:
+        from spacecraft_telemetry.core.config import ModelConfig
+
+        return ModelConfig(**kwargs)
+
+    def test_matching_contract_passes(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        group = ["channel_41", "channel_42"]
+        _check_training_contract(
+            self._contract(forecast_steps=10, channels=tuple(group)),
+            self._cfg(forecast_steps=10, input_channels=group, target_channels=group),
+            "m",
+        )
+
+    def test_forecast_steps_mismatch_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        with pytest.raises(ValueError, match="forecast_steps"):
+            _check_training_contract(
+                self._contract(forecast_steps=10), self._cfg(forecast_steps=1), "m"
+            )
+
+    def test_shuffled_input_channels_raises(self) -> None:
+        """Same membership, different order — every shape still matches, so
+        nothing else in the pipeline would notice."""
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        trained = ("channel_41", "channel_42", "channel_43")
+        shuffled = ["channel_43", "channel_41", "channel_42"]
+        with pytest.raises(ValueError, match="ORDER-SENSITIVE"):
+            _check_training_contract(
+                self._contract(channels=trained),
+                self._cfg(input_channels=shuffled, target_channels=shuffled),
+                "m",
+            )
+
+    def test_scoring_a_multivariate_model_univariately_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        with pytest.raises(ValueError, match="input_channels"):
+            _check_training_contract(
+                self._contract(channels=("channel_41", "channel_42")),
+                self._cfg(),
+                "m",
+            )
+
+    def test_scoring_a_univariate_model_as_a_group_raises(self) -> None:
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        group = ["channel_41", "channel_42"]
+        with pytest.raises(ValueError, match="input_channels"):
+            _check_training_contract(
+                self._contract(),
+                self._cfg(input_channels=group, target_channels=group),
+                "m",
+            )
+
+    def test_pre_021_univariate_model_still_scores(self) -> None:
+        """Open question 2, resolved in the safe direction: a version with no
+        `channels` tag IS univariate, so scoring it univariately must not
+        error — otherwise every model registered before 021 becomes
+        unscoreable."""
+        from spacecraft_telemetry.model.scoring import _check_training_contract
+
+        _check_training_contract(self._contract(), self._cfg(), "m")
+
+
+class TestFirstReductionScoresAsH1:
+    """`first` must be scored IDENTICALLY to an H=1 model's error series.
+
+    This is the only test in the suite that defends a *published claim* rather
+    than a function: README.md attributes ~80% of the H=10 gain to the scoring
+    statistic, and that attribution is only meaningful if
+    ``collapse_forecast_errors(e, "first")`` reproduces the H=1 error series
+    through the WHOLE scoring pipeline — not merely as a collapse-function
+    output.
+
+    It holds because ``smooth_errors`` applies ``np.abs()`` itself, which makes
+    the collapse's pre-``abs`` idempotent. That is a fact about two functions
+    that were written independently and could drift apart; this pins the
+    property end-to-end so a drift fails here instead of silently invalidating
+    the README's ablation.
+
+    Compared against ``e[..., 0]`` (the signed 1-step error, exactly what an
+    H=1 model produces) rather than ``|e[..., 0]|``, so the abs-idempotence is
+    part of what is asserted.
+    """
+
+    @staticmethod
+    def _cfg() -> Any:
+        from spacecraft_telemetry.core.config import ModelConfig
+
+        # Small smoothing/threshold windows so a short synthetic series still
+        # exercises steady-state behaviour rather than only the warmup ramp.
+        return ModelConfig(
+            error_smoothing_window=5,
+            threshold_window=12,
+            threshold_z=2.0,
+            threshold_min_anomaly_len=2,
+            prune_min_decrease=0.13,
+            min_error_value=0.05,
+        )
+
+    @pytest.mark.parametrize("eval_split", ["full_test", "hpo_portion", "final_portion"])
+    def test_scores_bit_for_bit_identically(self, eval_split: str) -> None:
+        from spacecraft_telemetry.model.scoring import (
+            _score_series,
+            collapse_forecast_errors,
+        )
+
+        rng = np.random.default_rng(20250820)
+        n, c, h = 240, 3, 10
+        # Signed errors with an injected excursion, so both arms actually flag
+        # something — comparing two all-zero metric dicts would prove nothing.
+        errors = rng.standard_normal((n, c, h)) * 0.1
+        errors[100:118, :, :] += 1.5
+        is_anomaly = np.zeros((n, c), dtype=bool)
+        is_anomaly[100:118, :] = True
+
+        cfg = self._cfg()
+        collapsed = collapse_forecast_errors(errors, "first")
+        assert collapsed.shape == (n, c)
+
+        for i in range(c):
+            multi_metrics, multi_smoothed, multi_threshold = _score_series(
+                collapsed[:, i], is_anomaly[:, i], cfg, eval_split, 0.6  # type: ignore[arg-type]
+            )
+            h1_metrics, h1_smoothed, h1_threshold = _score_series(
+                errors[:, i, 0], is_anomaly[:, i], cfg, eval_split, 0.6  # type: ignore[arg-type]
+            )
+            np.testing.assert_array_equal(multi_smoothed, h1_smoothed)
+            np.testing.assert_array_equal(multi_threshold, h1_threshold)
+            assert multi_metrics == h1_metrics
+            # Guard against the degenerate pass: if nothing was ever flagged,
+            # equality is vacuous.
+            assert multi_metrics["n_predicted_positive_labels"] > 0
+
+    def test_mean_reduction_does_not_have_the_property(self) -> None:
+        """The counterpart that makes the assertion above non-trivial: `mean`
+        is a genuinely different statistic, so it must NOT reproduce H=1."""
+        from spacecraft_telemetry.model.scoring import (
+            _score_series,
+            collapse_forecast_errors,
+        )
+
+        rng = np.random.default_rng(7)
+        errors = rng.standard_normal((200, 1, 10)) * 0.1
+        errors[80:95, :, :] += 1.5
+        is_anomaly = np.zeros(200, dtype=bool)
+        is_anomaly[80:95] = True
+        cfg = self._cfg()
+
+        mean_smoothed = _score_series(
+            collapse_forecast_errors(errors, "mean")[:, 0], is_anomaly, cfg, "full_test", 0.6
+        )[1]
+        h1_smoothed = _score_series(errors[:, 0, 0], is_anomaly, cfg, "full_test", 0.6)[1]
+        assert not np.allclose(mean_smoothed, h1_smoothed)
+
+
+def test_predict_multi_step_keeps_horizon_axis() -> None:
+    """predict() must NOT squeeze a univariate multi-step (B, 1, H) output —
+    doing so would collapse the channel axis and silently disagree with the
+    (B, 1, F) targets."""
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+
+    cfg = ModelConfig(hidden_dim=8, num_layers=1, dropout=0.0, forecast_steps=4)
+    model = build_model(cfg)
+    n, W, F = 6, cfg.window_size, 4
+    rng = np.random.default_rng(0)
+    x = torch.from_numpy(rng.standard_normal((n, W, 1)).astype(np.float32))
+    y = torch.from_numpy(rng.standard_normal((n, 1, F)).astype(np.float32))
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(x, y), batch_size=3, shuffle=False
+    )
+    preds, targets = predict(model, loader, torch.device("cpu"))
+    assert preds.shape == (n, 1, F)
+    assert targets.shape == (n, 1, F)
+
+
+def test_predict_output_shape_multivariate() -> None:
+    """A multivariate model's predict() output is (N, C) — docs/plans/021.
+
+    Unchanged code path: model(x) is already (B, C) and .squeeze(1) is a
+    no-op for C > 1, so this pins that behaviour rather than exercising new
+    logic in predict() itself.
+    """
+    from spacecraft_telemetry.core.config import ModelConfig
+    from spacecraft_telemetry.model.architecture import build_model
+    from spacecraft_telemetry.model.scoring import predict
+
+    C = 3
+    cfg = ModelConfig(
+        hidden_dim=8, num_layers=1, dropout=0.0,
+        input_channels=[f"channel_{i}" for i in range(C)],
+        target_channels=[f"channel_{i}" for i in range(C)],
+    )
+    model = build_model(cfg)
+    n, W = 20, cfg.window_size
+    rng = np.random.default_rng(0)
+    x_np = rng.standard_normal((n, W, C)).astype(np.float32)
+    y_np = rng.standard_normal((n, C)).astype(np.float32)
+    dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_np), torch.from_numpy(y_np))
+    loader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False)
+
+    preds, targets = predict(model, loader, torch.device("cpu"))
+
+    assert preds.shape == (n, C)
+    assert targets.shape == (n, C)
+    np.testing.assert_array_equal(targets, y_np)
+
+
 # ---------------------------------------------------------------------------
 # score_channel — integration test (slow)
 # ---------------------------------------------------------------------------
@@ -525,6 +816,221 @@ def test_score_channel_artifacts_and_metrics(
     assert "threshold.npy" in artifact_names, "threshold.npy not logged to MLflow"
     assert "threshold_config.json" in artifact_names, "threshold_config.json not logged to MLflow"
     assert "metrics" in artifact_names, "metrics/ dir not logged to MLflow"
+
+
+@pytest.mark.slow
+def test_score_channel_multivariate(
+    mlflow_uri: str,
+    tmp_path: Path,
+) -> None:
+    """A multivariate group scores per channel with the existing scorer,
+    unchanged — each channel's metrics dict is keyed under the group's
+    return dict. See docs/plans/021-multivariate-telemanom.md."""
+    import json as _json
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from mlflow.tracking import MlflowClient
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    window_size = 10
+    channels = ["channel_41", "channel_42"]
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+
+    def _write(split: str, ch: str, n: int, value_offset: float) -> None:
+        timestamps = [
+            pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+                pa.timestamp("us", tz="UTC")
+            )
+            for i in range(n)
+        ]
+        table = pa.table({
+            "telemetry_timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(
+                [float(i) + value_offset for i in range(n)], type=pa.float32()
+            ),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array([False] * n),
+        })
+        part_dir = (
+            processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={ch}"
+        )
+        part_dir.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, part_dir / "part.parquet")
+
+    for i, ch in enumerate(channels):
+        _write("train", ch, n=40, value_offset=float(i))
+        _write("test", ch, n=30, value_offset=float(i))
+
+    norm_file = processed_dir / mission / "normalization_params.json"
+    norm_file.parent.mkdir(parents=True, exist_ok=True)
+    norm_file.write_text(_json.dumps({ch: {"mean": 0.0, "std": 1.0} for ch in channels}))
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "mlflow": base_settings.mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+            "preprocess": base_settings.preprocess.model_copy(
+                update={"processed_data_dir": processed_dir}
+            ),
+            "model": base_settings.model.model_copy(update={
+                "artifacts_dir": tmp_path / "models",
+                "window_size": window_size,
+                "input_channels": channels,
+                "target_channels": channels,
+                "hidden_dim": 4,
+                "batch_size": 4,
+            }),
+        }
+    )
+
+    subsystem_key = "subsystem_1"
+    train_channel(settings, mission, subsystem_key)
+    metrics = score_channel(settings, mission, subsystem_key)
+
+    assert set(metrics.keys()) == set(channels)
+    for ch in channels:
+        ch_metrics = metrics[ch]
+        assert 0.0 <= ch_metrics["precision"] <= 1.0
+        assert 0.0 <= ch_metrics["f0_5"] <= 1.0
+
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    exp_name = experiment_name(settings.model.model_type, "scoring", mission)
+    exp = client.get_experiment_by_name(exp_name)
+    assert exp is not None
+    runs = client.search_runs([exp.experiment_id])
+    assert len(runs) == 1
+    tags = runs[0].data.tags
+    assert "channel_id" not in tags
+    assert tags.get("subsystem") == subsystem_key
+    assert tags.get("channels") == ",".join(channels)
+
+    artifact_names = {a.path for a in client.list_artifacts(runs[0].info.run_id)}
+    assert "errors" in artifact_names, "per-channel errors/ dir not logged"
+    assert "threshold" in artifact_names, "per-channel threshold/ dir not logged"
+    assert "threshold_config.json" in artifact_names
+    assert "metrics" in artifact_names
+
+    # Scoring the SAME model with the group reversed must be refused. Every
+    # shape still matches under a reorder — only the channel->column mapping
+    # moves — so without this guard each channel's metrics would be reported
+    # under the other channel's name (docs/reviews/021, item C1).
+    shuffled = list(reversed(channels))
+    settings_shuffled = settings.model_copy(update={
+        "model": settings.model.model_copy(
+            update={"input_channels": shuffled, "target_channels": shuffled}
+        )
+    })
+    with pytest.raises(ValueError, match="ORDER-SENSITIVE"):
+        score_channel(settings_shuffled, mission, subsystem_key)
+    assert len(client.search_runs([exp.experiment_id])) == 1, (
+        "the guard must fire before inference — no scoring run should be created"
+    )
+
+
+@pytest.mark.slow
+def test_score_channel_multi_step_horizon(mlflow_uri: str, tmp_path: Path) -> None:
+    """End-to-end H=10: train, score, and confirm the horizon collapses to the
+    same one-error-per-window contract the rest of the pipeline requires.
+
+    Also scores the SAME model twice with different reductions — the property
+    that makes the mean-vs-first comparison one training run rather than two.
+    """
+    import json as _json
+    from datetime import UTC, datetime
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from mlflow.tracking import MlflowClient
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.mlflow_tracking.conventions import experiment_name
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+
+    mission, channel = "ESA-Mission1", "channel_1"
+    processed_dir = tmp_path / "processed"
+    W, F = 10, 4
+    base = datetime(2000, 1, 1, tzinfo=UTC).timestamp()
+
+    def _write(split: str, n: int, anomaly_tail: int = 0) -> None:
+        ts = [
+            pa.scalar(base + i * 90, type=pa.timestamp("s", tz="UTC")).cast(
+                pa.timestamp("us", tz="UTC")
+            )
+            for i in range(n)
+        ]
+        flags = [False] * (n - anomaly_tail) + [True] * anomaly_tail
+        table = pa.table({
+            "telemetry_timestamp": pa.array(ts, type=pa.timestamp("us", tz="UTC")),
+            "value_normalized": pa.array(
+                [float(i % 7) for i in range(n)], type=pa.float32()
+            ),
+            "segment_id": pa.array(np.zeros(n, dtype=np.int32)),
+            "is_anomaly": pa.array(flags),
+        })
+        d = processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
+        d.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, d / "part.parquet")
+
+    _write("train", 80)
+    _write("test", 60, anomaly_tail=8)
+    norm = processed_dir / mission / "normalization_params.json"
+    norm.parent.mkdir(parents=True, exist_ok=True)
+    norm.write_text(_json.dumps({channel: {"mean": 0.0, "std": 1.0}}))
+
+    b = load_settings("test")
+    settings = b.model_copy(update={
+        "mlflow": b.mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+        "preprocess": b.preprocess.model_copy(update={"processed_data_dir": processed_dir}),
+        "model": b.model.model_copy(update={
+            "artifacts_dir": tmp_path / "models", "window_size": W,
+            "forecast_steps": F, "hidden_dim": 4, "batch_size": 4,
+        }),
+    })
+
+    train_channel(settings, mission, channel)
+
+    metrics_mean = score_channel(settings, mission, channel)
+    assert 0.0 <= metrics_mean["f0_5"] <= 1.0
+
+    # Same trained model, different reduction — no retraining involved.
+    settings_first = settings.model_copy(update={
+        "model": settings.model.model_copy(update={"forecast_error_reduction": "first"})
+    })
+    metrics_first = score_channel(settings_first, mission, channel)
+    assert 0.0 <= metrics_first["f0_5"] <= 1.0
+
+    # Both runs must record which reduction produced them, or they are
+    # indistinguishable in MLflow afterwards.
+    client = MlflowClient(tracking_uri=mlflow_uri)
+    exp = client.get_experiment_by_name(
+        experiment_name(settings.model.model_type, "scoring", mission)
+    )
+    runs = client.search_runs([exp.experiment_id], order_by=["attributes.start_time DESC"])
+    reductions = {r.data.params.get("forecast_error_reduction") for r in runs}
+    assert reductions == {"mean", "first"}
+    assert all(r.data.params.get("forecast_steps") == str(F) for r in runs)
+
+    # ...but the HORIZON is not a scoring-time knob: the trained head emits F
+    # steps per channel, so scoring the same model under a different
+    # forecast_steps must be refused rather than silently compared against
+    # differently-shaped targets (docs/reviews/021, item A1).
+    settings_wrong_h = settings.model_copy(update={
+        "model": settings.model.model_copy(update={"forecast_steps": F - 1})
+    })
+    with pytest.raises(ValueError, match="forecast_steps"):
+        score_channel(settings_wrong_h, mission, channel)
+    # The guard must fire BEFORE inference — no extra scoring run was created.
+    runs_after = client.search_runs([exp.experiment_id])
+    assert len(runs_after) == len(runs)
 
 
 @pytest.mark.slow

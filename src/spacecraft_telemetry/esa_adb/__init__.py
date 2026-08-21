@@ -27,6 +27,7 @@ from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals,
     channel_detection_intervals_from_spec,
     find_scoring_run,
+    find_scoring_run_and_artifacts,
     mission_detection_intervals,
     per_channel_detection_intervals,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "channel_timeline",
     "corrected_event_wise",
     "find_scoring_run",
+    "find_scoring_run_and_artifacts",
     "group_events",
     "intersect",
     "load_events",

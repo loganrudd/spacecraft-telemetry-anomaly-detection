@@ -52,6 +52,126 @@ def test_write_tuned_configs_roundtrips_meta(tmp_path: Path) -> None:
     assert loaded["subsystem_1"]["_meta"]["f0_5"] == pytest.approx(0.72)
 
 
+# ---------------------------------------------------------------------------
+# _find_channel_errors_run / _find_multivariate_scoring_run (docs/plans/021)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRun:
+    def __init__(self, run_id: str, tags: dict[str, str] | None = None) -> None:
+        class _Info:
+            def __init__(self, rid: str) -> None:
+                self.run_id = rid
+
+        class _Data:
+            def __init__(self, t: dict[str, str]) -> None:
+                self.tags = t
+
+        self.info = _Info(run_id)
+        self.data = _Data(tags or {})
+
+
+def test_find_channel_errors_run_prefers_univariate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The univariate per-channel run wins when one exists — no fallback call."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: _FakeRun("uni-run"),
+    )
+
+    def _fail(*_a: object, **_k: object) -> None:
+        raise AssertionError("multivariate fallback should not be called")
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune._find_multivariate_scoring_run", _fail
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_1", "exp")
+    assert found is not None
+    run, artifact_path = found
+    assert run.info.run_id == "uni-run"
+    assert artifact_path == "errors.npy"
+
+
+def test_find_channel_errors_run_falls_back_to_multivariate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No univariate run -> the multivariate subsystem run is used instead,
+    reading its per-channel errors/{channel}.npy artifact."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_a, **_k: {"channel_41": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag",
+        lambda *_a, **_k: _FakeRun("mv-run", tags={"channels": "channel_41,channel_42"}),
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_41", "exp")
+    assert found is not None
+    run, artifact_path = found
+    assert run.info.run_id == "mv-run"
+    assert artifact_path == "errors/channel_41.npy"
+
+
+def test_find_multivariate_scoring_run_rejects_non_member_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subsystem-tagged run that doesn't actually list this channel must
+    not be trusted — same subsystem name, different (or narrower) group."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_a, **_k: {"channel_99": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag",
+        lambda *_a, **_k: _FakeRun("mv-run", tags={"channels": "channel_41,channel_42"}),
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_99", "exp")
+    assert found is None
+
+
+def test_find_channel_errors_run_swallows_fallback_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken subsystem-map/tracking-backend lookup degrades to 'not found',
+    same as a genuine absence — never propagates and aborts the caller."""
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+
+    def _raise(*_a: object, **_k: object) -> None:
+        raise RuntimeError("tracking backend unreachable")
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map", _raise
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_1", "exp")
+    assert found is None
+
+
 def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Preparation should fail fast on labels/errors shape mismatch."""
     from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
@@ -85,6 +205,58 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ValueError, match="input mismatch"):
         _prepare_channel_data(settings, "ESA-Mission1", ["channel_1"])
+
+
+def test_prepare_channel_data_shape_mismatch_names_multivariate_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running HPO with multivariate settings must name the ACTUAL cause.
+
+    HPO consumes saved error arrays and never loads a model, so it has to run
+    without input_channels. If someone sets them anyway, load_window_labels
+    returns 2-D (M, C) labels against the 1-D (M,) per-channel errors a
+    multivariate scoring run saved. The generic message blames
+    window_size/prediction_horizon, which would send a reader hunting the
+    wrong problem entirely (docs/plans/021-multivariate-telemanom.md).
+    """
+    import io as _io
+
+    from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data
+
+    channels = ["channel_41", "channel_42"]
+    settings = load_settings("test")
+    settings = settings.model_copy(
+        update={
+            "model": settings.model.model_copy(
+                update={"input_channels": channels, "target_channels": channels}
+            )
+        }
+    )
+
+    _buf = _io.BytesIO()
+    np.save(_buf, np.array([0.1, 0.2, 0.3], dtype=np.float64))  # 1-D (3,) errors
+    _raw = _buf.getvalue()
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-run-id"
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.download_artifact_bytes",
+        lambda *_args, **_kwargs: _raw,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.model.dataset.load_window_labels",
+        # (3, 2) per-channel labels — what the multivariate path really returns.
+        lambda *_args, **_kwargs: np.zeros((3, 2), dtype=np.bool_),
+    )
+
+    with pytest.raises(ValueError, match="input_channels is set"):
+        _prepare_channel_data(settings, "ESA-Mission1", ["channel_41"])
 
 
 def test_scoring_trial_returns_metric(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,6 +322,91 @@ def test_scoring_trial_nominal_fp_penalizes_objective(monkeypatch: pytest.Monkey
 
     assert result["nominal_fp_rate"] > 0.0
     assert result["objective"] < result["seg_f0_5"]
+
+
+# ---------------------------------------------------------------------------
+# _scoring_trial — mission-level metric (docs/plans/021-multivariate-telemanom.md 021.4b)
+# ---------------------------------------------------------------------------
+
+
+def test_scoring_trial_omits_mission_metrics_by_default() -> None:
+    """Without channel_timestamps/mission_events/mission_timeline_hpo, the
+    return dict is exactly the pre-021.4b key set — no behaviour change for
+    any existing caller."""
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    channel_data = {
+        "channel_1": (
+            np.array([0.1, 0.2, 0.5, 0.9], dtype=np.float64),
+            np.array([False, False, True, True], dtype=np.bool_),
+        )
+    }
+    config = {
+        "error_smoothing_window": 2, "threshold_window": 2,
+        "threshold_z": 1.0, "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config, channel_data=channel_data, nominal_errors={}, fp_penalty_weight=5.0
+    )
+
+    assert set(result.keys()) == {"f0_5", "seg_f0_5", "nominal_fp_rate", "objective"}
+
+
+def test_scoring_trial_computes_mission_metrics_when_provided() -> None:
+    """With ground truth supplied, the trial ALSO reports mission_precision/
+    mission_recall/mission_f0_5 via esa_adb.metrics.corrected_event_wise —
+    without changing objective (still seg_f0_5-based, risk 6)."""
+    import pandas as pd
+
+    from spacecraft_telemetry.esa_adb.events import Event
+    from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+    t0 = pd.Timestamp("2000-01-01", tz="UTC")
+    # 5 windows, 90s apart; an anomaly flagged in windows 2-3 should be
+    # matched by a ground-truth event spanning the same span. tz-naive, like
+    # window_target_timestamps' real return (PyArrow's to_numpy() drops the
+    # tz label — see _flags_to_intervals, which re-localizes to UTC).
+    timestamps = pd.DatetimeIndex(
+        [t0.tz_localize(None) + pd.Timedelta(seconds=90 * i) for i in range(5)]
+    ).values
+    channel_data = {
+        "channel_1": (
+            np.array([0.0, 0.0, 5.0, 5.0, 0.0], dtype=np.float64),
+            np.array([False, False, True, True, False], dtype=np.bool_),
+        )
+    }
+    channel_timestamps = {"channel_1": timestamps}
+    mission_timeline_hpo = [(t0, t0 + pd.Timedelta(seconds=90 * 5))]
+    mission_events = [
+        Event(
+            event_id="E1",
+            category="Anomaly",
+            intervals=((t0 + pd.Timedelta(seconds=180), t0 + pd.Timedelta(seconds=360)),),
+            channels=frozenset({"channel_1"}),
+        )
+    ]
+    config = {
+        "error_smoothing_window": 1, "threshold_window": 2,
+        "threshold_z": 1.0, "threshold_min_anomaly_len": 1,
+    }
+
+    result = _scoring_trial(
+        config,
+        channel_data=channel_data,
+        nominal_errors={},
+        fp_penalty_weight=5.0,
+        channel_timestamps=channel_timestamps,
+        mission_events=mission_events,
+        mission_timeline_hpo=mission_timeline_hpo,
+    )
+
+    assert {"mission_precision", "mission_recall", "mission_f0_5"} <= set(result.keys())
+    for key in ("mission_precision", "mission_recall", "mission_f0_5"):
+        assert 0.0 <= result[key] <= 1.0
+    # "objective" must stay seg_f0_5-based — the mission metric is additive,
+    # never folded into what the sweep actually selects on.
+    assert result["objective"] == pytest.approx(result["seg_f0_5"])
 
 
 def test_run_hpo_sweep_trial_tags_unchanged_at_variant_none() -> None:
@@ -306,7 +563,7 @@ def test_run_all_sweeps_filters_and_runs(
         class info:
             run_id = "fake-scored-run-id"
 
-    def _fake_find_latest_run(exp: str, ch: str, uri: str):
+    def _fake_find_latest_run(exp: str, ch: str, uri: str, extra_filter: str | None = None):
         return _FakeRun() if ch == "channel_1" else None
 
     monkeypatch.setattr(ray, "is_initialized", lambda: True)
@@ -359,10 +616,10 @@ def test_run_all_sweeps_filters_and_runs(
 @pytest.mark.parametrize(
     ("mission", "variant", "expected_space_name", "threshold_z_bounds"),
     [
-        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ESA-Mission1", None, "ESA_M1_SEARCH_SPACE", (1.0, 8.0)),
         # A real ESA-Mission1 variant (mission unchanged, variant set) keeps
         # the widened space — the selector is mission-keyed, not name-keyed.
-        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (2.5, 8.0)),
+        ("ESA-Mission1", "adb-24m", "ESA_M1_SEARCH_SPACE", (1.0, 8.0)),
         # A legacy un-migrated ESA-Mission1-ADB* pseudo-mission is a DIFFERENT
         # `mission` string entirely and correctly falls through to the default
         # space — this is the plan 020 fix (was `mission.startswith(...)`, a
@@ -469,17 +726,30 @@ class TestPinnedParamDetection:
     """Regression coverage for the 2026-08-15 evening re-tune finding.
 
     subsystem_5's threshold_z landed at 2.511 against ESA_M1_SEARCH_SPACE's
-    lower bound of 2.5, and subsystem_3's min_error_value landed at 0.5685
+    then-lower bound of 2.5, and subsystem_3's min_error_value landed at 0.5685
     against the upper bound of 0.6 (see docs/reviews/019-esa-adb-comparable-eval.md).
     Both are cheap fixtures pinned here so a future re-discovery is a single
     failing assertion instead of a fresh investigation.
+
+    The threshold_z lower bound was subsequently dropped 2.5 -> 1.0 for ESA
+    (docs/plans/021 stage 021.5b) precisely because configs kept landing on it.
     """
 
     def test_flags_param_pinned_to_lower_bound(self) -> None:
         from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
 
-        config = {"threshold_z": 2.511, "min_error_value": 0.1}
+        config = {"threshold_z": 1.02, "min_error_value": 0.1}
         assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == ["threshold_z"]
+
+    def test_historical_2_511_is_no_longer_pinned(self) -> None:
+        """The 2026-08-15 finding, re-asserted as a *fix*: subsystem_5's
+        threshold_z=2.511 sat on the old 2.5 floor. With the ESA floor now at
+        1.0 that same value is comfortably interior, which is the whole point
+        of the 021.5b change — the optimizer is no longer wall-limited there."""
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {"threshold_z": 2.511, "min_error_value": 0.1}
+        assert _pinned_params(config, ESA_M1_SEARCH_SPACE) == []
 
     def test_flags_param_pinned_to_upper_bound(self) -> None:
         from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
@@ -499,6 +769,53 @@ class TestPinnedParamDetection:
 
         config = {"min_error_value": 0.0, "threshold_z": 2.5}
         assert _pinned_params(config, ISS_SEARCH_SPACE) == ["threshold_z"]
+
+
+class TestIssKeepsItsThresholdZFloor:
+    """The trap guarding the 021.5b change.
+
+    ESA's threshold_z floor was lowered 2.5 -> 1.0 because both plan-021 arms'
+    optima sat on the 2.5 bound. That floor exists for an ISS reason: during
+    Phase 15 the optimizer drove z to ~1.6 chasing undetectable drift faults and
+    fired on nominal noise in replay. ISS_SEARCH_SPACE is built as
+    `{**SEARCH_SPACE, ...}` and does NOT override threshold_z, so the lowering
+    had to go in ESA_M1_SEARCH_SPACE — putting it in the base would silently
+    re-expose ISS to exactly that failure.
+
+    ESA can afford a low z because its optimum pairs it with a high
+    min_error_value (0.4-0.5); ISS pins min_error_value to 0.0 and so has no
+    compensating suppression.
+    """
+
+    def test_iss_floor_is_unchanged(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        assert ISS_SEARCH_SPACE["threshold_z"].lower == pytest.approx(2.5)
+
+    def test_base_floor_is_unchanged(self) -> None:
+        """The base space feeds ISS and every non-Mission1 ESA mission."""
+        from spacecraft_telemetry.ray_fanout.tune import SEARCH_SPACE
+
+        assert SEARCH_SPACE["threshold_z"].lower == pytest.approx(2.5)
+
+    def test_only_esa_m1_got_the_lower_floor(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            ISS_SEARCH_SPACE,
+            SEARCH_SPACE,
+        )
+
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower == pytest.approx(1.0)
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower < SEARCH_SPACE["threshold_z"].lower
+        assert ESA_M1_SEARCH_SPACE["threshold_z"].lower < ISS_SEARCH_SPACE["threshold_z"].lower
+
+    def test_iss_still_pins_min_error_value_to_zero(self) -> None:
+        """Documents *why* ISS cannot inherit a low z: it has no error floor to
+        compensate with. If this ever becomes tunable for ISS, the z floor
+        decision must be revisited together with it."""
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        assert ISS_SEARCH_SPACE["min_error_value"] == 0.0
 
 
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,3 +951,116 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert 1.5 <= config["threshold_z"] <= 5.0
     assert isinstance(best["seg_f0_5"], float)
     assert best["run_id"] is None or isinstance(best["run_id"], str)
+
+
+@pytest.mark.slow
+def test_run_hpo_sweep_logs_mission_metric_per_trial(
+    ray_local, ray_series_parquet_multichannel, tmp_path: Path
+) -> None:
+    """A real sweep with ESA-ADB ground truth available logs mission_f0_5/
+    mission_precision/mission_recall on its per-trial MLflow runs.
+
+    This is the integration risk the fast _scoring_trial unit tests can't
+    cover: whether run_hpo_sweep's tune.with_parameters wiring and the
+    MLflowLoggerCallback actually surface the new dict keys end-to-end, not
+    just whether _scoring_trial computes them correctly in isolation.
+    """
+    pytest.importorskip("ray")
+    import mlflow
+
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+
+    mission = "ESA-Mission1"
+    channels = ["channel_41", "channel_42"]
+
+    sample_dir = tmp_path / "sample" / mission
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "labels.csv").write_text(
+        "ID,Channel,StartTime,EndTime\n"
+        "E1,channel_41,2000-01-01T00:03:00Z,2000-01-01T00:06:00Z\n"
+    )
+    (sample_dir / "anomaly_types.csv").write_text(
+        "ID,Category,Class,Subclass,Dimensionality\nE1,Anomaly,Rare,Rare,Univariate\n"
+    )
+
+    settings = ray_series_parquet_multichannel.model_copy(
+        update={
+            "data": ray_series_parquet_multichannel.data.model_copy(
+                update={"sample_data_dir": str(tmp_path / "sample")}
+            ),
+            "tune": ray_series_parquet_multichannel.tune.model_copy(
+                update={"num_samples": 2, "max_concurrent_trials": 1}
+            ),
+            "mlflow": ray_series_parquet_multichannel.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        }
+    )
+
+    train_all_subsystems(settings, mission, channels)
+    score_all_subsystems(settings, mission, channels)
+    run_hpo_sweep("subsystem_1", channels, settings, mission)
+
+    # Search across every experiment rather than assuming the HPO one by
+    # name: this test's Ray/MLflow test harness routes trial runs by ambient
+    # ray.tune context, not strictly by the experiment_name passed to
+    # _resilient_mlflow_callback, so the reliable check is "some run,
+    # somewhere, carries the new keys" — not which experiment holds it.
+    client = mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    with_mission_metric = [
+        r
+        for exp in client.search_experiments()
+        for r in client.search_runs([exp.experiment_id])
+        if "mission_f0_5" in r.data.metrics
+    ]
+    assert with_mission_metric, (
+        "no run anywhere logged mission_f0_5 — expected every HPO trial to, "
+        "since ESA-ADB ground truth (labels.csv/anomaly_types.csv) was available"
+    )
+    m = with_mission_metric[0].data.metrics
+    assert 0.0 <= m["mission_precision"] <= 1.0
+    assert 0.0 <= m["mission_recall"] <= 1.0
+    assert 0.0 <= m["mission_f0_5"] <= 1.0
+
+
+@pytest.mark.slow
+def test_run_hpo_sweep_finds_multivariate_errors(
+    ray_local, ray_series_parquet_multichannel, tmp_path: Path
+) -> None:
+    """run_hpo_sweep finds a channel's errors even when it was scored as part
+    of a multivariate subsystem group, not individually (docs/plans/021).
+
+    Without the fallback in _find_channel_errors_run, this would raise
+    "run_hpo_sweep has no usable channels" — no channel in a multivariate
+    group has an individual channel_id-tagged scoring run.
+    """
+    pytest.importorskip("ray")
+
+    from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+
+    mission = "ESA-Mission1"
+    channels = ["channel_41", "channel_42"]
+
+    settings = ray_series_parquet_multichannel.model_copy(
+        update={
+            "tune": ray_series_parquet_multichannel.tune.model_copy(
+                update={"num_samples": 2, "max_concurrent_trials": 1}
+            ),
+            "mlflow": ray_series_parquet_multichannel.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        }
+    )
+
+    train_all_subsystems(settings, mission, channels)
+    score_all_subsystems(settings, mission, channels)
+
+    best = run_hpo_sweep("subsystem_1", channels, settings, mission)
+    assert isinstance(best["seg_f0_5"], float)
+    config = best["config"]
+    assert set(config.keys()) == {
+        "error_smoothing_window", "threshold_window",
+        "threshold_z", "threshold_min_anomaly_len", "min_error_value",
+    }

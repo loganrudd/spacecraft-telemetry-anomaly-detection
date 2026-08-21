@@ -4,6 +4,12 @@ MISSION          ?= ESA-Mission1
 CHANNEL          ?=
 CHANNELS         ?=
 SUBSYSTEM        ?=
+# Experiment variant — output namespace only; raw input stays keyed on MISSION.
+# See docs/plans/020-experiment-variant-axis.md.
+VARIANT          ?=
+# 1 = train/score ONE joint n-in/n-out model per subsystem group instead of one
+# model per channel. See docs/plans/021-multivariate-telemanom.md.
+MULTIVARIATE     ?=
 PORT             ?= 8000
 REPLAY_DATA_DIR  ?=
 INJECTED         ?=
@@ -393,14 +399,21 @@ cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQ
 # MLFLOW_URL is fetched live so the Makefile works without storing it.
 _mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
 
-cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2,…])
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [CHANNELS=ch1,ch2,…])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) CHANNELS=$(CHANNELS) \
+		VARIANT=$(VARIANT) \
 		./scripts/cloud_preprocess.sh
 	# ISS 6-channel validation set:
 	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
+# FORECAST_STEPS is forwarded explicitly: recipe shells inherit the caller's
+# environment, so an exported SPACECRAFT_MODEL__FORECAST_STEPS reaches the
+# script but NEVER the RayJob pods (the YAML lists env vars one by one), which
+# trains H=1 while looking like a success. Pass FORECAST_STEPS=10 instead.
+cloud-train:      ## Submit Ray training RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [FORECAST_STEPS=10] [CHANNELS=ch1,ch2 | CHANNELS_FROM=gs://…] [NUM_GPUS=1] [CPU=1])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) MULTIVARIATE=$(MULTIVARIATE) \
+		FORECAST_STEPS=$(FORECAST_STEPS) \
 		CHANNELS=$(CHANNELS) CHANNELS_FROM=$(CHANNELS_FROM) NUM_GPUS=$(NUM_GPUS) CPU=$(CPU) \
 		./scripts/cloud_train.sh
 
@@ -417,19 +430,22 @@ cloud-inject:     ## Inject faults into the GCS nominal test split → gs://…-
 	# ISS 6-channel validation set:
 	# make cloud-inject MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 
-cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
+cloud-tune:       ## Submit Ray Tune RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [INJECTED=1 [CHANNELS=ch1,ch2] for ISS HPO])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
+		VARIANT=$(VARIANT) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) \
 		./scripts/cloud_tune.sh
 
-cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset.
+cloud-score:      ## Score models on GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [MULTIVARIATE=1] [TUNED=1] [INJECTED=1 [CHANNELS=…]] [NUM_GPUS=0.2] [EVAL_SPLIT=full_test] [CPU=1]). Baseline by default; TUNED=1 applies HPO params (run after cloud-tune); INJECTED=1 scores the _injected dataset; MULTIVARIATE=1 must match how the model was trained. FORECAST_STEPS must match training; FORECAST_ERROR_REDUCTION=mean|first|max is scoring-time only.
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) TUNED=$(TUNED) NUM_GPUS=$(NUM_GPUS) EVAL_SPLIT=$(EVAL_SPLIT) \
+		VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) MULTIVARIATE=$(MULTIVARIATE) \
+		FORECAST_STEPS=$(FORECAST_STEPS) FORECAST_ERROR_REDUCTION=$(FORECAST_ERROR_REDUCTION) \
 		INJECTED=$(INJECTED) CHANNELS=$(CHANNELS) CPU=$(CPU) \
 		./scripts/cloud_score.sh
 
-cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [SUBSYSTEM=…] [CHANNEL=…])
+cloud-drift:      ## Run Evidently drift batch against cloud data (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [SUBSYSTEM=…] [CHANNEL=…])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MLFLOW_URL=$(_mlflow_url) MISSION=$(MISSION) \
-	SUBSYSTEM=$(SUBSYSTEM) CHANNEL=$(CHANNEL) \
+	VARIANT=$(VARIANT) SUBSYSTEM=$(SUBSYSTEM) CHANNEL=$(CHANNEL) \
 		./scripts/cloud_drift.sh
 
 seed-reference-profiles: ## Build + upload Evidently reference profiles to GCS (PROJECT_ID=… MISSION=…)

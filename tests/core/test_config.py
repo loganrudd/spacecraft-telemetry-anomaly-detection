@@ -284,6 +284,85 @@ class TestLoadSettings:
 
 
 # ---------------------------------------------------------------------------
+# ModelConfig.input_channels / target_channels (Plan 021 — multivariate Telemanom)
+# ---------------------------------------------------------------------------
+
+
+class TestModelChannelGroup:
+    def test_default_is_none(self) -> None:
+        cfg = Settings().model
+        assert cfg.input_channels is None
+        assert cfg.target_channels is None
+
+    def test_accepts_matching_lists(self) -> None:
+        cfg = Settings(
+            model={
+                "input_channels": ["channel_41", "channel_42"],
+                "target_channels": ["channel_41", "channel_42"],
+            }
+        ).model
+        assert cfg.input_channels == ["channel_41", "channel_42"]
+        assert cfg.target_channels == ["channel_41", "channel_42"]
+
+    def test_rejects_empty_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="non-empty"):
+            Settings(model={"input_channels": [], "target_channels": []})
+
+    def test_rejects_duplicate_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="duplicates"):
+            Settings(
+                model={
+                    "input_channels": ["channel_41", "channel_41"],
+                    "target_channels": ["channel_41", "channel_41"],
+                }
+            )
+
+    def test_rejects_target_channels_without_input_channels(self) -> None:
+        with pytest.raises(ValidationError, match="both be None or both be set"):
+            Settings(model={"target_channels": ["channel_41"]})
+
+    def test_rejects_input_channels_without_target_channels(self) -> None:
+        with pytest.raises(ValidationError, match="both be None or both be set"):
+            Settings(model={"input_channels": ["channel_41"]})
+
+    def test_forecast_steps_defaults_to_one(self) -> None:
+        """1 = the pre-021.7 scalar-target model."""
+        assert Settings().model.forecast_steps == 1
+
+    def test_forecast_steps_accepts_ten(self) -> None:
+        assert Settings(model={"forecast_steps": 10}).model.forecast_steps == 10
+
+    def test_forecast_steps_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match=">= 1"):
+            Settings(model={"forecast_steps": 0})
+
+    def test_forecast_error_reduction_default_and_choices(self) -> None:
+        assert Settings().model.forecast_error_reduction == "mean"
+        for mode in ("mean", "first", "max"):
+            assert Settings(model={"forecast_error_reduction": mode}).model. \
+                forecast_error_reduction == mode
+
+    def test_forecast_error_reduction_rejects_unknown(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(model={"forecast_error_reduction": "median"})
+
+    def test_forecast_steps_is_independent_of_prediction_horizon(self) -> None:
+        """They are different knobs — a COUNT of forecast steps versus an
+        OFFSET to the first one — and must both be settable."""
+        cfg = Settings(model={"forecast_steps": 10, "prediction_horizon": 3}).model
+        assert (cfg.forecast_steps, cfg.prediction_horizon) == (10, 3)
+
+    def test_rejects_target_channels_not_matching_input(self) -> None:
+        with pytest.raises(ValidationError, match="must equal input_channels"):
+            Settings(
+                model={
+                    "input_channels": ["channel_41", "channel_42"],
+                    "target_channels": ["channel_42", "channel_41"],
+                }
+            )
+
+
+# ---------------------------------------------------------------------------
 # Settings.variant (Plan 020 — experiment variant axis)
 # ---------------------------------------------------------------------------
 

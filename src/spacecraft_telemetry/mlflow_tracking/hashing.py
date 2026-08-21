@@ -93,3 +93,63 @@ def training_data_hash(
         ValueError: If the train partition directory does not exist.
     """
     return partition_hash(processed_data_dir, mission, channel, "train", variant=variant)
+
+
+def group_partition_hash(
+    processed_data_dir: Path | str,
+    mission: str,
+    channels: list[str],
+    split: str,
+    variant: str | None = None,
+) -> str:
+    """Return one fingerprint over a *group* of channels' Parquet partitions.
+
+    Same construction as :func:`partition_hash` (SHA-256 over sorted, JSON-
+    serialised entries, filenames only, no timestamps) extended with a
+    channel axis: hashes ``(channel, filename, size_in_bytes)`` triples
+    across every channel in the group instead of ``(filename, size_in_bytes)``
+    pairs for one.
+
+    Deliberately NOT implemented by calling ``partition_hash`` per channel and
+    hashing the digests — that would still work, but the direct construction
+    keeps the payload auditable (one JSON blob, not a hash-of-hashes) and, more
+    importantly, keeps ``partition_hash`` itself untouched: existing univariate
+    ``training_data_hash`` tags must keep the exact values already recorded
+    against production models (docs/plans/021-multivariate-telemanom.md is
+    additive, not a rename).
+
+    Used for multivariate models (docs/plans/021-multivariate-telemanom.md),
+    where "the" training data spans several channel partitions, not one.
+
+    Args:
+        processed_data_dir: Root of preprocessed output (e.g. "data/processed").
+        mission:            Mission ID, e.g. "ESA-Mission1".
+        channels:            Ordered channel_ids in the group.
+        split:               Partition name, e.g. "train" or "test".
+        variant:             Experiment variant. Defaults to None (unchanged).
+
+    Returns:
+        64-character lowercase hex string (SHA-256).
+
+    Raises:
+        ValueError: If any channel's partition directory does not exist.
+    """
+    entries: list[tuple[str, str, int]] = []
+    for channel in channels:
+        part_dir = output_path(
+            processed_data_dir, mission, variant,
+            split, f"mission_id={mission}", f"channel_id={channel}",
+        )
+        if not part_dir.exists():
+            raise ValueError(
+                f"{split.capitalize()} partition directory not found: {part_dir}. "
+                "Run the preprocessing pipeline before computing group_partition_hash."
+            )
+        entries.extend(
+            (channel, p.name, p.stat().st_size)
+            for p in part_dir.iterdir()
+            if p.is_file()
+        )
+    entries.sort()
+    payload = json.dumps(entries, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()

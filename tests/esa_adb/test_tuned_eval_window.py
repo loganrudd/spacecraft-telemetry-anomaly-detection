@@ -1,6 +1,6 @@
-"""Tests for esa_adb.report.tuned_eval_window / _hpo_cutoff — the leakage boundary.
+"""Tests for esa_adb.report.tuned_eval_window / hpo_cutoff — the leakage boundary.
 
-_hpo_cutoff separates the HPO-tuned portion of each channel's test window from
+hpo_cutoff separates the HPO-tuned portion of each channel's test window from
 the held-out portion the "tuned" report row is scored against. If this is
 wrong, every tuned number on this branch is contaminated (see docs/plans/019).
 
@@ -18,7 +18,7 @@ import pytest
 
 from spacecraft_telemetry.core.config import Settings, load_settings
 from spacecraft_telemetry.esa_adb.intervals import normalize
-from spacecraft_telemetry.esa_adb.report import _hpo_cutoff, tuned_eval_window
+from spacecraft_telemetry.esa_adb.report import hpo_cutoff, tuned_eval_window
 from spacecraft_telemetry.esa_adb.timeline import mission_timeline
 
 _MISSION = "ESA-Mission1-TunedWindowTest"
@@ -89,7 +89,7 @@ class TestHpoCutoff:
         _write_channel(processed_dir, "channel_b", n_rows=14)
         settings = _settings(processed_dir)
 
-        cutoff = _hpo_cutoff(settings, _MISSION, ["channel_a", "channel_b"])
+        cutoff = hpo_cutoff(settings, _MISSION, ["channel_a", "channel_b"])
 
         base = datetime(2000, 1, 1, tzinfo=UTC)
         # channel_a's cutoff: target timestamp at window index 10 -> row (3+10)=13.
@@ -109,7 +109,7 @@ class TestHpoCutoff:
         _write_channel(processed_dir, "channel_a", n_rows=20)  # M = 17 windows
         settings = _settings(processed_dir, hpo_eval_fraction=1.0)
 
-        cutoff = _hpo_cutoff(settings, _MISSION, ["channel_a"])
+        cutoff = hpo_cutoff(settings, _MISSION, ["channel_a"])
 
         base = datetime(2000, 1, 1, tzinfo=UTC)
         # Without the clamp, int(17*1.0)=17 would index out of bounds (valid
@@ -122,7 +122,7 @@ class TestHpoCutoff:
         _write_channel(processed_dir, "channel_a", n_rows=20)
         settings = _settings(processed_dir)
 
-        cutoff = _hpo_cutoff(settings, _MISSION, ["channel_a"])
+        cutoff = hpo_cutoff(settings, _MISSION, ["channel_a"])
 
         assert cutoff.tzinfo is not None
         assert str(cutoff.tzinfo) == "UTC"
@@ -134,7 +134,7 @@ class TestHpoCutoff:
         settings = _settings(processed_dir)
 
         with pytest.raises(ValueError, match="No test windows found"):
-            _hpo_cutoff(settings, _MISSION, ["channel_a"])
+            hpo_cutoff(settings, _MISSION, ["channel_a"])
 
 
 class TestTunedEvalWindow:
@@ -160,9 +160,21 @@ class TestTunedEvalWindow:
         settings = _settings(processed_dir)
 
         timeline_full = mission_timeline(settings, _MISSION, ["channel_a"])
-        cutoff = _hpo_cutoff(settings, _MISSION, ["channel_a"])
+        cutoff = hpo_cutoff(settings, _MISSION, ["channel_a"])
         result = tuned_eval_window(settings, _MISSION, ["channel_a"], timeline_full)
 
         assert all(start >= cutoff for start, _ in result), (
             "no interval in the tuned window may start before the HPO cutoff"
         )
+
+
+def test_private_alias_still_resolves_to_the_public_name() -> None:
+    """`_hpo_cutoff` had two consumers OUTSIDE esa_adb (ray_fanout/tune.py and
+    scripts/threshold_ceiling.py), which made the leading underscore a false
+    statement about its scope. The rename keeps the private name as an alias so
+    nothing breaks mid-migration; this pins that they are the same object, not
+    two implementations that could drift.
+    """
+    from spacecraft_telemetry.esa_adb import report
+
+    assert report._hpo_cutoff is report.hpo_cutoff

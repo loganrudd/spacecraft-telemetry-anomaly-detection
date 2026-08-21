@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,7 @@ from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals,
     channel_detection_intervals_from_spec,
     find_scoring_run,
+    find_scoring_run_and_artifacts,
     mission_detection_intervals,
     mission_intervals_from_per_channel,
     per_channel_detection_intervals,
@@ -197,6 +199,222 @@ class TestFindScoringRun:
         )
         exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
         assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == tuned_run_id
+
+
+class TestTunedRunClassification:
+    """A run scored with grid-selected params must NOT read as the untuned
+    baseline. score_channel writes `tuned_from_run` only when given an HPO run
+    id; a config from scripts/threshold_ceiling.py has provenance but no such
+    run, so it carries `tuned_source` instead. If only the former counted, that
+    run would be filed as the protocol-matched Hundman-defaults row the ESA-ADB
+    report compares against the paper — a tuned config masquerading as untuned.
+    """
+
+    def _run_with(self, tags: dict[str, str]) -> object:
+        class _Run:
+            def __init__(self, t: dict[str, str]) -> None:
+                class _D:
+                    def __init__(self, tt: dict[str, str]) -> None:
+                        self.tags = tt
+
+                self.data = _D(t)
+
+        return _Run(tags)
+
+    def test_tuned_from_run_counts_as_tuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"tuned_from_run": "abc"})) is True
+
+    def test_tuned_source_counts_as_tuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"tuned_source": "grid"})) is True
+
+    def test_neither_tag_is_untuned(self) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _is_tuned_run
+
+        assert _is_tuned_run(self._run_with({"eval_split": "full_test"})) is False
+
+    def test_grid_tuned_run_is_not_returned_as_the_untuned_baseline(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """End-to-end: a genuine untuned run and a NEWER grid-tuned run coexist.
+        Asking for untuned must return the older genuine baseline, not the
+        newer grid run — recency must not override the tuned/untuned split."""
+        import mlflow
+
+        settings = _settings(tmp_path / "processed", mlflow_uri)
+        baseline_id = _log_scoring_run(
+            settings, _MISSION, "channel_41",
+            smoothed=np.zeros(5), threshold=np.ones(5), min_run_length=1, tuned=False,
+        )
+        # A later grid-tuned run, tagged the way runner.py now tags one.
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        tags = common_tags(
+            model_type=settings.model.model_type, mission=_MISSION, phase="scoring",
+            channel="channel_41",
+            extra={"eval_split": "full_test", "tuned_source": "threshold_ceiling grid"},
+        )
+        with open_run(experiment=exp, run_name="channel_41", tags=tags) as run:
+            assert run is not None
+            log_params({"threshold_min_anomaly_len": 1})
+            log_artifact_bytes(errors_to_bytes(np.zeros(5)), "errors.npy")
+            log_artifact_bytes(threshold_to_bytes(np.ones(5)), "threshold.npy")
+            grid_id = run.info.run_id
+        assert mlflow.MlflowClient(tracking_uri=mlflow_uri).get_run(grid_id) is not None
+
+        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=False) == baseline_id
+        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == grid_id
+
+
+def _log_multivariate_scoring_run(
+    settings: Settings,
+    mission: str,
+    subsystem: str,
+    channels: list[str],
+    *,
+    smoothed_by_channel: dict[str, np.ndarray],
+    threshold_by_channel: dict[str, np.ndarray],
+    min_run_length: int,
+    tuned: bool = False,
+) -> str:
+    """Log a run shaped exactly like model.scoring.score_channel's multivariate
+    output: NO channel_id tag, a subsystem tag plus a comma-joined `channels`
+    tag, and per-channel arrays nested at errors/{ch}.npy, threshold/{ch}.npy.
+    """
+    import mlflow
+
+    exp = experiment_name(settings.model.model_type, "scoring", mission)
+    extra = {"eval_split": "full_test", "channels": ",".join(channels)}
+    if tuned:
+        extra["tuned_from_run"] = "fake-hpo-run"
+    tags = common_tags(
+        model_type=settings.model.model_type,
+        mission=mission,
+        phase="scoring",
+        channel=None,  # the defining property: no channel_id on a joint run
+        subsystem=subsystem,
+        extra=extra,
+    )
+    with open_run(experiment=exp, run_name=subsystem, tags=tags) as run:
+        assert run is not None
+        log_params({"threshold_min_anomaly_len": min_run_length})
+        for ch in channels:
+            log_artifact_bytes(errors_to_bytes(smoothed_by_channel[ch]), f"errors/{ch}.npy")
+            log_artifact_bytes(
+                threshold_to_bytes(threshold_by_channel[ch]), f"threshold/{ch}.npy"
+            )
+        run_id = run.info.run_id
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    assert client.get_run(run_id) is not None
+    return str(run_id)
+
+
+class TestFindScoringRunAndArtifacts:
+    """docs/plans/021: `esa-adb report` must locate a channel scored inside a
+    multivariate subsystem group. Such a run carries no channel_id tag, so the
+    univariate lookup can never match it — without the fallback the whole
+    mission-level report is unobtainable for a multivariate arm."""
+
+    _CHANNELS: ClassVar[list[str]] = ["channel_41", "channel_42"]
+
+    def _mv_settings(self, tmp_path: Path, mlflow_uri: str) -> Settings:
+        """Settings whose subsystem map resolves both channels to subsystem_5."""
+        import json
+
+        processed = tmp_path / "processed"
+        meta = processed / _MISSION / "metadata"
+        meta.mkdir(parents=True, exist_ok=True)
+        (meta / "channel_subsystems.json").write_text(
+            json.dumps({ch: "subsystem_5" for ch in self._CHANNELS})
+        )
+        return _settings(processed, mlflow_uri)
+
+    def test_univariate_lookup_still_wins_and_uses_root_artifacts(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """Null-default: a univariate run must resolve exactly as before."""
+        settings = self._mv_settings(tmp_path, mlflow_uri)
+        run_id = _log_scoring_run(
+            settings, _MISSION, "channel_41",
+            smoothed=np.zeros(5), threshold=np.ones(5), min_run_length=1, tuned=False,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        got = find_scoring_run_and_artifacts(
+            settings, _MISSION, exp, "channel_41", tuned=False
+        )
+        assert got == (run_id, "errors.npy", "threshold.npy")
+
+    def test_falls_back_to_multivariate_run_with_nested_artifacts(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        settings = self._mv_settings(tmp_path, mlflow_uri)
+        run_id = _log_multivariate_scoring_run(
+            settings, _MISSION, "subsystem_5", self._CHANNELS,
+            smoothed_by_channel={c: np.zeros(5) for c in self._CHANNELS},
+            threshold_by_channel={c: np.ones(5) for c in self._CHANNELS},
+            min_run_length=1,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        for ch in self._CHANNELS:
+            assert find_scoring_run_and_artifacts(
+                settings, _MISSION, exp, ch, tuned=False
+            ) == (run_id, f"errors/{ch}.npy", f"threshold/{ch}.npy")
+
+    def test_rejects_run_whose_channels_tag_excludes_the_channel(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """A shared subsystem name is not proof of membership — a narrower
+        group could reuse it. Must not silently attribute another group's
+        errors array to this channel."""
+        settings = self._mv_settings(tmp_path, mlflow_uri)
+        _log_multivariate_scoring_run(
+            settings, _MISSION, "subsystem_5", ["channel_41"],  # 42 NOT a member
+            smoothed_by_channel={"channel_41": np.zeros(5)},
+            threshold_by_channel={"channel_41": np.ones(5)},
+            min_run_length=1,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        with pytest.raises(RuntimeError, match="multivariate scoring run"):
+            find_scoring_run_and_artifacts(settings, _MISSION, exp, "channel_42", tuned=False)
+
+    def test_respects_tuned_flag(self, tmp_path: Path, mlflow_uri: str) -> None:
+        settings = self._mv_settings(tmp_path, mlflow_uri)
+        _log_multivariate_scoring_run(
+            settings, _MISSION, "subsystem_5", self._CHANNELS,
+            smoothed_by_channel={c: np.zeros(5) for c in self._CHANNELS},
+            threshold_by_channel={c: np.ones(5) for c in self._CHANNELS},
+            min_run_length=1, tuned=False,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        with pytest.raises(RuntimeError):
+            find_scoring_run_and_artifacts(settings, _MISSION, exp, "channel_41", tuned=True)
+
+        tuned_id = _log_multivariate_scoring_run(
+            settings, _MISSION, "subsystem_5", self._CHANNELS,
+            smoothed_by_channel={c: np.zeros(5) for c in self._CHANNELS},
+            threshold_by_channel={c: np.ones(5) for c in self._CHANNELS},
+            min_run_length=1, tuned=True,
+        )
+        assert find_scoring_run_and_artifacts(
+            settings, _MISSION, exp, "channel_41", tuned=True
+        )[0] == tuned_id
+
+    def test_error_names_both_searches(self, tmp_path: Path, mlflow_uri: str) -> None:
+        """When neither lookup finds anything, the message must say so — a
+        univariate-only error would name the wrong remedy on a multivariate
+        mission."""
+        settings = self._mv_settings(tmp_path, mlflow_uri)
+        _log_scoring_run(
+            settings, _MISSION, "channel_41",
+            smoothed=np.zeros(5), threshold=np.ones(5), min_run_length=1, tuned=False,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        with pytest.raises(RuntimeError) as exc:
+            find_scoring_run_and_artifacts(settings, _MISSION, exp, "channel_99", tuned=False)
+        msg = str(exc.value)
+        assert "channel_id" in msg and "multivariate scoring run" in msg
 
 
 # ---------------------------------------------------------------------------

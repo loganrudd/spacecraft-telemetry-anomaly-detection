@@ -2,7 +2,8 @@
 # Submit a spacecraft-train RayJob to the GKE cluster and tail its logs.
 #
 # Usage:
-#   ./scripts/cloud_train.sh [--mission MISSION] [--variant VARIANT] [--no-wait] [--delete-after]
+#   ./scripts/cloud_train.sh [--mission MISSION] [--variant VARIANT] [--multivariate]
+#                            [--no-wait] [--delete-after]
 #
 # Required environment variables:
 #   PROJECT_ID   GCP project ID
@@ -16,17 +17,29 @@
 #                docs/plans/020-experiment-variant-axis.md). Reads/writes
 #                {processed|artifacts}/{mission}/{variant}/ instead of
 #                {processed|artifacts}/{mission}/.
+#   MULTIVARIATE 1 = pass --multivariate (same as the flag). Trains ONE joint
+#                n-in/n-out model per subsystem group instead of one model per
+#                channel (docs/plans/021-multivariate-telemanom.md). Channels
+#                are grouped via channels.csv; ESA-Mission1 channels 41-46 all
+#                map to subsystem_5, so they form a single 6-in/6-out model —
+#                the ESA-ADB comparator's configuration.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
 #   export REGION=us-central1
 #   export MLFLOW_URL=$(gcloud run services describe mlflow --region $REGION --format='value(status.url)')
 #   ./scripts/cloud_train.sh --mission ESA-Mission2
+#
+#   # Plan 021: the 6-in/6-out multivariate arm, sharing arm A's processed tree
+#   CHANNELS=channel_41,channel_42,channel_43,channel_44,channel_45,channel_46 \
+#     ./scripts/cloud_train.sh --mission ESA-Mission1 --variant adb-84m --multivariate
 
 set -euo pipefail
 
 MISSION="${MISSION:-ESA-Mission2}"
 VARIANT="${VARIANT:-}"
+SUBSYSTEM="${SUBSYSTEM:-}"
+MULTIVARIATE="${MULTIVARIATE:-0}"
 NO_WAIT=false
 DELETE_AFTER=false
 
@@ -36,7 +49,9 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --mission)       MISSION="$2"; shift 2 ;;
     --variant)       VARIANT="$2"; shift 2 ;;
+    --subsystem)     SUBSYSTEM="$2"; shift 2 ;;
     --channels-from) CHANNELS_FROM="$2"; shift 2 ;;
+    --multivariate)  MULTIVARIATE="1"; shift ;;
     --cpu)           CPU="1"; shift ;;
     --no-wait)       NO_WAIT=true; shift ;;
     --delete-after)  DELETE_AFTER=true; shift ;;
@@ -52,14 +67,26 @@ REGION="${REGION:-us-central1}"
 # segment must be a single pre-resolved variable the YAML can interpolate
 # verbatim rather than each YAML site re-deriving the conditional itself.
 VARIANT_SEG="${VARIANT:+/${VARIANT}}"
-# ISS: 6-way L4 packing (floor(1/0.16)=6). ESA: 8-way (floor(1/0.125)=8).
-# 0.167 rounds to floor(5.99)=5 under floating point; 0.16 is the safe 6-way value.
-# Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption issues).
-if [[ "${MISSION}" = "ISS" ]]; then
-  NUM_GPUS="${NUM_GPUS:-0.16}"
-else
-  NUM_GPUS="${NUM_GPUS:-0.125}"
-fi
+# 6-way L4 packing by default (floor(1/0.16)=6) — sized to the workload: the
+# ESA-ADB comparison subsystem (subsystem_5, channels 41-46) and the ISS demo
+# set are both exactly 6 channels, so 6 concurrent slots is what actually gets
+# used. 0.167 (=1/6 exactly) rounds to floor(5.99)=5 under floating point,
+# which is why the 6-way spelling is 0.16 rather than 1/6.
+#
+# Note `num_gpus` is a LOGICAL Ray scheduling resource, not a physical GPU
+# partition — it caps how many tasks run concurrently on the 1-GPU node; it
+# does not fence memory or SMs. At exactly 6 channels, 0.125 (8 slots) and
+# 0.16 (6 slots) both run all 6 at once and are throughput-identical; the
+# difference only bites when a group exceeds the slot count.
+#
+# Do NOT reach for the packing factor to speed training up. Training here is
+# GPU-COMPUTE-BOUND (the 250 sequential LSTM timesteps are the load), so when
+# the GPU is saturated total time = total work / GPU rate, *independent of
+# packing*. Packing only trades per-channel latency for concurrency at the
+# same aggregate throughput. The real levers are less work (fewer channels,
+# fewer epochs, smaller window_size) or more GPU (quota-blocked at 1 L4).
+# Pass NUM_GPUS=1 to run one channel at a time (large channels / preemption).
+NUM_GPUS="${NUM_GPUS:-0.16}"
 
 # Build the channel-selection argument for the RayJob entrypoint.
 # Precedence: --channels (inline CSV) > --channels-from (GCS file) > full channel list.
@@ -73,6 +100,28 @@ else
   CHANNELS_ARG="--channels-from gs://${PROJECT_ID}-processed-data/${MISSION}${VARIANT_SEG}/channels.txt"
 fi
 
+# Same host-side resolution as CHANNELS_ARG (envsubst has no conditionals):
+# a flag that is either present or absent cannot be spelled inline in the YAML.
+# --multivariate switches `ray train` to the subsystem fan-out — one joint
+# n-in/n-out model per subsystem group instead of one model per channel
+# (docs/plans/021-multivariate-telemanom.md).
+if [[ "${MULTIVARIATE}" = "1" ]]; then
+  MULTIVARIATE_ARG="--multivariate"
+else
+  MULTIVARIATE_ARG=""
+fi
+
+# Same host-side resolution again: --subsystem filters the resolved channel
+# list (whatever CHANNELS_ARG produced) down to one subsystem via channels.csv.
+# Prefer this over spelling out CHANNELS when a subsystem is the real unit —
+# it stays correct if the subsystem's membership ever changes, whereas a
+# hardcoded CSV silently goes stale.
+if [[ -n "${SUBSYSTEM}" ]]; then
+  SUBSYSTEM_ARG="--subsystem ${SUBSYSTEM}"
+else
+  SUBSYSTEM_ARG=""
+fi
+
 # ISS LOS fragmentation limits contiguous segments to <240 rows on the 30 s grid.
 # W=250 requires 251 consecutive rows → 0 valid test windows → scoring crash.
 # W=128 (64 min ≈ 0.7 orbits) fits comfortably; ESA keeps the 250 global default.
@@ -81,10 +130,23 @@ if [[ "${MISSION}" = "ISS" ]]; then
 else
   WINDOW_SIZE_OVERRIDE="250"
 fi
-export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
-  WINDOW_SIZE_OVERRIDE
 
-echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}})"
+# Multi-step forecast horizon (docs/plans/021, stage 021.7). Defaulted HERE
+# rather than left to the pod's config so envsubst can never emit an empty
+# string — SPACECRAFT_MODEL__FORECAST_STEPS="" fails ModelConfig validation at
+# container start, which is a confusing way to learn the var was unset.
+#
+# This must be an explicit YAML env entry on head AND worker: exporting
+# SPACECRAFT_MODEL__FORECAST_STEPS in the shell that runs `make cloud-train`
+# reaches this script's environment but NOT the pods, so the run would train
+# H=1 and report success. Accepts the SPACECRAFT_ name as an alias so that
+# mistake produces the intended run instead of a silent H=1.
+FORECAST_STEPS="${FORECAST_STEPS:-${SPACECRAFT_MODEL__FORECAST_STEPS:-1}}"
+
+export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG CHANNELS_ARG NUM_GPUS \
+  WINDOW_SIZE_OVERRIDE MULTIVARIATE_ARG SUBSYSTEM_ARG FORECAST_STEPS
+
+echo "==> Submitting spacecraft-train RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${SUBSYSTEM:+, subsystem=${SUBSYSTEM}}${MULTIVARIATE_ARG:+, multivariate}, forecast_steps=${FORECAST_STEPS})"
 
 # Delete any existing job with the same name so kubectl apply is idempotent.
 if kubectl get rayjob spacecraft-train -n ray &>/dev/null; then

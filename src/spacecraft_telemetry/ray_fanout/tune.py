@@ -93,6 +93,8 @@ from spacecraft_telemetry.mlflow_tracking.runs import (
 from spacecraft_telemetry.model.io import (
     bytes_to_errors,
     download_artifact_bytes,
+    errors_artifact,
+    find_latest_run_by_tag,
     find_latest_run_for_channel,
 )
 from spacecraft_telemetry.ray_fanout.runner import _with_abs_paths
@@ -205,11 +207,103 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
 # channels, so 0.6 still sits below the observed max while genuinely spanning
 # "keeps only the extreme tail". z to 8.0 is deliberately generous — the goal is
 # for the optimum to be interior, not to be tight.
+# The z LOWER bound is also overridden here, 2.5 -> 1.0 (added 2026-08-19,
+# docs/plans/021 stage 021.5b). A post-hoc ceiling sweep over both plan-021 arms'
+# saved error arrays (scripts/threshold_ceiling.py) found BOTH optima sitting at
+# the 2.5 floor and wanting to go lower — worth ~0.015 mean segF0.5 to each:
+#
+#   univariate arm A : 0.754 at z=2.5  ->  0.769 at z=1.0 (floor 0.4)
+#   multivariate     : 0.759 at z=2.5  ->  0.775 at z=1.0 (floor 0.5)
+#
+# Both plateau by z=1.0-1.5, so 1.0 is generous rather than tight — the goal is
+# an interior optimum, same as the 8.0 upper bound.
+#
+# ⚠️ This MUST live here and never in SEARCH_SPACE. The 2.5 floor exists for an
+# ISS reason (the optimizer flooring z to ~1.6 to chase undetectable drift
+# faults during Phase 15, firing on nominal noise in replay), and
+# ISS_SEARCH_SPACE is built as `{**SEARCH_SPACE, ...}` WITHOUT overriding
+# threshold_z — so lowering the base floor would silently re-expose ISS to
+# exactly the failure the floor was introduced to prevent. ESA's high-floor
+# optimum (min_error_value 0.4-0.5) is what makes a low z safe here; ISS pins
+# min_error_value to 0.0 and therefore has no such compensating mechanism.
 ESA_M1_SEARCH_SPACE: dict[str, Any] = {
     **SEARCH_SPACE,
-    "threshold_z":     tune.uniform(2.5, 8.0),  # was (2.5, 5.0) — arm A pegged at 4.783
+    "threshold_z":     tune.uniform(1.0, 8.0),  # upper: arm A pegged at 4.783 of 5.0
+                                                # lower: both 021 arms pegged at the 2.5 floor
     "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
 }
+
+
+def _find_multivariate_scoring_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    scoring_exp: str,
+    extra_filter: str | None = None,
+) -> Any:
+    """Fallback scoring-run lookup for a channel scored inside a multivariate
+    subsystem group (docs/plans/021-multivariate-telemanom.md).
+
+    A multivariate scoring run carries no ``channel_id`` tag (model/scoring.py
+    — it isn't a real channel), so ``find_latest_run_for_channel`` can never
+    find it. This resolves the channel's subsystem, finds the latest run
+    tagged with that subsystem, and confirms the channel is actually listed
+    in that run's ``channels`` tag before trusting it — a shared subsystem
+    name alone does not guarantee this exact channel was in the scored
+    group (a different variant, or a narrower channel subset, could reuse
+    the same subsystem name).
+
+    Returns the run, or None if no matching multivariate run exists —
+    callers already treat a missing channel as an ordinary "not scored yet"
+    case, so this adds no new failure mode.
+    """
+    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
+    if subsystem is None:
+        return None
+    run = find_latest_run_by_tag(
+        scoring_exp, "subsystem", subsystem, settings.mlflow.tracking_uri, extra_filter
+    )
+    if run is None:
+        return None
+    member_channels = (run.data.tags.get("channels") or "").split(",")
+    if channel not in member_channels:
+        return None
+    return run
+
+
+def _find_channel_errors_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    scoring_exp: str,
+    extra_filter: str | None = None,
+) -> tuple[Any, str] | None:
+    """Locate a channel's scoring run and the errors artifact path within it.
+
+    Tries the univariate per-channel lookup first (unchanged, and the common
+    case); falls back to the multivariate subsystem lookup, which reads a
+    per-channel artifact (``errors/{channel}.npy``) instead of the
+    univariate ``errors.npy`` at the run root.
+
+    Returns (run, artifact_path), or None if neither lookup finds a run. The
+    multivariate fallback is best-effort (like the subsystem-tag lookups
+    elsewhere — model/training.py, model/scoring.py): a lookup failure
+    (metadata missing, tracking backend unreachable) degrades to "no run
+    found", the same outcome as a genuine absence, rather than aborting the
+    (possibly univariate-only) caller.
+    """
+    run = find_latest_run_for_channel(
+        scoring_exp, channel, settings.mlflow.tracking_uri, extra_filter
+    )
+    if run is not None:
+        return run, errors_artifact()
+    with suppress(Exception):
+        run = _find_multivariate_scoring_run(
+            settings, mission, channel, scoring_exp, extra_filter
+        )
+        if run is not None:
+            return run, errors_artifact(channel)
+    return None
 
 
 def _prepare_channel_data(
@@ -244,16 +338,17 @@ def _prepare_channel_data(
     )
 
     for channel in channels:
-        # Find the most recent scoring run for this channel in MLflow.
-        _run = find_latest_run_for_channel(
-            _scoring_exp, channel, settings.mlflow.tracking_uri
-        )
-        if _run is None:
+        # Find the most recent scoring run for this channel in MLflow — the
+        # univariate per-channel run, or (docs/plans/021) a multivariate
+        # subsystem run this channel was scored as part of.
+        _found = _find_channel_errors_run(settings, mission, channel, _scoring_exp)
+        if _found is None:
             missing_errors.append(channel)
             continue
+        _run, _artifact_path = _found
         try:
             raw = download_artifact_bytes(
-                _run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+                _run.info.run_id, _artifact_path, settings.mlflow.tracking_uri
             )
         except (OSError, Exception):
             missing_errors.append(channel)
@@ -279,12 +374,23 @@ def _prepare_channel_data(
             f"{ch}: labels{lbl} vs errors{err}"
             for ch, lbl, err in shape_mismatches[:3]
         )
+        _multivariate_hint = (
+            " NOTE: settings.model.input_channels is set, so load_window_labels() "
+            "returned PER-CHANNEL 2-D labels (M, C) while a multivariate scoring "
+            "run saves 1-D per-channel errors (M,) at errors/{channel}.npy. HPO "
+            "operates on saved error arrays and never loads the model, so it must "
+            "run WITHOUT the multivariate settings — unset input_channels/"
+            "target_channels (do not pass --multivariate to a tune job). See "
+            "docs/plans/021-multivariate-telemanom.md."
+            if settings.model.input_channels
+            else ""
+        )
         raise ValueError(
             "run_hpo_sweep input mismatch: load_window_labels() shape does not "
             f"match saved errors.npy for {len(shape_mismatches)} channel(s). "
             "This usually means errors were scored with a different settings profile "
             "(window_size/prediction_horizon) than the one passed to tune. "
-            f"Examples: {details}."
+            f"Examples: {details}.{_multivariate_hint}"
         )
 
     if not prepared:
@@ -358,18 +464,17 @@ def _load_nominal_errors(
     missing: list[str] = []
 
     for channel in channels:
-        run = find_latest_run_for_channel(
-            _scoring_exp,
-            channel,
-            settings.mlflow.tracking_uri,
+        _found = _find_channel_errors_run(
+            settings, mission, channel, _scoring_exp,
             extra_filter="tags.data_source = 'nominal'",
         )
-        if run is None:
+        if _found is None:
             missing.append(channel)
             continue
+        run, artifact_path = _found
         try:
             raw = download_artifact_bytes(
-                run.info.run_id, "errors.npy", settings.mlflow.tracking_uri
+                run.info.run_id, artifact_path, settings.mlflow.tracking_uri
             )
         except (OSError, Exception):
             missing.append(channel)
@@ -434,6 +539,9 @@ def _scoring_trial(
     channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
     nominal_errors: dict[str, np.ndarray[Any, Any]],
     fp_penalty_weight: float,
+    channel_timestamps: dict[str, np.ndarray[Any, Any]] | None = None,
+    mission_events: list[Any] | None = None,
+    mission_timeline_hpo: list[Any] | None = None,
 ) -> dict[str, float]:
     """Ray Tune trial: score all channels in a subsystem group with config params.
 
@@ -447,6 +555,19 @@ def _scoring_trial(
     body has no ray imports. Ray Tune 2.x records a function trainable's return
     value as the trial's final metrics, so get_best_result() works correctly.
 
+    Mission-level metric (docs/plans/021-multivariate-telemanom.md, stage
+    021.4b): when ``channel_timestamps``/``mission_events``/
+    ``mission_timeline_hpo`` are all supplied (run_hpo_sweep loads them once,
+    trial-invariant), each channel's flags are ALSO converted to time
+    intervals and OR-aggregated into one mission-level detection set, scored
+    with esa_adb.metrics.corrected_event_wise against the same HPO-portion
+    timeline — added to the result as mission_precision/mission_recall/
+    mission_f0_5. This is purely observational: it is never folded into
+    "objective", which stays seg_f0_5-based (risk 6 — the two can diverge
+    sharply, and this is what makes that visible per trial rather than only
+    after the fact). Omitting the three args (the default) reproduces the
+    pre-021.4b return-key set exactly — every existing caller is unaffected.
+
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
         channel_data: Mapping channel -> (errors, labels), pre-validated and
@@ -457,6 +578,12 @@ def _scoring_trial(
             (no nominal-tagged run yet) contribute no penalty term.
         fp_penalty_weight: Weight on mean nominal false-positive rate,
             subtracted from mean seg_f0_5 to form "objective".
+        channel_timestamps: Mapping channel -> HPO-portion target timestamps,
+            index-aligned with that channel's errors/labels in channel_data.
+        mission_events: Ground-truth esa_adb.events.Event list, grouped
+            against mission_timeline_hpo (esa_adb.events.group_events).
+        mission_timeline_hpo: The HPO-portion observed timeline (esa_adb.
+            timeline), i.e. the complement of esa_adb.report.tuned_eval_window.
     """
     from spacecraft_telemetry.model.scoring import (
         dynamic_threshold,
@@ -468,7 +595,8 @@ def _scoring_trial(
 
     f0_5_scores: list[float] = []
     seg_f0_5_scores: list[float] = []
-    for errors, labels in channel_data.values():
+    channel_flags: dict[str, np.ndarray[Any, Any]] = {}
+    for channel, (errors, labels) in channel_data.items():
 
         # Un-pruned pipeline — identical to the headline path in score_channel()
         # and to what the online serving engine produces. No prune step here:
@@ -489,6 +617,7 @@ def _scoring_trial(
         )
         f0_5_scores.append(evaluate(labels, flags)["f0_5"])
         seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
+        channel_flags[channel] = flags
 
     fp_rates: list[float] = []
     for nom_errors in nominal_errors.values():
@@ -516,12 +645,42 @@ def _scoring_trial(
     mean_seg_f0_5 = float(np.mean(seg_f0_5_scores)) if seg_f0_5_scores else 0.0
     mean_fp_rate = float(np.mean(fp_rates)) if fp_rates else 0.0
     objective = mean_seg_f0_5 - fp_penalty_weight * mean_fp_rate
-    return {
+    result: dict[str, float] = {
         "f0_5": mean_f0_5,
         "seg_f0_5": mean_seg_f0_5,
         "nominal_fp_rate": mean_fp_rate,
         "objective": objective,
     }
+
+    if (
+        channel_timestamps is not None
+        and mission_events is not None
+        and mission_timeline_hpo is not None
+    ):
+        from spacecraft_telemetry.esa_adb.detections import (
+            _flags_to_intervals,
+            mission_intervals_from_per_channel,
+        )
+        from spacecraft_telemetry.esa_adb.metrics import corrected_event_wise
+
+        per_channel_intervals = {
+            channel: _flags_to_intervals(flags, channel_timestamps[channel])
+            for channel, flags in channel_flags.items()
+            if channel in channel_timestamps
+        }
+        mission_detections = mission_intervals_from_per_channel(per_channel_intervals)
+        # "all_events" scope (excludes only Communication Gap) — the paper's
+        # primary comparison table (esa_adb/report.py Table 2), matching the
+        # scope risk 6's production measurement used.
+        cew = corrected_event_wise(
+            mission_events, mission_detections, mission_timeline_hpo,
+            excluded_categories=frozenset({"Communication Gap"}),
+        )
+        result["mission_precision"] = cew["precision"]
+        result["mission_recall"] = cew["recall"]
+        result["mission_f0_5"] = cew["f_beta"]
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +784,13 @@ def run_hpo_sweep(
           Settings.model defaults instead of the sweep's best trial (see
           module docstring) — in that case ``"config"`` holds the defaults
           and no MLflow trial backs them.
+
+        Every trial (021.4b) also logs mission_precision/mission_recall/
+        mission_f0_5 to MLflow when ESA-ADB ground truth is available for
+        ``mission`` — see _scoring_trial. Not present in this function's own
+        return dict (the baseline/sweep selection stays seg_f0_5-based);
+        read them from the per-trial MLflow runs this sweep's
+        _resilient_mlflow_callback logs.
     """
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
@@ -655,11 +821,53 @@ def run_hpo_sweep(
     channel_data, scoring_run_ids = _prepare_channel_data(settings_abs, mission, channels)
     nominal_errors = _load_nominal_errors(settings_abs, mission, channels)
 
+    # Mission-level metric prep (021.4b) — trial-invariant, loaded once here
+    # rather than per-trial. Best-effort: ESA-ADB ground truth (labels.csv /
+    # anomaly_types.csv via load_events) doesn't exist for every mission —
+    # ISS has none by design (no real anomaly labels; see .claude/rules/iss.md)
+    # — so any failure here just means the trial-level mission metric is
+    # omitted, not that the sweep aborts. Atomic: either all three end up
+    # set, or none do (a partial state would silently mis-score channels
+    # missing from channel_timestamps).
+    channel_timestamps: dict[str, np.ndarray[Any, Any]] | None = None
+    mission_events: list[Any] | None = None
+    mission_timeline_hpo: list[Any] | None = None
+    with suppress(Exception):
+        import pandas as pd
+
+        from spacecraft_telemetry.esa_adb.events import group_events, load_events
+        from spacecraft_telemetry.esa_adb.intervals import intersect as _intersect
+        from spacecraft_telemetry.esa_adb.report import hpo_cutoff
+        from spacecraft_telemetry.esa_adb.timeline import mission_timeline as _mission_timeline
+        from spacecraft_telemetry.model.dataset import (
+            window_target_timestamps as _window_target_timestamps,
+        )
+
+        _timeline_full = _mission_timeline(settings_abs, mission, channels)
+        _cutoff = hpo_cutoff(settings_abs, mission, channels)
+        _far_past = pd.Timestamp.min.tz_localize("UTC")
+        _timeline_hpo = _intersect(_timeline_full, [(_far_past, _cutoff)])
+        _events_df = load_events(settings_abs, mission)
+        _events_hpo = group_events(_events_df, channels, _timeline_hpo)
+
+        _ts_by_channel: dict[str, np.ndarray[Any, Any]] = {}
+        for _channel in channel_data:
+            _ts = _window_target_timestamps(settings_abs, mission, _channel)
+            _n_hpo = int(len(_ts) * settings.tune.hpo_eval_fraction)
+            _ts_by_channel[_channel] = _ts[:_n_hpo]
+
+        channel_timestamps = _ts_by_channel
+        mission_events = _events_hpo
+        mission_timeline_hpo = _timeline_hpo
+
     trial_fn = tune.with_parameters(
         _scoring_trial,
         channel_data=channel_data,
         nominal_errors=nominal_errors,
         fp_penalty_weight=settings.tune.fp_penalty_weight,
+        channel_timestamps=channel_timestamps,
+        mission_events=mission_events,
+        mission_timeline_hpo=mission_timeline_hpo,
     )
 
     # Capture the wall-clock time just before launching the sweep.  Used below
@@ -877,7 +1085,9 @@ def run_all_sweeps(
             continue
         by_subsystem.setdefault(sub, []).append(ch)
 
-    # Retain only subsystems that have ≥1 scored channel (scoring run in MLflow).
+    # Retain only subsystems that have ≥1 scored channel (scoring run in
+    # MLflow) — a channel counts whether it was scored individually
+    # (univariate) or as part of a multivariate subsystem group (021).
     _scoring_exp = _mlflow_experiment_name(
         settings.model.model_type, "scoring", mission, settings.variant
     )
@@ -886,9 +1096,7 @@ def run_all_sweeps(
         scored = [
             ch
             for ch in sub_channels
-            if find_latest_run_for_channel(
-                _scoring_exp, ch, settings.mlflow.tracking_uri
-            ) is not None
+            if _find_channel_errors_run(settings, mission, ch, _scoring_exp) is not None
         ]
         if scored:
             eligible[sub] = scored
