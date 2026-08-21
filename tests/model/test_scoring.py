@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -488,6 +489,98 @@ class TestCollapseForecastErrors:
 
         with pytest.raises(ValueError, match="Unknown forecast_error_reduction"):
             collapse_forecast_errors(np.zeros((2, 2, 2)), "median")
+
+
+class TestFirstReductionScoresAsH1:
+    """`first` must be scored IDENTICALLY to an H=1 model's error series.
+
+    This is the only test in the suite that defends a *published claim* rather
+    than a function: README.md attributes ~80% of the H=10 gain to the scoring
+    statistic, and that attribution is only meaningful if
+    ``collapse_forecast_errors(e, "first")`` reproduces the H=1 error series
+    through the WHOLE scoring pipeline — not merely as a collapse-function
+    output.
+
+    It holds because ``smooth_errors`` applies ``np.abs()`` itself, which makes
+    the collapse's pre-``abs`` idempotent. That is a fact about two functions
+    that were written independently and could drift apart; this pins the
+    property end-to-end so a drift fails here instead of silently invalidating
+    the README's ablation.
+
+    Compared against ``e[..., 0]`` (the signed 1-step error, exactly what an
+    H=1 model produces) rather than ``|e[..., 0]|``, so the abs-idempotence is
+    part of what is asserted.
+    """
+
+    @staticmethod
+    def _cfg() -> Any:
+        from spacecraft_telemetry.core.config import ModelConfig
+
+        # Small smoothing/threshold windows so a short synthetic series still
+        # exercises steady-state behaviour rather than only the warmup ramp.
+        return ModelConfig(
+            error_smoothing_window=5,
+            threshold_window=12,
+            threshold_z=2.0,
+            threshold_min_anomaly_len=2,
+            prune_min_decrease=0.13,
+            min_error_value=0.05,
+        )
+
+    @pytest.mark.parametrize("eval_split", ["full_test", "hpo_portion", "final_portion"])
+    def test_scores_bit_for_bit_identically(self, eval_split: str) -> None:
+        from spacecraft_telemetry.model.scoring import (
+            _score_series,
+            collapse_forecast_errors,
+        )
+
+        rng = np.random.default_rng(20250820)
+        n, c, h = 240, 3, 10
+        # Signed errors with an injected excursion, so both arms actually flag
+        # something — comparing two all-zero metric dicts would prove nothing.
+        errors = rng.standard_normal((n, c, h)) * 0.1
+        errors[100:118, :, :] += 1.5
+        is_anomaly = np.zeros((n, c), dtype=bool)
+        is_anomaly[100:118, :] = True
+
+        cfg = self._cfg()
+        collapsed = collapse_forecast_errors(errors, "first")
+        assert collapsed.shape == (n, c)
+
+        for i in range(c):
+            multi_metrics, multi_smoothed, multi_threshold = _score_series(
+                collapsed[:, i], is_anomaly[:, i], cfg, eval_split, 0.6  # type: ignore[arg-type]
+            )
+            h1_metrics, h1_smoothed, h1_threshold = _score_series(
+                errors[:, i, 0], is_anomaly[:, i], cfg, eval_split, 0.6  # type: ignore[arg-type]
+            )
+            np.testing.assert_array_equal(multi_smoothed, h1_smoothed)
+            np.testing.assert_array_equal(multi_threshold, h1_threshold)
+            assert multi_metrics == h1_metrics
+            # Guard against the degenerate pass: if nothing was ever flagged,
+            # equality is vacuous.
+            assert multi_metrics["n_predicted_positive_labels"] > 0
+
+    def test_mean_reduction_does_not_have_the_property(self) -> None:
+        """The counterpart that makes the assertion above non-trivial: `mean`
+        is a genuinely different statistic, so it must NOT reproduce H=1."""
+        from spacecraft_telemetry.model.scoring import (
+            _score_series,
+            collapse_forecast_errors,
+        )
+
+        rng = np.random.default_rng(7)
+        errors = rng.standard_normal((200, 1, 10)) * 0.1
+        errors[80:95, :, :] += 1.5
+        is_anomaly = np.zeros(200, dtype=bool)
+        is_anomaly[80:95] = True
+        cfg = self._cfg()
+
+        mean_smoothed = _score_series(
+            collapse_forecast_errors(errors, "mean")[:, 0], is_anomaly, cfg, "full_test", 0.6
+        )[1]
+        h1_smoothed = _score_series(errors[:, 0, 0], is_anomaly, cfg, "full_test", 0.6)[1]
+        assert not np.allclose(mean_smoothed, h1_smoothed)
 
 
 def test_predict_multi_step_keeps_horizon_axis() -> None:
