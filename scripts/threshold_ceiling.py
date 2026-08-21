@@ -28,6 +28,7 @@ Requires: .[tracking] (mlflow). configure_mlflow handles Cloud Run ID-token auth
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -45,11 +46,11 @@ from spacecraft_telemetry.model.dataset import (
     load_window_labels_from_metadata,
 )
 from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
-from spacecraft_telemetry.ray_fanout.threshold_grid import (
-    best_point,
-    bounds_report,
-    sweep_group,
-    sweep_group_mission_level,
+from spacecraft_telemetry.ray_fanout.threshold_grid import sweep_group, sweep_group_mission_level
+from spacecraft_telemetry.ray_fanout.threshold_search import (
+    NonConvergenceError,
+    threshold_grid_sweep_fn,
+    widen_to_convergence,
 )
 
 log = get_logger(__name__)
@@ -348,26 +349,46 @@ def main() -> None:
     )
 
     if args.objective == "mission":
-        grid = _sweep_mission(
-            settings, args.mission, channels, per_channel, eval_slice,
-            metadata_by_channel=metadata_by_channel,
-            select_on=args.select_on,
-            threshold_window=threshold_window,
-            min_run_length=min_run_length,
-            z_values=z_values,
-            floor_values=floor_values,
+        sweep_fn = threshold_grid_sweep_fn(
+            functools.partial(
+                _sweep_mission, settings, args.mission, channels, per_channel, eval_slice,
+                metadata_by_channel=metadata_by_channel,
+                select_on=args.select_on,
+                threshold_window=threshold_window,
+                min_run_length=min_run_length,
+            )
         )
     else:
-        grid = sweep_group(
-            per_channel,
-            threshold_window=threshold_window,
-            min_run_length=min_run_length,
-            z_values=z_values,
-            floor_values=floor_values,
-            eval_slice=eval_slice,
+        sweep_fn = threshold_grid_sweep_fn(
+            functools.partial(
+                sweep_group, per_channel,
+                threshold_window=threshold_window,
+                min_run_length=min_run_length,
+                eval_slice=eval_slice,
+            )
         )
-    (best_z, best_floor), best_score = best_point(grid)
-    report = bounds_report(grid, z_values, floor_values)
+
+    # Mechanically widens past a grid-edge optimum instead of the old
+    # print-a-warning-and-stop loop a human re-ran by hand (docs/plans/022,
+    # stage 022.1). Converges to an interior optimum or a parameter's natural
+    # bound (e.g. min_error_value=0.0), or raises rather than quoting a
+    # number that is actually a lower bound.
+    try:
+        widening = widen_to_convergence(
+            sweep_fn, {"threshold_z": z_values, "min_error_value": floor_values}
+        )
+    except NonConvergenceError as exc:
+        raise SystemExit(
+            f"Threshold search did not converge: {exc}\n"
+            "Widen --z-values / --floor-values, or investigate why the "
+            "objective keeps improving toward the edge."
+        ) from None
+
+    grid = widening.grid
+    z_values = widening.axes["threshold_z"]
+    floor_values = widening.axes["min_error_value"]
+    best_z, best_floor = widening.best_point
+    best_score = widening.best_score
 
     print(f"\nmission={args.mission} variant={settings.variant} "
           f"{'tuned' if tuned else 'untuned'} channels={len(channels)}")
@@ -384,11 +405,11 @@ def main() -> None:
     )
     print(f"\n{label}  {metric} = {best_score:.3f}  at z={best_z}, floor={best_floor}")
     print(f"  (objective={args.objective}, selected on {args.select_on})")
-    if report["is_lower_bound"]:
-        print("  ⚠  optimum sits on a GRID EDGE — this is a LOWER BOUND. "
-              "Widen --z-values / --floor-values before quoting it.")
+    if widening.expansions:
+        print(f"  ✓  widened {widening.expansions} round(s) past the initial grid to reach "
+              f"an interior optimum (z: {z_values}, floor: {floor_values}).")
     else:
-        print("  ✓  optimum is interior to the swept grid.")
+        print("  ✓  optimum is interior to the initial grid (no widening needed).")
 
     if args.emit_tuned_configs:
         # Same schema run_all_sweeps writes and score_all_channels reads
@@ -429,11 +450,10 @@ def main() -> None:
                     "threshold_window": threshold_window,
                     "min_run_length": min_run_length,
                     "axes": {"threshold_z": z_values, "min_error_value": floor_values},
-                    # This hand-driven CLI has no widening driver yet
-                    # (docs/plans/022, stage 022.1) — a manually re-run grid
-                    # is not a recorded expansion.
-                    "expansions": 0,
-                    "interior": not report["is_lower_bound"],
+                    "expansions": widening.expansions,
+                    # widen_to_convergence never returns a non-interior
+                    # result — a genuine grid-edge optimum raises instead.
+                    "interior": True,
                 },
             }
         }
@@ -458,7 +478,11 @@ def main() -> None:
             "z_values": z_values,
             "floor_values": floor_values,
             "grid": {f"{z}|{f}": v for (z, f), v in grid.items()},
-            **report,
+            "best_z": best_z,
+            "best_floor": best_floor,
+            "best_score": best_score,
+            "expansions": widening.expansions,
+            "interior": True,
         }, indent=2))
         print(f"\nWrote → {args.out}")
 
