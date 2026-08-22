@@ -313,6 +313,45 @@ def test_group_channels_by_subsystem_drops_unmapped(tmp_path) -> None:
     assert groups == {"subsystem_1": ["channel_41"]}
 
 
+def test_group_channels_prefers_measured_group_map(tmp_path) -> None:
+    """A measured channel_groups.json overrides the subsystem map.
+
+    docs/plans/023: joint modelling needs a shared timestamp grid, and the
+    natural ESA group crosses subsystem boundaries — so the grouping key is a
+    measured group id, with the subsystem name as the fallback.
+    """
+    import json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.ray_fanout.runner import _group_channels_by_subsystem
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    metadata_dir = processed_dir / mission / "metadata"
+    metadata_dir.mkdir(parents=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({
+            "channel_41": "subsystem_5", "channel_47": "subsystem_6", "channel_9": "subsystem_2",
+        })
+    )
+    (metadata_dir / "channel_groups.json").write_text(
+        json.dumps({"channel_41": "group_01", "channel_47": "group_01"})
+    )
+    settings = load_settings("test").model_copy(
+        update={"preprocess": load_settings("test").preprocess.model_copy(
+            update={"processed_data_dir": str(processed_dir)}
+        )}
+    )
+
+    groups = _group_channels_by_subsystem(
+        settings, mission, ["channel_41", "channel_9", "channel_47"]
+    )
+
+    # channel_41 and channel_47 join across subsystems; channel_9 is absent from
+    # the group map (a singleton family) and drops out of the multivariate sweep.
+    assert groups == {"group_01": ["channel_41", "channel_47"]}
+
+
 @pytest.mark.slow
 def test_train_all_subsystems_ok(ray_local, ray_series_parquet_multichannel) -> None:
     """train_all_subsystems trains one joint model per subsystem group."""

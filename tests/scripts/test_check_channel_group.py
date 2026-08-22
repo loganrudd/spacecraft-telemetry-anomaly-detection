@@ -273,3 +273,106 @@ def test_main_writes_json_report_to_out_path(
     written = json.loads(out_path.read_text())
     assert written["n_aligned"] == 20
     assert written["joint_windows"] == 15
+
+
+# ---------------------------------------------------------------------------
+# --write-groups — turns a measured enumeration into the training topology
+# (docs/plans/023 stage .4)
+# ---------------------------------------------------------------------------
+
+
+def test_write_group_map_omits_singletons(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # A single-channel "group" is a univariate model; listing it would route it
+    # through the joint path as a 1-in/1-out model for no benefit.
+    processed_dir = tmp_path / "processed"
+    settings = _settings(processed_dir)
+    path = script_module.write_group_map(
+        settings, _MISSION, [["channel_a", "channel_b"], ["channel_c"]]
+    )
+
+    import json
+
+    mapping = json.loads(Path(path).read_text())
+    assert mapping == {"channel_a": "group_01", "channel_b": "group_01"}
+
+
+def test_write_group_map_numbers_groups_in_family_order(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    processed_dir = tmp_path / "processed"
+    settings = _settings(processed_dir)
+    path = script_module.write_group_map(
+        settings,
+        _MISSION,
+        [["channel_a", "channel_b", "channel_c"], ["channel_d", "channel_e"]],
+    )
+
+    import json
+
+    mapping = json.loads(Path(path).read_text())
+    assert mapping["channel_a"] == "group_01"
+    assert mapping["channel_d"] == "group_02"
+
+
+def test_write_group_map_lands_where_the_group_loader_reads(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # The whole point: this file is what core.metadata.load_channel_group_map
+    # picks up, so the fan-out groups on what was measured.
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    processed_dir = tmp_path / "processed"
+    settings = _settings(processed_dir)
+    script_module.write_group_map(settings, _MISSION, [["channel_a", "channel_b"]])
+
+    assert load_channel_group_map(settings, _MISSION) == {
+        "channel_a": "group_01",
+        "channel_b": "group_01",
+    }
+
+
+def test_write_group_map_is_variant_scoped(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    processed_dir = tmp_path / "processed"
+    # Point sample/raw at empty dirs too: the subsystem fallback would otherwise
+    # find the repo's real channels.csv and mask the variant scoping.
+    isolated = _settings(processed_dir).model_copy(
+        update={
+            "data": _settings(processed_dir).data.model_copy(
+                update={
+                    "sample_data_dir": str(tmp_path / "sample"),
+                    "raw_data_dir": str(tmp_path / "raw"),
+                }
+            )
+        }
+    )
+    variant_settings = isolated.model_copy(update={"variant": "grid-30s"})
+    script_module.write_group_map(variant_settings, _MISSION, [["channel_a", "channel_b"]])
+
+    assert load_channel_group_map(variant_settings, _MISSION) == {
+        "channel_a": "group_01",
+        "channel_b": "group_01",
+    }
+    # The native tree must not inherit the grid variant's grouping.
+    assert load_channel_group_map(isolated, _MISSION) == {}
+
+
+def test_main_rejects_write_groups_without_enumerate_families(
+    monkeypatch: pytest.MonkeyPatch, script_module: types.ModuleType
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_channel_group.py",
+            "--mission", _MISSION,
+            "--channels", "channel_a",
+            "--write-groups",
+        ],
+    )
+    with pytest.raises(SystemExit, match="--enumerate-families"):
+        script_module.main()

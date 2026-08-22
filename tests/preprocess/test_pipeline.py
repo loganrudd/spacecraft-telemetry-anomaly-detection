@@ -324,3 +324,43 @@ class TestRunPreprocessingTimeGrid:
             pd.DatetimeIndex(b["telemetry_timestamp"])
         )
         assert len(common) >= min(len(a), len(b)) - 1
+
+
+class TestSmallTaskCpus:
+    """Packing headroom for the Ray fan-out — docs/plans/023 stage .3.
+
+    Resampling adds a full bucketing pass while the native frame is still live,
+    which measured at ~2.1GB peak per "small" ESA channel against ~950MB
+    without it. At 4-per-node on 6GiB workers that OOM-killed tasks and
+    eventually a whole node, and the symptom was missing channels in the output
+    tree rather than a raised error — hence a pinned unit test.
+    """
+
+    def test_no_grid_packs_four_per_node(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        assert small_task_cpus(PreprocessingConfig(), ["channel_1", "channel_2"]) == 1
+
+    def test_mission_wide_grid_halves_the_packing(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(grid_interval_seconds=30)
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 2
+
+    def test_a_single_gridded_channel_is_enough_to_halve_it(self) -> None:
+        # The reservation is per-task and uniform, so one resampled channel in
+        # the batch is enough to need the headroom.
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_2": 30})
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 2
+
+    def test_overrides_for_other_channels_do_not_apply(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_99": 30})
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 1

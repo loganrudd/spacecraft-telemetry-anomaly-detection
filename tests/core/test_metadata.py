@@ -17,7 +17,11 @@ import json
 from pathlib import Path
 
 from spacecraft_telemetry.core.config import Settings
-from spacecraft_telemetry.core.metadata import _load_cached, load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import (
+    _load_cached,
+    load_channel_group_map,
+    load_channel_subsystem_map,
+)
 
 
 def _settings(tmp_path: Path, variant: str | None = None) -> Settings:
@@ -35,7 +39,7 @@ def _write_subsystem_map(
     if variant:
         base = base / variant
     metadata_dir = base / "metadata"
-    metadata_dir.mkdir(parents=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
     path = metadata_dir / "channel_subsystems.json"
     path.write_text(json.dumps(mapping))
     return path
@@ -122,3 +126,67 @@ class TestCsvFallback:
     def test_returns_empty_dict_when_nothing_exists(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, variant="arm-a")
         assert load_channel_subsystem_map(settings, "ESA-Mission1") == {}
+
+
+# ---------------------------------------------------------------------------
+# load_channel_group_map — docs/plans/023 stage .4
+# ---------------------------------------------------------------------------
+
+
+def _write_group_map(
+    tmp_path: Path, mission: str, variant: str | None, mapping: dict[str, str]
+) -> Path:
+    base = tmp_path / "processed" / mission
+    if variant:
+        base = base / variant
+    metadata_dir = base / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    path = metadata_dir / "channel_groups.json"
+    path.write_text(json.dumps(mapping))
+    return path
+
+
+class TestLoadChannelGroupMap:
+    def test_falls_back_to_subsystem_map_when_absent(self, tmp_path: Path) -> None:
+        # Every mission without a measured grouping — ISS, and every ESA tree
+        # predating plan 023 — must keep grouping exactly as it does today.
+        mission = "ESA-Mission1"
+        _write_subsystem_map(tmp_path, mission, None, {"channel_1": "power"})
+        assert load_channel_group_map(_settings(tmp_path), mission) == {"channel_1": "power"}
+
+    def test_group_map_wins_when_present(self, tmp_path: Path) -> None:
+        # A measured group crosses subsystem boundaries — that is the point.
+        mission = "ESA-Mission1"
+        _write_subsystem_map(
+            tmp_path, mission, None, {"channel_41": "subsystem_5", "channel_47": "subsystem_6"}
+        )
+        _write_group_map(
+            tmp_path, mission, None, {"channel_41": "group_01", "channel_47": "group_01"}
+        )
+        assert load_channel_group_map(_settings(tmp_path), mission) == {
+            "channel_41": "group_01",
+            "channel_47": "group_01",
+        }
+
+    def test_empty_group_map_falls_back(self, tmp_path: Path) -> None:
+        mission = "ESA-Mission1"
+        _write_subsystem_map(tmp_path, mission, None, {"channel_1": "power"})
+        _write_group_map(tmp_path, mission, None, {})
+        assert load_channel_group_map(_settings(tmp_path), mission) == {"channel_1": "power"}
+
+    def test_returns_empty_when_neither_source_exists(self, tmp_path: Path) -> None:
+        assert load_channel_group_map(_settings(tmp_path), "ESA-Mission1") == {}
+
+    def test_group_map_is_variant_scoped(self, tmp_path: Path) -> None:
+        # The grid variant has its own grouping; the native tree must not see it.
+        mission = "ESA-Mission1"
+        _write_subsystem_map(tmp_path, mission, None, {"channel_70": "subsystem_3"})
+        _write_subsystem_map(tmp_path, mission, "grid-30s", {"channel_70": "subsystem_3"})
+        _write_group_map(tmp_path, mission, "grid-30s", {"channel_70": "group_01"})
+
+        assert load_channel_group_map(_settings(tmp_path), mission) == {
+            "channel_70": "subsystem_3"
+        }
+        assert load_channel_group_map(_settings(tmp_path, variant="grid-30s"), mission) == {
+            "channel_70": "group_01"
+        }

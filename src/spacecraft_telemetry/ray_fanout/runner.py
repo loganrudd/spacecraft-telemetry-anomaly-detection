@@ -20,12 +20,13 @@ score_all_subsystems(settings, mission, channels, *, max_subsystems=None,
                      tuned_configs=None, eval_split="final_portion",
                      data_source="nominal") -> list[dict]
     Multivariate fan-out (docs/plans/021-multivariate-telemanom.md): the same
-    two sweeps, but the Ray task boundary is the SUBSYSTEM, not the channel.
-    Channels are grouped via load_channel_subsystem_map; each task trains/
-    scores one joint model on settings.model.input_channels=<that group>.
+    two sweeps, but the Ray task boundary is the GROUP, not the channel.
+    Channels are grouped via load_channel_group_map — a measured group id where
+    the mission has one (docs/plans/023), else the subsystem name; each task
+    trains/scores one joint model on settings.model.input_channels=<that group>.
     ``channels`` is still the flat input list to group — a channel with no
-    subsystem entry is dropped with a warning, never silently included in
-    the wrong group.
+    entry is dropped with a warning, never silently included in the wrong
+    group.
 
 tuned_configs schema (Phase 5 writes, score_all_channels reads)
 ---------------------------------------------------------------
@@ -52,7 +53,10 @@ from typing import Any
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import (
+    load_channel_group_map,
+    load_channel_subsystem_map,
+)
 from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 
 log = get_logger(__name__)
@@ -431,27 +435,34 @@ def score_all_channels(
 def _group_channels_by_subsystem(
     settings: Settings, mission: str, channels: list[str]
 ) -> dict[str, list[str]]:
-    """Group ``channels`` by subsystem, preserving each group's order.
+    """Group ``channels`` into multivariate groups, preserving each group's order.
+
+    The grouping key comes from ``load_channel_group_map``: a measured group id
+    when the mission has one (docs/plans/023), otherwise the subsystem name,
+    which is what every mission used before that plan and what ISS still uses.
+    Joint modelling needs members that share a timestamp grid, and that is a
+    property of the data — the natural ESA group crosses subsystem boundaries —
+    so the subsystem name is the fallback, not the definition.
 
     A group's order is the order its members appear in ``channels`` — this
     becomes the model's persisted ``input_channels`` order (model/io.py), so
-    it must be deterministic and caller-controlled, not the subsystem map's
-    (dict) iteration order.
+    it must be deterministic and caller-controlled, not the map's (dict)
+    iteration order.
 
-    Channels with no subsystem entry are dropped with a warning rather than
-    silently grouped under a sentinel key — an unmapped channel in a
-    multivariate group is exactly the "silently reordered/wrong input"
-    failure mode the plan calls out.
+    Channels with no entry are dropped with a warning rather than silently
+    grouped under a sentinel key — an unmapped channel in a multivariate group
+    is exactly the "silently reordered/wrong input" failure mode plan 021 calls
+    out.
     """
-    ch_to_sub = load_channel_subsystem_map(settings, mission)
+    ch_to_group = load_channel_group_map(settings, mission)
     groups: dict[str, list[str]] = {}
     unmapped: list[str] = []
     for ch in channels:
-        subsystem = ch_to_sub.get(ch)
-        if subsystem is None:
+        group = ch_to_group.get(ch)
+        if group is None:
             unmapped.append(ch)
             continue
-        groups.setdefault(subsystem, []).append(ch)
+        groups.setdefault(group, []).append(ch)
     if unmapped:
         log.warning(
             "ray.subsystem_group.unmapped_channels", mission=mission, channels=unmapped

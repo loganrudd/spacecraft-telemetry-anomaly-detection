@@ -28,7 +28,7 @@ import pandas as pd
 import ray
 from upath import UPath
 
-from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.config import PreprocessingConfig, Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS
@@ -346,6 +346,22 @@ def _run_sequential(
     return results
 
 
+def small_task_cpus(cfg: PreprocessingConfig, channels: list[str]) -> int:
+    """CPUs to reserve per NON-large channel task — i.e. how many pack per node.
+
+    Ray schedules by CPU, and the worker nodes are 4 vCPU / 6 GiB, so this is
+    really a memory-headroom knob: num_cpus=1 packs 4 tasks per node, 2 packs
+    two. See _run_parallel for the measured peaks behind the numbers.
+
+    Pure and separately testable because the failure mode is silent and
+    expensive — too low and the raylet OOM-kills tasks mid-run (and can take
+    the node with it), which surfaces as missing channels in the output tree
+    rather than as an error from this function.
+    """
+    resampling = any(cfg.grid_interval_for(ch) is not None for ch in channels)
+    return 2 if resampling else 1
+
+
 def _run_parallel(
     settings: Settings,
     mission: str,
@@ -386,8 +402,21 @@ def _run_parallel(
     # task starts (Python's allocator does not release memory to the OS on del).
     # Small channels (~950MB peak) pack 4 per node (4x950MB=3.8GB + 0.3GB Ray
     # daemons = 4.1GB, well within the 5.7GB kill threshold on 6Gi workers).
+    #
+    # Resampling (docs/plans/023 stage .3) roughly DOUBLES that per-task peak:
+    # it adds a full bucketing pass over the native series while the native
+    # frame is still live. Measured on ESA-Mission1 at a 30 s grid, "small"
+    # channels peaked at 2.1GB rather than ~950MB, so 4-way packing became
+    # 4x2.1GB = 8.4GB on a 6GiB node and the raylet OOM-killed tasks (and
+    # eventually a whole node) as soon as four heavy channels coincided.
+    # Halving the packing restores the headroom the original sizing assumed:
+    # 2x2.1GB + 0.3GB = 4.5GB, still under the 5.7GB threshold. Fewer
+    # concurrent tasks per node, not a bigger node — the autoscaler adds
+    # replicas (maxReplicas=45) rather than the run costing more per node.
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
+    _small_cpus = small_task_cpus(abs_settings.preprocess, channels)
+    _resampling = _small_cpus > 1
 
     futures = []
     n_large = 0
@@ -398,10 +427,8 @@ def _run_parallel(
             size = _LARGE_THRESHOLD + 1   # unknown → conservative/safe default
         is_large = size > _LARGE_THRESHOLD
         n_large += is_large
-        task = (
-            _preprocess_channel_remote.options(num_cpus=4)
-            if is_large
-            else _preprocess_channel_remote
+        task = _preprocess_channel_remote.options(
+            num_cpus=4 if is_large else _small_cpus
         )
         futures.append(task.remote(
             settings_ref, mission, channel,
@@ -414,6 +441,8 @@ def _run_parallel(
         n_tasks=len(futures),
         n_large=n_large,
         n_small=len(futures) - n_large,
+        resampling=_resampling,
+        small_task_cpus=_small_cpus,
     )
     results: list[dict[str, Any]] = ray.get(futures)
     return results
