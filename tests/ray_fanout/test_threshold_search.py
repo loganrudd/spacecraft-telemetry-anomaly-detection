@@ -152,6 +152,40 @@ class TestEdgeExpansion:
             for b in result.axes["b"]:
                 assert (a, b) in result.grid
 
+    def test_logs_one_line_per_widened_axis_per_round(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """docs/reviews/022, item P3: the only signal separating "round 2 of
+        3" from "hung" on a run that can exceed 30 minutes. Checks capsys
+        rather than structlog.testing.capture_logs() — this module's logger
+        is realized (and cached, per core/logging.py's
+        cache_logger_on_first_use=True) well before this test runs inside the
+        full suite, which makes capture_logs() miss the event; structlog
+        emits to stdout regardless (see tests/esa_adb/test_detections.py's
+        precedent).
+        """
+
+        def objective(a: float, b: float) -> float:
+            return -((a + 4.0) ** 2) - ((b - 0.2) ** 2)
+
+        sweep_fn, _calls = _counting_sweep_fn(objective)
+        axes = {"a": [1.0, 2.0, 3.0, 4.0], "b": [0.0, 0.1, 0.2, 0.3, 0.4]}
+
+        result = widen_to_convergence(sweep_fn, axes, natural_bounds={})
+
+        stdout = capsys.readouterr().out
+        lines = [
+            line for line in stdout.splitlines() if "threshold_search.widen" in line
+        ]
+        assert len(lines) == result.expansions
+        assert result.expansions > 0
+        for line in lines:
+            assert "axis=a" in line
+            assert "direction=low" in line
+            assert "new_points=" in line
+            assert "best_score=" in line
+            assert "grid_size=" in line
+
 
 class TestNaturalBound:
     def test_optimum_at_natural_bound_converges_without_expanding(self) -> None:

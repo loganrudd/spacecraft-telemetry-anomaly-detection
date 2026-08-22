@@ -19,6 +19,7 @@ MLFLOW_ARTIFACTS_DESTINATION to a `gs://` bucket for cloud runs.
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,6 +254,14 @@ def download_artifact_bytes(
     so no computed number can change — see scripts/threshold_ceiling.py's
     byte-identity gate (docs/plans/022, stage 022.3).
 
+    The write is atomic (write to a ``.tmp`` sibling, then ``os.replace`` —
+    atomic within a filesystem): a crash or Ctrl-C mid-write leaves only an
+    orphaned ``.tmp`` file, never a truncated file at the real cache path, so
+    a subsequent run sees a clean cache miss rather than silently trusting
+    partial bytes forever (docs/reviews/022, item T3) — this cache feeds
+    published F0.5 numbers, so a corrupt-but-present entry would be a
+    silent-wrong-answer path, not just a slow one.
+
     Args:
         run_id:        MLflow run ID.
         artifact_path: Path within the run's artifact store, e.g. "errors.npy".
@@ -282,7 +291,9 @@ def download_artifact_bytes(
 
     if enabled:
         cached_path.parent.mkdir(parents=True, exist_ok=True)
-        cached_path.write_bytes(data)
+        tmp_path = cached_path.with_name(f"{cached_path.name}.tmp-{os.getpid()}")
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, cached_path)
 
     return data
 

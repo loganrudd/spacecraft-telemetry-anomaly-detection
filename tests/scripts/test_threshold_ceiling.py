@@ -478,3 +478,154 @@ class TestNonConvergenceBecomesSystemExit:
                     "Widen --z-values / --floor-values, or investigate why the "
                     "objective keeps improving toward the edge."
                 ) from None
+
+
+class TestNExpandMaxExpansionsCLI:
+    """docs/reviews/022, item P3: --n-expand/--max-expansions expose
+    widen_to_convergence's tuning knobs rather than hardcoding one value for
+    both the cheap per_channel objective and the materially slower mission
+    one."""
+
+    _MISSION = "ESA-Mission1-ThresholdCeilingCLITest"
+    _CHANNEL = "channel_41"
+    _WINDOW_SIZE = 3
+    _PREDICTION_HORIZON = 1
+    _N_ROWS = 20  # -> 20 - (3+1) + 1 = 17 windows
+
+    def _setup(self, tmp_path: Path) -> Any:
+        """Real MLflow scoring run + processed series — everything main()'s
+        per_channel-objective path reads before it ever calls
+        widen_to_convergence. threshold_ceiling.py's _load_channel needs the
+        full score_channel() param set (threshold_window,
+        error_smoothing_window, threshold_min_anomaly_len) — a heavier
+        fixture than tests/esa_adb/test_report.py's, which only needs
+        threshold_min_anomaly_len for its own (different) read path.
+        """
+        import mlflow
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from spacecraft_telemetry.mlflow_tracking import (
+            common_tags,
+            experiment_name,
+            log_artifact_bytes,
+            log_params,
+            open_run,
+        )
+        from spacecraft_telemetry.model.io import errors_to_bytes
+
+        processed_dir = tmp_path / "processed"
+        partition_dir = (
+            processed_dir / self._MISSION / "test"
+            / f"mission_id={self._MISSION}" / f"channel_id={self._CHANNEL}"
+        )
+        partition_dir.mkdir(parents=True, exist_ok=True)
+        n_windows = self._N_ROWS - (self._WINDOW_SIZE + self._PREDICTION_HORIZON) + 1
+        table = pa.table({
+            "telemetry_timestamp": pa.array(
+                pd.date_range("2000-01-01", periods=self._N_ROWS, freq="90s", tz="UTC")
+            ),
+            "value_normalized": pa.array([0.0] * self._N_ROWS, type=pa.float32()),
+            "segment_id": pa.array([0] * self._N_ROWS, type=pa.int32()),
+            "is_anomaly": pa.array([False] * self._N_ROWS, type=pa.bool_()),
+        })
+        pq.write_table(table, partition_dir / "part.parquet")
+
+        mlflow_uri = f"sqlite:///{tmp_path}/mlflow.db"
+        mlflow.set_tracking_uri(mlflow_uri)
+        base_settings = load_settings("test")
+        settings = base_settings.model_copy(update={
+            "preprocess": base_settings.preprocess.model_copy(
+                update={"processed_data_dir": str(processed_dir)}
+            ),
+            "model": base_settings.model.model_copy(update={
+                "window_size": self._WINDOW_SIZE, "prediction_horizon": self._PREDICTION_HORIZON,
+            }),
+            "mlflow": base_settings.mlflow.model_copy(update={"tracking_uri": mlflow_uri}),
+        })
+
+        exp = experiment_name(settings.model.model_type, "scoring", self._MISSION)
+        tags = common_tags(
+            model_type=settings.model.model_type, mission=self._MISSION, phase="scoring",
+            channel=self._CHANNEL, extra={"eval_split": "full_test", "tuned_from_run": "fake-hpo"},
+        )
+        with open_run(experiment=exp, run_name=self._CHANNEL, tags=tags) as run:
+            assert run is not None
+            log_params({
+                "threshold_window": 10,
+                "threshold_min_anomaly_len": 1,
+                "error_smoothing_window": 5,
+            })
+            log_artifact_bytes(errors_to_bytes(np.zeros(n_windows)), "errors.npy")
+        return settings
+
+    def _fake_widen(
+        self, captured: dict[str, object]
+    ) -> Any:
+        def _widen(sweep_fn: object, axes: dict[str, list[float]], **kwargs: object) -> Any:
+            captured.update(kwargs)
+            z_values = axes["threshold_z"]
+            floor_values = axes["min_error_value"]
+            grid = {(z, f): 0.5 for z in z_values for f in floor_values}
+            return WideningResult(
+                grid=grid,
+                axes=axes,
+                axis_order=list(axes),
+                best_point=(z_values[0], floor_values[0]),
+                best_score=0.5,
+                expansions=0,
+            )
+
+        return _widen
+
+    def test_flags_are_forwarded_to_widen_to_convergence(
+        self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        settings = self._setup(tmp_path)
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(script_module, "load_settings", lambda _env: settings)
+        monkeypatch.setattr(script_module, "widen_to_convergence", self._fake_widen(captured))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "threshold_ceiling.py",
+                "--env", "test",
+                "--mission", self._MISSION,
+                "--channels", self._CHANNEL,
+                "--n-expand", "5",
+                "--max-expansions", "7",
+            ],
+        )
+
+        script_module.main()
+
+        assert captured["n_expand"] == 5
+        assert captured["max_expansions"] == 7
+
+    def test_defaults_match_the_prior_hardcoded_values(
+        self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import sys
+
+        settings = self._setup(tmp_path)
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(script_module, "load_settings", lambda _env: settings)
+        monkeypatch.setattr(script_module, "widen_to_convergence", self._fake_widen(captured))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "threshold_ceiling.py",
+                "--env", "test",
+                "--mission", self._MISSION,
+                "--channels", self._CHANNEL,
+            ],
+        )
+
+        script_module.main()
+
+        assert captured["n_expand"] == 3
+        assert captured["max_expansions"] == 3

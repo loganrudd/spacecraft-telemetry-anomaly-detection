@@ -347,6 +347,23 @@ def main() -> None:
         "re-validate a suspected-poisoned cache, or to re-run the byte-identity "
         "check that validates the cache against an uncached run.",
     )
+    p.add_argument(
+        "--n-expand",
+        type=int,
+        default=3,
+        help="New grid points added per widened axis per round (default: 3). "
+        "The default suits the cheap --objective per_channel; --objective "
+        "mission is materially slower per point (interval math, not array "
+        "ops — see threshold_grid.sweep_group_mission_level), so a smaller "
+        "value may be worth it there.",
+    )
+    p.add_argument(
+        "--max-expansions",
+        type=int,
+        default=3,
+        help="Widening rounds attempted before giving up with a "
+        "NonConvergenceError (default: 3).",
+    )
     args = p.parse_args()
 
     if args.emit_tuned_configs and args.select_on != "hpo_portion":
@@ -509,7 +526,8 @@ def main() -> None:
     # number that is actually a lower bound.
     try:
         widening = widen_to_convergence(
-            sweep_fn, {"threshold_z": z_values, "min_error_value": floor_values}
+            sweep_fn, {"threshold_z": z_values, "min_error_value": floor_values},
+            n_expand=args.n_expand, max_expansions=args.max_expansions,
         )
     except NonConvergenceError as exc:
         raise SystemExit(

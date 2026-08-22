@@ -345,6 +345,108 @@ def test_env_var_disables_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert cached_file.read_bytes() == b"stale-bytes"
 
 
+def test_atomic_write_leaves_no_truncated_entry_on_a_simulated_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """docs/reviews/022, item T3: a crash mid-write must never leave a
+    partial file AT the real cache path — only the .tmp sibling gets a
+    partial write, and it is never renamed into place. A subsequent read
+    must therefore see a clean cache miss (a network re-fetch), not silently
+    trust truncated bytes forever.
+    """
+    calls = _patch_gs_fetch(monkeypatch, b"correct-bytes")
+    cache_dir = tmp_path / "cache"
+    cached_file = cache_dir / "run123" / "errors.npy"
+    cached_file.parent.mkdir(parents=True)
+    # Simulates a crash after the .tmp write but before os.replace — the
+    # exact intermediate state the atomic write is designed to make
+    # unreachable at the real path.
+    tmp_file = cached_file.with_name(f"{cached_file.name}.tmp-99999")
+    tmp_file.write_bytes(b"trunc")
+
+    assert not cached_file.exists()
+
+    result = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert result == b"correct-bytes"
+    assert calls["get_run"] == 1, "an orphaned .tmp file must not be read as a cache hit"
+    assert cached_file.read_bytes() == b"correct-bytes"
+
+
+def test_default_cache_root_is_cwd_relative(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """_DEFAULT_ARTIFACT_CACHE_ROOT (.cache/artifacts) is never exercised by
+    any other test — they all pass cache_dir= explicitly. Pin the default:
+    two different working directories get two independent caches, and a
+    fetch made from one is invisible to the other.
+    """
+    from spacecraft_telemetry.model import io as io_module
+
+    cwd_a = tmp_path / "a"
+    cwd_b = tmp_path / "b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+
+    calls = _patch_gs_fetch(monkeypatch, b"bytes-a")
+    monkeypatch.chdir(cwd_a)
+    result_a = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+    assert result_a == b"bytes-a"
+    assert calls["get_run"] == 1
+    assert (cwd_a / io_module._DEFAULT_ARTIFACT_CACHE_ROOT / "run123" / "errors.npy").exists()
+    assert not (cwd_b / io_module._DEFAULT_ARTIFACT_CACHE_ROOT / "run123" / "errors.npy").exists()
+
+    monkeypatch.chdir(cwd_b)
+    result_b = download_artifact_bytes("run123", "errors.npy", "https://mlflow.example.run.app")
+    assert result_b == b"bytes-a"  # same patched fetch; the point is the SECOND get_run call
+    assert calls["get_run"] == 2, "cwd_b's cache must be independent of cwd_a's"
+    assert (cwd_b / io_module._DEFAULT_ARTIFACT_CACHE_ROOT / "run123" / "errors.npy").exists()
+
+
+@pytest.mark.parametrize("value", ["false", "no", "off", ""])
+def test_env_var_truthiness_is_a_single_sentinel_not_a_truthiness_table(
+    value: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """docs/reviews/022, item T3: SPACECRAFT_ARTIFACT_CACHE checks `!= "0"`
+    deliberately, not a truthy/falsy table — "false"/"no"/"off"/"" all ENABLE
+    the cache (only the literal "0" disables it). Documented and pinned
+    rather than widened, per the review's own recommendation: a single
+    sentinel is easier to reason about than a truthiness table.
+    """
+    monkeypatch.setenv("SPACECRAFT_ARTIFACT_CACHE", value)
+    calls = _patch_gs_fetch(monkeypatch, b"fresh-bytes")
+    cache_dir = tmp_path / "cache"
+
+    first = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+    second = download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert first == second == b"fresh-bytes"
+    assert calls["get_run"] == 1, f"SPACECRAFT_ARTIFACT_CACHE={value!r} must still enable caching"
+
+
+def test_env_var_zero_is_the_only_disabling_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SPACECRAFT_ARTIFACT_CACHE", "0")
+    calls = _patch_gs_fetch(monkeypatch, b"fresh-bytes")
+    cache_dir = tmp_path / "cache"
+
+    download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+    download_artifact_bytes(
+        "run123", "errors.npy", "https://mlflow.example.run.app", cache_dir=cache_dir
+    )
+
+    assert calls["get_run"] == 2, "'0' must disable caching on every call, not just the first"
+
+
 def test_find_latest_run_for_channel_returns_most_recent(_mlflow_uri: str) -> None:
     """find_latest_run_for_channel must return the last run for a channel."""
     mlflow.set_tracking_uri(_mlflow_uri)

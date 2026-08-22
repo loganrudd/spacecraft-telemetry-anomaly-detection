@@ -27,6 +27,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from spacecraft_telemetry.core.logging import get_logger
+
+log = get_logger(__name__)
+
 # A point in axis-order-many dimensions and the mean objective it achieved.
 # Matches ray_fanout.threshold_grid.GridPoint's shape (a plain tuple of
 # floats) generalized past exactly two axes.
@@ -266,6 +270,18 @@ def widen_to_convergence(
             new_grid = sweep_fn(sweep_axes)
             grid.update(new_grid)
             axes[name] = sorted(set(axes[name]) | set(new_points))
+            # docs/reviews/022, item P3: one line per widened axis per round —
+            # the only signal separating "round 2 of 3" from "hung" on a run
+            # that can exceed 30 minutes.
+            log.info(
+                "threshold_search.widen",
+                round=expansion_round,
+                axis=name,
+                direction=direction,
+                new_points=new_points,
+                best_score=best_score,
+                grid_size=len(grid),
+            )
 
         if not any_widened:
             # Every flagged axis was blocked from producing a single new
