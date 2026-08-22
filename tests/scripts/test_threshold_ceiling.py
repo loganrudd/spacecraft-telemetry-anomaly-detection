@@ -178,13 +178,14 @@ def _tune_meta_via_run_all_sweeps(
 
 class TestMetaKeySetParity:
     # Pre-existing gap, uncovered before this test: tune.py's _to_entry emits
-    # two Ray-Tune-only diagnostic keys not in write_tuned_configs' documented
-    # schema and not read by anything downstream (_tuned_meta reads only
-    # run_id/source; score_all_channels filters _meta out entirely). Stage 1
-    # must not change tune.py's behaviour, so this pins today's actual gap
-    # rather than asserting a false equality; docs/reviews/022 stage 2.1
-    # removes them from tune.py in the same commit that tightens this to
-    # exact equality, mirroring the C4 provenance test's pin-then-flip shape.
+    # two Ray-Tune-only diagnostic keys ("seg_f0_5", "nominal_fp_rate") not in
+    # write_tuned_configs' documented schema and not read by anything
+    # downstream (_tuned_meta reads only run_id/source; score_all_channels
+    # filters _meta out entirely) — but tests/ray_fanout/test_tune.py asserts
+    # on their presence directly, so removing them is a real behaviour change
+    # outside docs/reviews/022 stage 2.1's declared one-line scope (the
+    # "source" string only). Documented and permitted here rather than
+    # silently narrowed to a passing-by-luck equality check.
     _TUNE_ONLY_DIAGNOSTIC_KEYS = frozenset({"seg_f0_5", "nominal_fp_rate"})
 
     def test_grid_and_tune_writers_emit_the_same_meta_key_set(
@@ -250,11 +251,13 @@ class TestMakeSweepFnPerChannel:
             threshold_window: int,
             min_run_length: int,
             eval_slice: slice | None = None,
+            prepared: dict[str, object] | None = None,
         ) -> dict[tuple[float, float], float]:
             captured["z_values"] = z_values
             captured["floor_values"] = floor_values
             captured["threshold_window"] = threshold_window
             captured["min_run_length"] = min_run_length
+            captured["prepared"] = prepared
             return {(z, f): 0.0 for z in z_values for f in floor_values}
 
         monkeypatch.setattr(script_module, "sweep_group", _fake_sweep_group)
@@ -279,20 +282,72 @@ class TestMakeSweepFnPerChannel:
         assert captured["threshold_window"] == 100
         assert captured["min_run_length"] == 2
         assert set(grid) == {(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)}
+        # P2: precomputed rolling terms are bound in, not left for
+        # sweep_group to recompute per round.
+        prepared = captured["prepared"]
+        assert isinstance(prepared, dict) and set(prepared) == {"channel_41"}
 
 
 class TestMakeSweepFnMission:
+    def _patch_mission_prep(
+        self,
+        script_module: types.ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        fake_sweep_group_mission_level: object,
+    ) -> dict[str, int]:
+        """Stub _prepare_mission_sweep's five real dependencies + the swept
+        function, and return a call-count dict keyed by function name — used
+        both to prove the keyword-binding contract and (P1) that prep runs
+        exactly once no matter how many times the returned sweep_fn is
+        invoked. Stubbed at their OWN modules (not threshold_ceiling's
+        namespace), since _prepare_mission_sweep imports them locally — this
+        stays a network-free unit test of the binding contract, not an
+        integration test of mission_timeline/hpo_cutoff/load_events
+        themselves.
+        """
+        counts: dict[str, int] = {
+            "mission_timeline": 0, "hpo_cutoff": 0, "load_events": 0, "group_events": 0,
+            "window_target_timestamps_from_metadata": 0,
+        }
+
+        def _counted(name: str, fn: object) -> object:
+            def _wrapped(*args: object, **kwargs: object) -> object:
+                counts[name] += 1
+                return fn(*args, **kwargs)  # type: ignore[operator]
+
+            return _wrapped
+
+        monkeypatch.setattr(
+            script_module, "sweep_group_mission_level", fake_sweep_group_mission_level
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.esa_adb.timeline.mission_timeline",
+            _counted("mission_timeline", lambda *_a, **_kw: []),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.esa_adb.report.hpo_cutoff",
+            _counted("hpo_cutoff", lambda *_a, **_kw: pd.Timestamp.min.tz_localize("UTC")),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.esa_adb.events.load_events",
+            _counted("load_events", lambda *_a, **_kw: pd.DataFrame()),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.esa_adb.events.group_events",
+            _counted("group_events", lambda *_a, **_kw: []),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.window_target_timestamps_from_metadata",
+            _counted(
+                "window_target_timestamps_from_metadata", lambda _settings, *_a, **_kw: np.zeros(5)
+            ),
+        )
+        return counts
+
     def test_reaches_sweep_group_mission_level_with_bound_z_and_floor_values(
         self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """_make_sweep_fn("mission", ...) must route through _sweep_mission's
-        real prep glue to sweep_group_mission_level, with z_values=/
-        floor_values= bound correctly. The prep functions are stubbed at
-        their own modules (not threshold_ceiling's namespace, since
-        _sweep_mission imports them locally) so this stays a network-free
-        unit test of the keyword-binding contract, not an integration test
-        of mission_timeline/hpo_cutoff/load_events themselves.
-        """
         captured: dict[str, object] = {}
 
         def _fake_sweep_group_mission_level(
@@ -306,33 +361,16 @@ class TestMakeSweepFnMission:
             threshold_window: int,
             min_run_length: int,
             eval_slice: slice | None = None,
+            prepared: dict[str, object] | None = None,
         ) -> dict[tuple[float, float], float]:
             captured["z_values"] = z_values
             captured["floor_values"] = floor_values
+            captured["prepared"] = prepared
             return {(z, f): 0.0 for z in z_values for f in floor_values}
 
-        monkeypatch.setattr(
-            script_module, "sweep_group_mission_level", _fake_sweep_group_mission_level
-        )
-        monkeypatch.setattr(
-            "spacecraft_telemetry.esa_adb.timeline.mission_timeline",
-            lambda *_a, **_kw: [],
-        )
-        monkeypatch.setattr(
-            "spacecraft_telemetry.esa_adb.report.hpo_cutoff",
-            lambda *_a, **_kw: pd.Timestamp.min.tz_localize("UTC"),
-        )
-        monkeypatch.setattr(
-            "spacecraft_telemetry.esa_adb.events.load_events",
-            lambda *_a, **_kw: pd.DataFrame(),
-        )
-        monkeypatch.setattr(
-            "spacecraft_telemetry.esa_adb.events.group_events",
-            lambda *_a, **_kw: [],
-        )
-        monkeypatch.setattr(
-            "spacecraft_telemetry.model.dataset.window_target_timestamps_from_metadata",
-            lambda _settings, *_a, **_kw: np.zeros(5),
+        self._patch_mission_prep(
+            script_module, monkeypatch,
+            fake_sweep_group_mission_level=_fake_sweep_group_mission_level,
         )
 
         settings = load_settings("test")
@@ -357,6 +395,55 @@ class TestMakeSweepFnMission:
         assert captured["z_values"] == [3.0, 4.0]
         assert captured["floor_values"] == [0.1]
         assert set(grid) == {(3.0, 0.1), (4.0, 0.1)}
+
+    def test_mission_prep_runs_once_across_multiple_sweep_fn_calls(
+        self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """P1 regression: a widening driver invokes the returned sweep_fn
+        once per round. _prepare_mission_sweep's five dependencies (timeline,
+        cutoff, events, target timestamps) must run exactly once — at
+        _make_sweep_fn() call time, not once per sweep_fn() invocation.
+        """
+
+        def _fake_sweep_group_mission_level(
+            *_args: object, z_values: list[float], floor_values: list[float], **_kwargs: object
+        ) -> dict[tuple[float, float], float]:
+            return {(z, f): 0.0 for z in z_values for f in floor_values}
+
+        counts = self._patch_mission_prep(
+            script_module, monkeypatch,
+            fake_sweep_group_mission_level=_fake_sweep_group_mission_level,
+        )
+
+        settings = load_settings("test")
+        per_channel = {"channel_41": (np.zeros(5), np.zeros(5, dtype=bool))}
+        metadata_by_channel = {
+            "channel_41": (np.zeros(5, dtype=np.int32), np.zeros(5, dtype=bool), np.zeros(5))
+        }
+        sweep_fn = script_module._make_sweep_fn(
+            "mission",
+            settings=settings,
+            mission="ESA-Mission1",
+            channels=["channel_41"],
+            per_channel=per_channel,
+            eval_slice=slice(None),
+            metadata_by_channel=metadata_by_channel,
+            select_on="hpo_portion",
+            threshold_window=100,
+            min_run_length=2,
+        )
+        # Simulate three widening rounds calling the same sweep_fn.
+        sweep_fn({"threshold_z": [3.0], "min_error_value": [0.1]})
+        sweep_fn({"threshold_z": [4.0], "min_error_value": [0.1]})
+        sweep_fn({"threshold_z": [5.0], "min_error_value": [0.1]})
+
+        assert counts == {
+            "mission_timeline": 1,
+            "hpo_cutoff": 1,
+            "load_events": 1,
+            "group_events": 1,
+            "window_target_timestamps_from_metadata": 1,
+        }
 
 
 # ---------------------------------------------------------------------------

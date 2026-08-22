@@ -84,6 +84,7 @@ def sweep_channel(
     z_values: list[float],
     floor_values: list[float],
     eval_slice: slice | None = None,
+    prepared: tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]] | None = None,
 ) -> dict[GridPoint, float]:
     """Return {(z, floor): seg_f0_5} for one channel over the grid.
 
@@ -93,6 +94,13 @@ def sweep_channel(
     must be the same length (the caller is comparing a saved errors array
     against ``load_window_labels`` output; a mismatch means they came from
     different settings profiles).
+
+    ``prepared``: this channel's precomputed ``(shifted_mean, shifted_std)``
+    from :func:`precompute_threshold_terms`, when a caller already has it
+    (e.g. a widening driver sweeping the same channel across several rounds
+    — see ``ray_fanout.threshold_search``). Recomputed here when ``None``,
+    exactly as before this parameter existed — additive, not a behaviour
+    change on the default path (docs/reviews/022, item P2).
     """
     if smoothed.shape != labels.shape:
         raise ValueError(
@@ -101,7 +109,11 @@ def sweep_channel(
             "window_size/prediction_horizon settings."
         )
     sl = eval_slice if eval_slice is not None else slice(None)
-    shifted_mean, shifted_std = precompute_threshold_terms(smoothed, threshold_window)
+    shifted_mean, shifted_std = (
+        prepared
+        if prepared is not None
+        else precompute_threshold_terms(smoothed, threshold_window)
+    )
 
     out: dict[GridPoint, float] = {}
     for z in z_values:
@@ -120,16 +132,20 @@ def sweep_group(
     z_values: list[float],
     floor_values: list[float],
     eval_slice: slice | None = None,
+    prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]] | None = None,
 ) -> dict[GridPoint, float]:
     """Mean seg_f0_5 across a group of channels, per grid point.
 
     The mean over channels is the same aggregation ``run_hpo_sweep`` optimises,
     so a ceiling from here is directly comparable to a sweep's reported best.
+
+    ``prepared``: per-channel precomputed rolling terms, forwarded to
+    :func:`sweep_channel` — see its docstring (docs/reviews/022, item P2).
     """
     if not per_channel:
         raise ValueError("per_channel is empty — nothing to sweep.")
     totals: dict[GridPoint, list[float]] = {}
-    for smoothed, labels in per_channel.values():
+    for channel, (smoothed, labels) in per_channel.items():
         for point, score in sweep_channel(
             smoothed, labels,
             threshold_window=threshold_window,
@@ -137,6 +153,7 @@ def sweep_group(
             z_values=z_values,
             floor_values=floor_values,
             eval_slice=eval_slice,
+            prepared=prepared.get(channel) if prepared is not None else None,
         ).items():
             totals.setdefault(point, []).append(score)
     return {point: float(np.mean(scores)) for point, scores in totals.items()}
@@ -153,6 +170,7 @@ def sweep_group_mission_level(
     z_values: list[float],
     floor_values: list[float],
     eval_slice: slice | None = None,
+    prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]] | None = None,
 ) -> dict[GridPoint, float]:
     """Grid sweep scored on MISSION-LEVEL corrected event-wise F0.5.
 
@@ -176,6 +194,12 @@ def sweep_group_mission_level(
 
     ``channel_timestamps`` must be index-aligned with each channel's arrays in
     ``per_channel`` and sliced identically by ``eval_slice``.
+
+    ``prepared``: per-channel precomputed ``(shifted_mean, shifted_std)``,
+    when a caller already has it — e.g. a widening driver, which otherwise
+    re-pays this rolling pass over a multi-million-element array on every
+    round (docs/reviews/022, item P2). Recomputed internally when ``None``,
+    exactly as before this parameter existed.
     """
     from spacecraft_telemetry.esa_adb.detections import (
         _flags_to_intervals,
@@ -194,20 +218,23 @@ def sweep_group_mission_level(
         )
 
     sl = eval_slice if eval_slice is not None else slice(None)
-    prepared: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any], np.ndarray[Any, Any]]]
-    prepared = {}
-    for channel, (smoothed, _labels) in per_channel.items():
-        mean, std = precompute_threshold_terms(smoothed, threshold_window)
-        prepared[channel] = (smoothed, mean, std)
+    terms: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]] = (
+        prepared
+        if prepared is not None
+        else {
+            channel: precompute_threshold_terms(smoothed, threshold_window)
+            for channel, (smoothed, _labels) in per_channel.items()
+        }
+    )
 
     out: dict[GridPoint, float] = {}
     for z in z_values:
         thresholds = {
-            ch: threshold_from_terms(mean, std, z) for ch, (_s, mean, std) in prepared.items()
+            ch: threshold_from_terms(mean, std, z) for ch, (mean, std) in terms.items()
         }
         for floor in floor_values:
             per_channel_intervals = {}
-            for channel, (smoothed, _m, _s) in prepared.items():
+            for channel, (smoothed, _labels) in per_channel.items():
                 flags = flag_anomalies(smoothed, thresholds[channel], min_run_length, floor)
                 per_channel_intervals[channel] = _flags_to_intervals(
                     flags[sl], channel_timestamps[channel][sl]

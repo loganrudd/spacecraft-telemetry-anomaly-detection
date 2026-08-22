@@ -46,7 +46,11 @@ from spacecraft_telemetry.model.dataset import (
     load_window_labels_from_metadata,
 )
 from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
-from spacecraft_telemetry.ray_fanout.threshold_grid import sweep_group, sweep_group_mission_level
+from spacecraft_telemetry.ray_fanout.threshold_grid import (
+    precompute_threshold_terms,
+    sweep_group,
+    sweep_group_mission_level,
+)
 from spacecraft_telemetry.ray_fanout.threshold_search import (
     NonConvergenceError,
     SweepFn,
@@ -65,21 +69,16 @@ _DEFAULT_Z = [2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 _DEFAULT_FLOORS = [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 
 
-def _sweep_mission(
+def _prepare_mission_sweep(
     settings: Any,
     mission: str,
     channels: list[str],
     per_channel: dict[str, tuple[Any, Any]],
-    eval_slice: slice,
     *,
     metadata_by_channel: dict[str, Any],
     select_on: str,
-    threshold_window: int,
-    min_run_length: int,
-    z_values: list[float],
-    floor_values: list[float],
-) -> dict[tuple[float, float], float]:
-    """Assemble ESA-ADB ground truth and sweep on the mission-level metric.
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Assemble ESA-ADB ground truth for the mission-level metric. Runs ONCE.
 
     Mirrors ray_fanout.tune.run_hpo_sweep's 021.4b preparation exactly — same
     timeline, same cutoff, same event grouping — so a config chosen here means
@@ -95,6 +94,13 @@ def _sweep_mission(
     (segment_ids, is_anomaly, timestamps) so the three derivations below —
     timeline, HPO cutoff, target timestamps — reuse one read instead of
     issuing three more (docs/reviews/021, item D1).
+
+    None of this depends on z_values/floor_values, so — unlike the pre-022.1
+    shape where it lived inside the swept function and reran on every
+    widening round — it must run exactly ONCE per tool invocation. Call this
+    directly in main() and bind its result into the sweep_fn via
+    functools.partial, rather than calling it from inside a function the
+    driver invokes per round (docs/reviews/022, item P1).
     """
     import pandas as pd
 
@@ -138,14 +144,7 @@ def _sweep_mission(
                 "wrong instants — re-check window_size/prediction_horizon."
             )
 
-    return sweep_group_mission_level(
-        per_channel, channel_timestamps, events, timeline,
-        threshold_window=threshold_window,
-        min_run_length=min_run_length,
-        z_values=z_values,
-        floor_values=floor_values,
-        eval_slice=eval_slice,
-    )
+    return events, timeline, channel_timestamps
 
 
 def _parse_floats(raw: str | None, default: list[float]) -> list[float]:
@@ -167,20 +166,43 @@ def _make_sweep_fn(
     threshold_window: int,
     min_run_length: int,
 ) -> SweepFn:
-    """Select and bind the sweep_fn for --objective. Pure — no network I/O.
+    """Select and bind the sweep_fn for --objective.
 
     Extracted from main() (docs/reviews/022, stage 1.1) so the
     functools.partial -> z_values=/floor_values= keyword contract is
-    testable in isolation.
+    testable in isolation. For "mission", also runs _prepare_mission_sweep
+    here — once, since this function itself is called once per tool
+    invocation, before widen_to_convergence's per-round loop (docs/reviews/
+    022, item P1) — and binds its result into the returned sweep_fn via
+    functools.partial, exactly as the "per_channel" branch already binds
+    per_channel/threshold_window/min_run_length. Not purely I/O-free on the
+    "mission" path (network reads inside _prepare_mission_sweep), unlike the
+    "per_channel" path.
+
+    Also precomputes each channel's rolling (mean, std) terms once here and
+    binds them as ``prepared=`` (docs/reviews/022, item P2) — otherwise the
+    widening driver's per-round sweep_fn calls would re-pay that rolling
+    pass over a multi-million-element array on every round, which is exactly
+    the "minutes vs an hour" difference threshold_grid.precompute_threshold_
+    terms exists to avoid.
     """
+    prepared = {
+        channel: precompute_threshold_terms(smoothed, threshold_window)
+        for channel, (smoothed, _labels) in per_channel.items()
+    }
     if objective == "mission":
+        events, timeline, channel_timestamps = _prepare_mission_sweep(
+            settings, mission, channels, per_channel,
+            metadata_by_channel=metadata_by_channel,
+            select_on=select_on,
+        )
         return threshold_grid_sweep_fn(
             functools.partial(
-                _sweep_mission, settings, mission, channels, per_channel, eval_slice,
-                metadata_by_channel=metadata_by_channel,
-                select_on=select_on,
+                sweep_group_mission_level, per_channel, channel_timestamps, events, timeline,
                 threshold_window=threshold_window,
                 min_run_length=min_run_length,
+                eval_slice=eval_slice,
+                prepared=prepared,
             )
         )
     return threshold_grid_sweep_fn(
@@ -189,6 +211,7 @@ def _make_sweep_fn(
             threshold_window=threshold_window,
             min_run_length=min_run_length,
             eval_slice=eval_slice,
+            prepared=prepared,
         )
     )
 
@@ -367,7 +390,7 @@ def main() -> None:
     # One parquet read per channel, reused by every downstream derivation.
     # Previously this script read each channel's test partition FOUR times —
     # load_window_labels here, plus mission_timeline, hpo_cutoff and
-    # window_target_timestamps inside _sweep_mission — even though all four
+    # window_target_timestamps inside _prepare_mission_sweep — even though all four
     # derive from the same (segment_ids, is_anomaly, timestamps). The codebase
     # already solved this for esa_adb.report (docs/plans/019 P2/P3); this
     # script, written later, called the re-reading variants.
