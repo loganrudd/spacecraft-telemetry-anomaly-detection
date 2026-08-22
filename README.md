@@ -65,6 +65,15 @@ recovery.
 - Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
 - Ray Tune HPO over scoring parameters per subsystem
+- Mechanical grid-widening driver for threshold selection
+  (`ray_fanout/threshold_search.py`): auto-expands whichever axis's optimum sits on a grid
+  edge and fails closed rather than returning a configuration that is really a lower bound
+- `tuned_configs.json` carries a machine-readable `_meta` provenance block (which search
+  produced it, objective name *and* value, the slice it was selected on, the swept axes,
+  how many widening rounds it took); the ESA-ADB report renders each tuned row's provenance
+  from the scoring run's MLflow tags instead of asserting it
+- Local artifact cache for MLflow error arrays, keyed `(run_id, artifact_path)` with atomic
+  writes and a `--no-cache` bypass for byte-identity re-validation
 - MLflow experiment tracking (training, scoring, HPO experiments per mission)
 - MLflow model registry with `telemanom-{mission}-{channel}` naming convention
 - `mlflow promote` CLI sets the `@champion` alias on a model version (MLflow 3.x)
@@ -267,8 +276,11 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 
 Only the **protocol-matched** row is like-for-like — neither side tuned, neither
 side using an error floor — and there we are far behind. The tuned rows apply
-per-subsystem HPO the paper never ran, so even the 0.753, close as it looks to the
-paper's pruned 0.786, is **not** a like-for-like win. It differs on two axes at
+per-subsystem threshold selection the paper never ran (an exhaustive grid over
+`(threshold_z, min_error_value)`, selected on the first 60% of the test half — *not*
+a Ray Tune sweep; the report reads that distinction from each run's tags rather than
+asserting it), so even the 0.753, close as it looks to the paper's pruned 0.786, is
+**not** a like-for-like win. It differs on two axes at
 once: we tuned and they did not, *and* our tuned rows are measured on the held-out
 final 40% (25 events) while theirs covers the full test half (65 events). Reported
 both ways deliberately.
@@ -329,7 +341,9 @@ supports a general claim.
    a search space that contained a better one — 204 trials missed it, because the
    response surface is a narrow ridge. `scripts/threshold_ceiling.py` makes that parity
    check cheap (no GPU, no re-inference — it replays saved error arrays), and it is now
-   a required step before any architecture claim.
+   a required step before any architecture claim — one that no longer depends on a human
+   choosing the grid ranges
+   ([details](#threshold-selection-is-now-a-procedure-not-a-judgement-call)).
 3. **`threshold_z` and `min_error_value` are substitutes, not independent knobs.** High-z
    + no-floor and low-z + high-floor score nearly identically, so the optimum is a ridge.
    That is why a single "best trial" looked pinned at a bound when it wasn't, and why
@@ -390,6 +404,40 @@ ground truth:
 | never trained | 8 | no registered model (`channel_3`, `53`–`56`, `67`–`69`) — not scoreable at all |
 
 The live demo serves 8 validated subsystem_6 channels.
+
+### Threshold selection is now a procedure, not a judgement call
+
+All three findings above point at the same layer: the numbers move most when the
+`(threshold_z, min_error_value)` operating point moves — and that point was being chosen by
+hand. Run a grid, read the "optimum sits on a GRID EDGE" warning, widen the ranges by eye,
+re-run. That loop ran four times while measuring the horizon result alone, and a human
+typing ranges is exactly the uncontrolled variable that once inflated an architecture claim
+threefold.
+
+It is code now (`ray_fanout/threshold_search.py`). The driver sweeps, detects which axis
+sits on an edge, extends *that* axis in *that* direction, re-sweeps only the new points and
+merges them, and repeats — refusing to return a configuration whose optimum is still a lower
+bound. An optimum at a parameter's natural bound (`min_error_value = 0`, i.e. no absolute
+error floor) is recorded as converged rather than expanded into meaningless negative values.
+The driver itself is domain-agnostic: it takes axes, bounds, and a sweep function, so a
+future detector reuses it through a thin adapter rather than a rewrite.
+
+**The acceptance test was the manual loop it replaces.** The hand-widened `first` sweep was
+re-run through the driver to see whether it would find the same answer unassisted. It did,
+in a single widening round — `best_score` bit-for-bit equal to the human's
+0.6249993599795226, reached at `threshold_z = 14.0` where the human had typed 15.0. Two
+different grid points returning an identical score is itself the ridge that finding 3
+describes, now measured rather than inferred. Every point from the earlier hand-run grid
+reproduced at an identical value.
+
+Two supporting changes travel with it. Every emitted `tuned_configs.json` carries a
+machine-readable `_meta` block — provenance, objective name *and* value, which slice the
+config was selected on, the swept axes, the number of widening rounds — so any published
+number can be traced back to how it was chosen. And the benchmark report now reads each
+tuned row's provenance from the scoring run's MLflow tags rather than asserting
+"per-subsystem Ray Tune HPO", a claim that was **false** for every horizon row above: those
+configurations came from the post-hoc grid, not from Tune. A report that misstates how its
+own numbers were produced is the exact failure this layer exists to prevent.
 
 ### ISS: evaluation by fault injection (no real labels)
 
@@ -780,48 +828,37 @@ standing demonstration.
 | 19 | ESA-ADB-comparable evaluation (paper metric + split) | Complete |
 | 20 | Experiment variant axis (separate mission from experiment config) | Complete |
 | 21 | 6-in/6-out multivariate Telemanom | Complete |
-| 22 | Tuning layer | In progress |
+| 22 | Tuning layer (mechanical threshold selection + config provenance) | Complete |
 
-Phases 19–21 are post-18 workstreams rather than new platform capabilities: 19 is
+Phases 19–22 are post-18 workstreams rather than new platform capabilities: 19 is
 evaluation credibility (implementing ESA-ADB's own corrected event-wise metric and
 replicating its 50/50 split, verified against the benchmark's reference scorer — see
 [Head-to-head with the ESA-ADB benchmark](#head-to-head-with-the-esa-adb-benchmark)),
 20 is the plumbing that lets an experiment configuration stop masquerading as a
-mission, and 21 is the first detector change aimed at the precision gap 19 measured.
-21 depends on 20 and is the step the [Future Work](#future-work) items build on.
+mission, 21 is the first detector change aimed at the precision gap 19 measured, and
+22 makes threshold selection mechanical so compared arms are equalized by construction
+rather than by a human widening grid ranges
+([details](#threshold-selection-is-now-a-procedure-not-a-judgement-call)).
+21 depends on 20; 22 is the hard prerequisite for the DC-VAE work in
+[Future Work](#future-work). Every phase-22 change is a driver, a schema, a rendered
+string, or a cache — none of the published numbers above moved, which was the plan's
+governing invariant.
 
 
 ## Future Work
 
-The detector roadmap below is sequenced deliberately: each step builds the infrastructure the
-next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now
-built and measured — it matched per-channel accuracy rather than beating it
-([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
+The detector roadmap below is sequenced deliberately: each step builds the infrastructure the next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now built and measured — it matched per-channel accuracy rather than beating it ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
-The **10-step forecast horizon** — the last unreplicated difference from the benchmark's
-configuration — is now also built and measured: held-out F0.5 **0.507 → 0.753**, the largest
-detection gain in this repo's history, though the ablation shows ~80% of it comes from the
-horizon-averaged error statistic rather than from the longer training signal
-([details](#the-10-step-horizon-a-real-gain-but-not-from-the-horizon)).
-
-That finding sets up the immediate next step, which is **not** a new detector: standardize
-the threshold-selection layer before adding one. Selecting on the reported metric was worth
-+0.13, the error statistic +0.20, and the architecture ~0 — the tuning layer is where the
-score actually lives, and one of the configurations reported above sits outside the search
-space HPO can reach. DC-VAE's whole premise is that this layer rescues a detector the
-benchmark authors say thresholds badly, so the layer has to be trustworthy *before* it is
-used as evidence about a new model.
-
-- **Standardize threshold selection before adding detectors.** The `(threshold_z,
-  min_error_value)` selection that equalizes tuning between compared arms is currently a
-  hand-driven script: run a grid, notice the "optimum sits on a grid edge" warning, widen by
-  eye, re-run. That loop is mechanical and belongs in code, because every future comparison
-  depends on both arms being selected the same way — the failure it guards against already
-  happened once, inflating an architecture claim threefold. Related, and measured: HPO leaves
-  0.07–0.13 on the table because the response surface is a narrow ridge, and `threshold_z`
-  and `min_error_value` are substitutes rather than independent knobs, so sampling them
-  independently spends most of the budget off-ridge.
+- **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
+  the table because the response surface is a narrow ridge, and `threshold_z` and
+  `min_error_value` are substitutes rather than independent knobs — so sampling them
+  independently spends most of the budget off-ridge. One configuration reported above
+  (`first`'s `threshold_z = 15.0`) sits outside the search space HPO can reach at all. The
+  mechanical driver is what makes this decidable: it produces the ridge geometry across arms
+  that the choice depends on. Deliberately not designed in advance — the baseline any
+  cleverer sampler must beat is simply raising `num_samples`, and picking a
+  reparameterization from the keyboard would repeat the mistake the driver exists to remove.
 - **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
   Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
@@ -891,12 +928,15 @@ used as evidence about a new model.
   per-channel work has the same shape as the Ray training fan-out and could move to
   `@ray.remote` (tracked by a TODO in `cli.py`).
 - **Move the post-hoc threshold sweep onto Ray.** The `(threshold_z, min_error_value)` grid
-  that equalizes tuning between compared arms currently runs as a local script, and the cost
-  is dominated by *data locality*, not compute: ~11 min pulling each arm's saved error arrays
-  from GCS against ~4 min of actual sweep. Running it as a CPU-only RayJob next to the bucket
-  removes the download almost entirely, and the grid itself is embarrassingly parallel over
-  points (the rolling mean/std is precomputed once per channel and shared across every `z`).
-  It becomes *necessary* rather than merely nice at mission scale — six channels hold ~690 MB
+  that equalizes tuning between compared arms still runs as a local script. The original case
+  for moving it was *data locality* — ~11 min pulling each arm's saved error arrays from GCS
+  against ~4 min of actual sweep — but that is no longer the profile: parallelizing the
+  per-channel loads and adding a local artifact cache keyed on `(run_id, artifact_path)` cut
+  the load phase to 17–31 s, leaving ~85% of an ~11 min run inside the sweep itself. So the
+  remaining case is **parallelism over grid points**, and it is a real one: the grid is
+  embarrassingly parallel (the rolling mean/std is precomputed once per channel and shared
+  across every `z`), and the mechanical widening driver only makes the point count grow. It
+  becomes *necessary* rather than merely nice at mission scale — six channels hold ~690 MB
   resident, so ~100 channels would need ~15–18 GB and cannot run on a laptop at all.
 
 

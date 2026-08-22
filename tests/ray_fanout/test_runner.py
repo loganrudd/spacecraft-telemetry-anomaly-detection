@@ -171,7 +171,9 @@ def test_score_all_channels_with_tuned_configs(ray_local, pretrained_channel, tm
     scoring_exp = experiment_name(settings.model.model_type, "scoring", "ESA-Mission1")
     run = find_latest_run_for_channel(scoring_exp, "channel_1", tracking_uri)
     assert run is not None, "No scoring run found in MLflow"
-    cfg_bytes = download_artifact_bytes(run.info.run_id, "threshold_config.json", tracking_uri)
+    cfg_bytes = download_artifact_bytes(
+        run.info.run_id, "threshold_config.json", tracking_uri, use_cache=False
+    )
     saved = json.loads(cfg_bytes.decode())
     assert saved["z"] == pytest.approx(2.5), (
         f"Expected z=2.5 in threshold_config.json, got: {saved}"
@@ -410,7 +412,9 @@ def test_score_all_subsystems_applies_tuned_configs(
         max_results=1,
     )
     assert runs, "No scoring run found in MLflow for subsystem_1"
-    cfg_bytes = download_artifact_bytes(runs[0].info.run_id, "threshold_config.json", tracking_uri)
+    cfg_bytes = download_artifact_bytes(
+        runs[0].info.run_id, "threshold_config.json", tracking_uri, use_cache=False
+    )
     saved = json.loads(cfg_bytes.decode())
     assert saved["z"] == pytest.approx(2.5)
 

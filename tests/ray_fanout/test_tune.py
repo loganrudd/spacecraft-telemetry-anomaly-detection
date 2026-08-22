@@ -609,8 +609,26 @@ def test_run_all_sweeps_filters_and_runs(
     assert entry["error_smoothing_window"] == 10
     assert entry["threshold_z"] == 2.5
     assert "_meta" in entry
-    assert entry["_meta"]["run_id"] == "fake-run-id-abc"
-    assert entry["_meta"]["seg_f0_5"] == pytest.approx(0.75)
+    meta = entry["_meta"]
+    assert meta["run_id"] == "fake-run-id-abc"
+    assert meta["seg_f0_5"] == pytest.approx(0.75)
+    # docs/plans/022 stage 022.2 schema — shared with the exhaustive-grid
+    # writer in scripts/threshold_ceiling.py.
+    assert meta["provenance"] == "ray_tune"
+    assert meta["objective_name"] == "mean_per_channel_seg_f0_5_minus_fp_penalty"
+    # _fake_run_hpo_sweep's result has no "objective" key, so this falls back
+    # to seg_f0_5 — same fallback _to_entry always applied.
+    assert meta["objective_value"] == pytest.approx(0.75)
+    assert meta["selected_on"] == "hpo_portion"
+    assert meta["hpo_eval_fraction"] == settings.tune.hpo_eval_fraction
+    assert meta["outer_split"] == "chronological_50_50"
+    assert meta["error_smoothing_window"] == 10
+    assert meta["threshold_window"] == 100
+    assert meta["min_run_length"] == 2
+    assert meta["axes"] is None
+    assert meta["expansions"] is None
+    assert meta["interior"] is None
+    assert "objective" not in meta
 
 
 @pytest.mark.parametrize(

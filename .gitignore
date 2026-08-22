@@ -22,6 +22,9 @@ data/adb_offline/
 *.pkl
 *.pickle
 
+# Local artifact cache (model.io.download_artifact_bytes — docs/plans/022)
+.cache/
+
 # Environment
 .env
 .env.local

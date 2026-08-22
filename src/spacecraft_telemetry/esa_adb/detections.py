@@ -64,13 +64,20 @@ def find_scoring_run(
     tracking_uri: str,
     *,
     tuned: bool,
-) -> str:
-    """Return the run_id of the most recent matching scoring run for a channel.
+) -> Any:
+    """Return the most recent matching scoring Run (mlflow.entities.Run) for a channel.
 
     ``tuned=False`` selects the Hundman-defaults baseline, ``tuned=True`` the
     most recent tuned run. "Tuned" means carrying either the ``tuned_from_run``
     tag (Ray Tune) or ``tuned_source`` (another search, e.g. the exhaustive
     grid in scripts/threshold_ceiling.py) — see :func:`_is_tuned_run`.
+
+    Returns the full Run (not just its id) — ``client.search_runs`` already
+    returns fully-populated Run objects, tags included, so a caller that
+    also needs tags (e.g. :func:`tuned_provenance`) can read them off THIS
+    object instead of paying a second ``client.get_run()`` round trip for a
+    run this function already had in hand (docs/reviews/022, item A2). Use
+    :func:`find_scoring_run_id` when only the id is wanted.
 
     Raises:
         RuntimeError: No experiment, or no run matches — states the exact
@@ -93,7 +100,7 @@ def find_scoring_run(
     )
     for run in runs:
         if _is_tuned_run(run) == tuned:
-            return str(run.info.run_id)
+            return run
 
     kind = "tuned" if tuned else "untuned (Hundman-defaults)"
     flag = "with --tuned-configs" if tuned else "without --tuned-configs"
@@ -104,6 +111,21 @@ def find_scoring_run(
         f"tuned_source tags). "
         f"Run `spacecraft-telemetry ray score` for this channel {flag}."
     )
+
+
+def find_scoring_run_id(
+    experiment: str,
+    channel: str,
+    tracking_uri: str,
+    *,
+    tuned: bool,
+) -> str:
+    """Thin str-run_id wrapper around :func:`find_scoring_run`.
+
+    For callers that only want the id, not the full Run (e.g. an artifact
+    path that gets logged/passed around, not queried for tags/params).
+    """
+    return str(find_scoring_run(experiment, channel, tracking_uri, tuned=tuned).info.run_id)
 
 
 def _is_tuned_run(run: Any) -> bool:
@@ -123,6 +145,92 @@ def _is_tuned_run(run: Any) -> bool:
     return "tuned_from_run" in tags or "tuned_source" in tags
 
 
+def tuned_provenance(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    *,
+    run_map: OfflineRunMap | None = None,
+) -> str | None:
+    """Human-readable provenance of the tuned scoring runs behind ``channels``.
+
+    docs/plans/022, stage 022.2b: the report used to hardcode "per-subsystem
+    Ray Tune HPO scoring" for every tuned row, which was false whenever the
+    config actually came from ``scripts/threshold_ceiling.py``'s exhaustive
+    grid (as it did for every 021.7 row). This reads what actually produced
+    each channel's tuned run from its MLflow tags instead of asserting it:
+
+    - ``tuned_source`` present (a grid-produced config, or any future
+      non-Tune search) -> that string verbatim, e.g. "scripts/
+      threshold_ceiling.py exhaustive grid (mission)".
+    - Only ``tuned_from_run`` present (a Ray Tune trial) -> "per-subsystem
+      Ray Tune HPO scoring", the one case where the old hardcoded claim was
+      actually true.
+    - Neither tag on any channel -> None (report renders an honest
+      "provenance unavailable" line rather than falling back to the old
+      claim).
+
+    All channels normally share one tuned config — one subsystem's Ray Tune
+    sweep, or threshold_ceiling.py's "first channel wins, the rest must
+    agree" grid (docs/plans/022 stage 022.2b, Open Question 2) — so every
+    channel is read and compared, rather than trusting one. A mismatch (a
+    mixed-config arm — should be rare given run_all_sweeps' one-config-per-
+    subsystem and threshold_ceiling.py's mixed-config hard-fail, but not
+    impossible, e.g. a partial re-tune) renders a "mixed: ..." summary
+    naming every distinct source and how many channels used it, and logs the
+    full per-channel map at warning level (docs/reviews/022 stage 2.2).
+    Refusing to render at all — the previous behaviour — traded the one
+    situation where you most want to see the numbers AND the discrepancy for
+    no report at all; asserting uniformity without checking it would be the
+    misstatement this function exists to fix, but a checked, disclosed
+    mismatch is not that.
+
+    Args:
+        run_map: Offline mode (esa_adb/offline.py) — MLflow is never
+            contacted, and run *tags* live only in the tracking backend, so
+            this returns None unconditionally. The caller must render an
+            honest "provenance unavailable in offline mode" line, not fall
+            back to the old hardcoded claim behind a harder-to-see branch.
+    """
+    if run_map is not None or not channels:
+        return None
+
+    try:
+        configure_mlflow(settings)
+    except Exception as exc:
+        log.warning(
+            "esa_adb.detections.tuned_provenance.configure_mlflow_failed", error=str(exc)
+        )
+
+    exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
+
+    provenance_by_channel: dict[str, str] = {}
+    for channel in channels:
+        # Reads tags off the SAME Run object _resolve_scoring_run's search
+        # already returned, rather than a second, independently re-resolved
+        # client.get_run() call (docs/reviews/022, item A2) — search_runs
+        # already returns fully-populated Run objects.
+        run, _is_multivariate = _resolve_scoring_run(settings, mission, exp, channel, tuned=True)
+        tags = run.data.tags
+        source = tags.get("tuned_source")
+        provenance_by_channel[channel] = source if source else "per-subsystem Ray Tune HPO scoring"
+
+    distinct = set(provenance_by_channel.values())
+    if len(distinct) > 1:
+        log.warning(
+            "esa_adb.detections.tuned_provenance.mixed_arm",
+            provenance_by_channel=provenance_by_channel,
+        )
+        counts: dict[str, int] = {}
+        for source in provenance_by_channel.values():
+            counts[source] = counts.get(source, 0) + 1
+        parts = [
+            f"{n} channel{'' if n == 1 else 's'} {source!r}" for source, n in counts.items()
+        ]
+        return "mixed: " + ", ".join(parts)
+    return next(iter(distinct))
+
+
 def _find_multivariate_scoring_run(
     settings: Settings,
     mission: str,
@@ -130,8 +238,8 @@ def _find_multivariate_scoring_run(
     channel: str,
     *,
     tuned: bool,
-) -> str | None:
-    """Locate the scoring run for a channel scored inside a multivariate group.
+) -> Any | None:
+    """Locate the scoring Run for a channel scored inside a multivariate group.
 
     A multivariate scoring run deliberately carries no ``channel_id`` tag
     (model/scoring.py — the run's key is a subsystem, not a real channel), so
@@ -145,7 +253,8 @@ def _find_multivariate_scoring_run(
     Mirrors ray_fanout.tune._find_multivariate_scoring_run, which solves the
     identical lookup problem for HPO.
 
-    Returns the run_id, or None when no matching multivariate run exists.
+    Returns the Run (not just its id — see :func:`find_scoring_run`'s
+    docstring for why), or None when no matching multivariate run exists.
     """
     import mlflow
 
@@ -169,8 +278,59 @@ def _find_multivariate_scoring_run(
             continue
         members = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
         if channel in members:
-            return str(run.info.run_id)
+            return run
     return None
+
+
+def _resolve_scoring_run(
+    settings: Settings,
+    mission: str,
+    experiment: str,
+    channel: str,
+    *,
+    tuned: bool,
+) -> tuple[Any, bool]:
+    """Resolve a channel's scoring Run, trying univariate then multivariate.
+
+    Shared by :func:`find_scoring_run_and_artifacts` (needs to know WHICH
+    path matched, to pick the right errors/threshold artifact-path shape)
+    and :func:`tuned_provenance` (needs only tags) so both read off the SAME
+    resolved Run rather than each re-resolving independently — the
+    duplication ``mission_intervals_from_per_channel``'s docstring records
+    regretting ("the duplicate call roughly doubled report runtime"),
+    applied to run lookup instead of artifact fetch (docs/reviews/022, item
+    A2). A run logged between two independent resolutions could make
+    provenance describe a different run than the one whose intervals were
+    actually scored; sharing one resolution closes that race.
+
+    Returns (run, is_multivariate).
+
+    Raises:
+        RuntimeError: When neither lookup finds a run — see
+            find_scoring_run_and_artifacts for the combined message shape.
+    """
+    from contextlib import suppress
+
+    try:
+        run = find_scoring_run(experiment, channel, settings.mlflow.tracking_uri, tuned=tuned)
+    except RuntimeError as univariate_exc:
+        # Best-effort: a failing fallback (missing subsystem metadata,
+        # unreachable backend) must degrade to "not found" so the original,
+        # more precise univariate error is what the caller sees.
+        multivariate_run: Any | None = None
+        with suppress(Exception):
+            multivariate_run = _find_multivariate_scoring_run(
+                settings, mission, experiment, channel, tuned=tuned
+            )
+        if multivariate_run is None:
+            raise RuntimeError(
+                f"{univariate_exc} Also searched for a multivariate scoring run "
+                f"(tags.subsystem = this channel's subsystem, with {channel!r} "
+                "listed in the run's `channels` tag) and found none — so this is "
+                "not simply a multivariate run being missed."
+            ) from univariate_exc
+        return multivariate_run, True
+    return run, False
 
 
 def find_scoring_run_and_artifacts(
@@ -194,40 +354,18 @@ def find_scoring_run_and_artifacts(
             searches, because "no run found" for a multivariate mission would
             otherwise point at the wrong remedy entirely.
     """
-    from contextlib import suppress
-
-    try:
-        run_id = find_scoring_run(
-            experiment, channel, settings.mlflow.tracking_uri, tuned=tuned
-        )
-    except RuntimeError as univariate_exc:
-        # Best-effort, exactly as in ray_fanout.tune: a failing fallback
-        # (missing subsystem metadata, unreachable backend) must degrade to
-        # "not found" so the original, more precise univariate error is what
-        # the caller sees.
-        multivariate_run_id: str | None = None
-        with suppress(Exception):
-            multivariate_run_id = _find_multivariate_scoring_run(
-                settings, mission, experiment, channel, tuned=tuned
-            )
-        if multivariate_run_id is None:
-            raise RuntimeError(
-                f"{univariate_exc} Also searched for a multivariate scoring run "
-                f"(tags.subsystem = this channel's subsystem, with {channel!r} "
-                "listed in the run's `channels` tag) and found none — so this is "
-                "not simply a multivariate run being missed."
-            ) from univariate_exc
+    run, is_multivariate = _resolve_scoring_run(
+        settings, mission, experiment, channel, tuned=tuned
+    )
+    run_id = str(run.info.run_id)
+    if is_multivariate:
         log.info(
             "esa_adb.detections.multivariate_run_used",
             channel=channel,
-            run_id=multivariate_run_id,
+            run_id=run_id,
             tuned=tuned,
         )
-        return (
-            multivariate_run_id,
-            _errors_artifact(channel),
-            _threshold_artifact(channel),
-        )
+        return run_id, _errors_artifact(channel), _threshold_artifact(channel)
     return run_id, _errors_artifact(), _threshold_artifact()
 
 

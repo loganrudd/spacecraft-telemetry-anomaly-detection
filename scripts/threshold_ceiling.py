@@ -28,6 +28,7 @@ Requires: .[tracking] (mlflow). configure_mlflow handles Cloud Run ID-token auth
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -46,10 +47,17 @@ from spacecraft_telemetry.model.dataset import (
 )
 from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
 from spacecraft_telemetry.ray_fanout.threshold_grid import (
-    best_point,
-    bounds_report,
+    NATURAL_BOUNDS,
+    precompute_threshold_terms,
     sweep_group,
     sweep_group_mission_level,
+    threshold_grid_sweep_fn,
+)
+from spacecraft_telemetry.ray_fanout.threshold_search import (
+    NonConvergenceError,
+    SweepFn,
+    WideningResult,
+    widen_to_convergence,
 )
 
 log = get_logger(__name__)
@@ -62,21 +70,16 @@ _DEFAULT_Z = [2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 _DEFAULT_FLOORS = [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
 
 
-def _sweep_mission(
+def _prepare_mission_sweep(
     settings: Any,
     mission: str,
     channels: list[str],
     per_channel: dict[str, tuple[Any, Any]],
-    eval_slice: slice,
     *,
     metadata_by_channel: dict[str, Any],
     select_on: str,
-    threshold_window: int,
-    min_run_length: int,
-    z_values: list[float],
-    floor_values: list[float],
-) -> dict[tuple[float, float], float]:
-    """Assemble ESA-ADB ground truth and sweep on the mission-level metric.
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Assemble ESA-ADB ground truth for the mission-level metric. Runs ONCE.
 
     Mirrors ray_fanout.tune.run_hpo_sweep's 021.4b preparation exactly — same
     timeline, same cutoff, same event grouping — so a config chosen here means
@@ -92,6 +95,13 @@ def _sweep_mission(
     (segment_ids, is_anomaly, timestamps) so the three derivations below —
     timeline, HPO cutoff, target timestamps — reuse one read instead of
     issuing three more (docs/reviews/021, item D1).
+
+    None of this depends on z_values/floor_values, so — unlike the pre-022.1
+    shape where it lived inside the swept function and reran on every
+    widening round — it must run exactly ONCE per tool invocation. Call this
+    directly in main() and bind its result into the sweep_fn via
+    functools.partial, rather than calling it from inside a function the
+    driver invokes per round (docs/reviews/022, item P1).
     """
     import pandas as pd
 
@@ -135,20 +145,138 @@ def _sweep_mission(
                 "wrong instants — re-check window_size/prediction_horizon."
             )
 
-    return sweep_group_mission_level(
-        per_channel, channel_timestamps, events, timeline,
-        threshold_window=threshold_window,
-        min_run_length=min_run_length,
-        z_values=z_values,
-        floor_values=floor_values,
-        eval_slice=eval_slice,
-    )
+    return events, timeline, channel_timestamps
 
 
 def _parse_floats(raw: str | None, default: list[float]) -> list[float]:
     if not raw:
         return default
     return [float(x) for x in raw.split(",") if x.strip()]
+
+
+def _make_sweep_fn(
+    objective: str,
+    *,
+    settings: Any,
+    mission: str,
+    channels: list[str],
+    per_channel: dict[str, tuple[Any, Any]],
+    eval_slice: slice,
+    metadata_by_channel: dict[str, Any],
+    select_on: str,
+    threshold_window: int,
+    min_run_length: int,
+) -> SweepFn:
+    """Select and bind the sweep_fn for --objective.
+
+    Extracted from main() (docs/reviews/022, stage 1.1) so the
+    functools.partial -> z_values=/floor_values= keyword contract is
+    testable in isolation. For "mission", also runs _prepare_mission_sweep
+    here — once, since this function itself is called once per tool
+    invocation, before widen_to_convergence's per-round loop (docs/reviews/
+    022, item P1) — and binds its result into the returned sweep_fn via
+    functools.partial, exactly as the "per_channel" branch already binds
+    per_channel/threshold_window/min_run_length. Not purely I/O-free on the
+    "mission" path (network reads inside _prepare_mission_sweep), unlike the
+    "per_channel" path.
+
+    Also precomputes each channel's rolling (mean, std) terms once here and
+    binds them as ``prepared=`` (docs/reviews/022, item P2) — otherwise the
+    widening driver's per-round sweep_fn calls would re-pay that rolling
+    pass over a multi-million-element array on every round, which is exactly
+    the "minutes vs an hour" difference threshold_grid.precompute_threshold_
+    terms exists to avoid.
+    """
+    prepared = {
+        channel: precompute_threshold_terms(smoothed, threshold_window)
+        for channel, (smoothed, _labels) in per_channel.items()
+    }
+    if objective == "mission":
+        events, timeline, channel_timestamps = _prepare_mission_sweep(
+            settings, mission, channels, per_channel,
+            metadata_by_channel=metadata_by_channel,
+            select_on=select_on,
+        )
+        return threshold_grid_sweep_fn(
+            functools.partial(
+                sweep_group_mission_level, per_channel, channel_timestamps, events, timeline,
+                threshold_window=threshold_window,
+                min_run_length=min_run_length,
+                eval_slice=eval_slice,
+                prepared=prepared,
+            )
+        )
+    return threshold_grid_sweep_fn(
+        functools.partial(
+            sweep_group, per_channel,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            eval_slice=eval_slice,
+            prepared=prepared,
+        )
+    )
+
+
+def _build_tuned_config(
+    subsystem_name: str,
+    *,
+    best_z: float,
+    best_floor: float,
+    threshold_window: int,
+    min_run_length: int,
+    smoothing_window: int,
+    objective: str,
+    select_on: str,
+    hpo_eval_fraction: float,
+    widening: WideningResult,
+) -> dict[str, Any]:
+    """Build the --emit-tuned-configs entry. Pure — no I/O.
+
+    Extracted from main() (docs/reviews/022, stage 1.1) so the 022.2 _meta
+    schema this writes is testable without a network round-trip. Schema
+    shared with ray_fanout.tune's Ray Tune writer — see
+    tune.write_tuned_configs' docstring (docs/plans/022, stage 022.2).
+    """
+    return {
+        subsystem_name: {
+            "threshold_z": best_z,
+            "min_error_value": best_floor,
+            "threshold_window": threshold_window,
+            "threshold_min_anomaly_len": min_run_length,
+            # MUST be pinned, not omitted. The grid swept a saved SMOOTHED
+            # array; scoring recomputes smoothing from scratch and would
+            # otherwise use the settings default, producing a different
+            # array for which the chosen (z, floor) was never evaluated.
+            "error_smoothing_window": smoothing_window,
+            "_meta": {
+                "provenance": "exhaustive_grid",
+                "source": f"scripts/threshold_ceiling.py exhaustive grid ({objective})",
+                # No HPO run backs a grid-selected config — fabricating an
+                # id would corrupt the tuned_from_run lineage tag.
+                "run_id": None,
+                "objective_name": (
+                    "mission_corrected_event_wise_f0_5"
+                    if objective == "mission"
+                    else "mean_per_channel_seg_f0_5"
+                ),
+                "objective_value": widening.best_score,
+                "selected_on": select_on,
+                "hpo_eval_fraction": hpo_eval_fraction,
+                "outer_split": "chronological_50_50",
+                "error_smoothing_window": smoothing_window,
+                "threshold_window": threshold_window,
+                "min_run_length": min_run_length,
+                "axes": {
+                    "threshold_z": widening.axes["threshold_z"],
+                    "min_error_value": widening.axes["min_error_value"],
+                },
+                "expansions": widening.expansions,
+                # widen_to_convergence never returns a non-interior result —
+                # a genuine grid-edge optimum raises instead.
+                "interior": True,
+            },
+        }
+    }
 
 
 def main() -> None:
@@ -212,6 +340,31 @@ def main() -> None:
         "metric you intend to report.",
     )
     p.add_argument("--out", default=None, metavar="JSON")
+    p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the local artifact cache (model.io.download_artifact_bytes) "
+        "entirely — re-fetches every errors.npy over the network. Use to "
+        "re-validate a suspected-poisoned cache, or to re-run the byte-identity "
+        "check that validates the cache against an uncached run.",
+    )
+    p.add_argument(
+        "--n-expand",
+        type=int,
+        default=3,
+        help="New grid points added per widened axis per round (default: 3). "
+        "The default suits the cheap --objective per_channel; --objective "
+        "mission is materially slower per point (interval math, not array "
+        "ops — see threshold_grid.sweep_group_mission_level), so a smaller "
+        "value may be worth it there.",
+    )
+    p.add_argument(
+        "--max-expansions",
+        type=int,
+        default=3,
+        help="Widening rounds attempted before giving up with a "
+        "NonConvergenceError (default: 3).",
+    )
     args = p.parse_args()
 
     if args.emit_tuned_configs and args.select_on != "hpo_portion":
@@ -255,7 +408,7 @@ def main() -> None:
     # One parquet read per channel, reused by every downstream derivation.
     # Previously this script read each channel's test partition FOUR times —
     # load_window_labels here, plus mission_timeline, hpo_cutoff and
-    # window_target_timestamps inside _sweep_mission — even though all four
+    # window_target_timestamps inside _prepare_mission_sweep — even though all four
     # derive from the same (segment_ids, is_anomaly, timestamps). The codebase
     # already solved this for esa_adb.report (docs/plans/019 P2/P3); this
     # script, written later, called the re-reading variants.
@@ -285,7 +438,10 @@ def main() -> None:
         client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
         params = client.get_run(run_id).data.params
         smoothed = bytes_to_errors(
-            download_artifact_bytes(run_id, errors_artifact, settings.mlflow.tracking_uri)
+            download_artifact_bytes(
+                run_id, errors_artifact, settings.mlflow.tracking_uri,
+                use_cache=not args.no_cache,
+            )
         )
         metadata = load_series_metadata(
             settings.preprocess.processed_data_dir, args.mission, channel, "test",
@@ -336,7 +492,11 @@ def main() -> None:
             channel=channel, run_id=entry["run_id"], n_windows=len(entry["smoothed"]),
         )
 
-    assert threshold_window is not None and min_run_length is not None
+    assert (
+        threshold_window is not None
+        and min_run_length is not None
+        and smoothing_window is not None
+    )
     n_windows = len(next(iter(per_channel.values()))[1])
     n_hpo = int(n_windows * settings.tune.hpo_eval_fraction)
     # final_portion = the held-out remainder score_channel reports on (a ceiling
@@ -347,27 +507,42 @@ def main() -> None:
         slice(n_hpo, None) if args.select_on == "final_portion" else slice(None, n_hpo)
     )
 
-    if args.objective == "mission":
-        grid = _sweep_mission(
-            settings, args.mission, channels, per_channel, eval_slice,
-            metadata_by_channel=metadata_by_channel,
-            select_on=args.select_on,
-            threshold_window=threshold_window,
-            min_run_length=min_run_length,
-            z_values=z_values,
-            floor_values=floor_values,
+    sweep_fn = _make_sweep_fn(
+        args.objective,
+        settings=settings,
+        mission=args.mission,
+        channels=channels,
+        per_channel=per_channel,
+        eval_slice=eval_slice,
+        metadata_by_channel=metadata_by_channel,
+        select_on=args.select_on,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+    )
+
+    # Mechanically widens past a grid-edge optimum instead of the old
+    # print-a-warning-and-stop loop a human re-ran by hand (docs/plans/022,
+    # stage 022.1). Converges to an interior optimum or a parameter's natural
+    # bound (e.g. min_error_value=0.0), or raises rather than quoting a
+    # number that is actually a lower bound.
+    try:
+        widening = widen_to_convergence(
+            sweep_fn, {"threshold_z": z_values, "min_error_value": floor_values},
+            natural_bounds=NATURAL_BOUNDS,
+            n_expand=args.n_expand, max_expansions=args.max_expansions,
         )
-    else:
-        grid = sweep_group(
-            per_channel,
-            threshold_window=threshold_window,
-            min_run_length=min_run_length,
-            z_values=z_values,
-            floor_values=floor_values,
-            eval_slice=eval_slice,
-        )
-    (best_z, best_floor), best_score = best_point(grid)
-    report = bounds_report(grid, z_values, floor_values)
+    except NonConvergenceError as exc:
+        raise SystemExit(
+            f"Threshold search did not converge: {exc}\n"
+            "Widen --z-values / --floor-values, or investigate why the "
+            "objective keeps improving toward the edge."
+        ) from None
+
+    grid = widening.grid
+    z_values = widening.axes["threshold_z"]
+    floor_values = widening.axes["min_error_value"]
+    best_z, best_floor = widening.best_point
+    best_score = widening.best_score
 
     print(f"\nmission={args.mission} variant={settings.variant} "
           f"{'tuned' if tuned else 'untuned'} channels={len(channels)}")
@@ -384,36 +559,29 @@ def main() -> None:
     )
     print(f"\n{label}  {metric} = {best_score:.3f}  at z={best_z}, floor={best_floor}")
     print(f"  (objective={args.objective}, selected on {args.select_on})")
-    if report["is_lower_bound"]:
-        print("  ⚠  optimum sits on a GRID EDGE — this is a LOWER BOUND. "
-              "Widen --z-values / --floor-values before quoting it.")
+    if widening.expansions:
+        print(f"  ✓  widened {widening.expansions} round(s) past the initial grid to reach "
+              f"an interior optimum (z: {z_values}, floor: {floor_values}).")
     else:
-        print("  ✓  optimum is interior to the swept grid.")
+        print("  ✓  optimum is interior to the initial grid (no widening needed).")
 
     if args.emit_tuned_configs:
         # Same schema run_all_sweeps writes and score_all_channels reads
         # (ray_fanout/runner.py). `_meta.run_id` is omitted deliberately: there
         # is no HPO run behind this config, and fabricating one would corrupt
         # the tuned_from_run lineage tag that scoring writes.
-        entry = {
-            args.subsystem_name: {
-                "threshold_z": best_z,
-                "min_error_value": best_floor,
-                "threshold_window": threshold_window,
-                "threshold_min_anomaly_len": min_run_length,
-                # MUST be pinned, not omitted. The grid swept a saved SMOOTHED
-                # array; scoring recomputes smoothing from scratch and would
-                # otherwise use the settings default, producing a different
-                # array for which the chosen (z, floor) was never evaluated.
-                "error_smoothing_window": smoothing_window,
-                "_meta": {
-                    "seg_f0_5": best_score,
-                    "source": f"scripts/threshold_ceiling.py exhaustive grid ({args.objective})",
-                    "selected_on": args.select_on,
-                    "objective": args.objective,
-                },
-            }
-        }
+        entry = _build_tuned_config(
+            args.subsystem_name,
+            best_z=best_z,
+            best_floor=best_floor,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            smoothing_window=smoothing_window,
+            objective=args.objective,
+            select_on=args.select_on,
+            hpo_eval_fraction=settings.tune.hpo_eval_fraction,
+            widening=widening,
+        )
         Path(args.emit_tuned_configs).parent.mkdir(parents=True, exist_ok=True)
         Path(args.emit_tuned_configs).write_text(json.dumps(entry, indent=2))
         print(f"\nWrote tuned_configs → {args.emit_tuned_configs}")
@@ -435,7 +603,11 @@ def main() -> None:
             "z_values": z_values,
             "floor_values": floor_values,
             "grid": {f"{z}|{f}": v for (z, f), v in grid.items()},
-            **report,
+            "best_z": best_z,
+            "best_floor": best_floor,
+            "best_score": best_score,
+            "expansions": widening.expansions,
+            "interior": True,
         }, indent=2))
         print(f"\nWrote → {args.out}")
 

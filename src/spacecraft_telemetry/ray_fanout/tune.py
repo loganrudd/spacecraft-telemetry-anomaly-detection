@@ -1157,14 +1157,42 @@ def run_all_sweeps(
         )
 
     def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
-        """Convert run_hpo_sweep result to the on-disk tuned_configs entry."""
+        """Convert run_hpo_sweep result to the on-disk tuned_configs entry.
+
+        ``_meta`` schema is shared with the exhaustive-grid writer
+        (scripts/threshold_ceiling.py) — see write_tuned_configs' docstring
+        for the full spec (docs/plans/022, stage 022.2).
+        """
+        config = sweep_result.get("config", {})
         return {
-            **sweep_result.get("config", {}),
+            **config,
             "_meta": {
+                "provenance": "ray_tune",
+                "source": "per-subsystem Ray Tune HPO sweep",
                 "run_id": sweep_result.get("run_id"),
+                # Ray Tune's objective subtracts an FP penalty from mean
+                # per-channel seg_f0_5 (see _scoring_trial) — a different
+                # quantity from the grid's plain "mean_per_channel_seg_f0_5",
+                # so it gets its own name rather than overloading that one.
+                "objective_name": "mean_per_channel_seg_f0_5_minus_fp_penalty",
+                "objective_value": sweep_result.get(
+                    "objective", sweep_result.get("seg_f0_5", 0.0)
+                ),
                 "seg_f0_5": sweep_result.get("seg_f0_5", 0.0),
                 "nominal_fp_rate": sweep_result.get("nominal_fp_rate", 0.0),
-                "objective": sweep_result.get("objective", sweep_result.get("seg_f0_5", 0.0)),
+                # Ray Tune always selects the winning trial on the HPO portion
+                # (see run_hpo_sweep's docstring) — never on final_portion.
+                "selected_on": "hpo_portion",
+                "hpo_eval_fraction": settings.tune.hpo_eval_fraction,
+                "outer_split": "chronological_50_50",
+                "error_smoothing_window": config.get("error_smoothing_window"),
+                "threshold_window": config.get("threshold_window"),
+                "min_run_length": config.get("threshold_min_anomaly_len"),
+                # No swept grid axes and no "edge" concept for HyperOpt's
+                # continuous search — null on this path, unlike the grid's.
+                "axes": None,
+                "expansions": None,
+                "interior": None,
             },
         }
 
@@ -1235,15 +1263,44 @@ def write_tuned_configs(
                 "threshold_z": 2.8, "threshold_window": 200,
                 "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
                 "_meta": {
-                    "run_id": "abc123...", "seg_f0_5": 0.72,
-                    "nominal_fp_rate": 0.01, "objective": 0.67
+                    "provenance":        "ray_tune" | "exhaustive_grid",
+                    "source":            "ray_fanout/tune.py Ray Tune HPO sweep"
+                                         | "scripts/threshold_ceiling.py exhaustive grid",
+                    "run_id":            "abc123..." | null,
+                    "objective_name":    "mean_per_channel_seg_f0_5_minus_fp_penalty"
+                                         | "mission_corrected_event_wise_f0_5"
+                                         | "mean_per_channel_seg_f0_5",
+                    "objective_value":   0.7534,
+                    "selected_on":       "hpo_portion" | "final_portion",
+                    "hpo_eval_fraction": 0.6,
+                    "outer_split":       "chronological_50_50",
+                    "error_smoothing_window": 5,
+                    "threshold_window":  200,
+                    "min_run_length":    3,
+                    "axes":              {"threshold_z": [...], "min_error_value": [...]} | null,
+                    "expansions":        2 | null,
+                    "interior":          true | null
                 }
             }
         }
 
+    Both writers (this module's run_all_sweeps and
+    scripts/threshold_ceiling.py's --emit-tuned-configs) emit every key
+    above, ``null`` where it does not apply on that path — e.g. the grid
+    writer never has a ``run_id`` (no HPO run backs it — see
+    ray_fanout/runner.py's ``_tuned_meta``), and Ray Tune's continuous search
+    has no swept ``axes`` or grid-edge ``interior`` concept. ``objective_name``
+    / ``objective_value`` replace an earlier single ``objective`` key that
+    collided across writers (a float on this path, a string on the grid's) —
+    nothing reads the old key, so this is a clean break (docs/plans/022).
+
     ``_meta`` is filtered out by score_all_channels before applying overrides
     (not in _TUNABLE_SCORING_FIELDS). score_channel reads ``_meta.run_id`` to
-    set the ``tuned_from_run`` MLflow tag for HPO → scoring run lineage.
+    set the ``tuned_from_run`` MLflow tag for HPO → scoring run lineage;
+    ``_meta.source`` sets ``tuned_source`` the same way (see
+    ray_fanout/runner.py's ``_tuned_meta``). A pre-022.2 config on disk (old
+    ``objective`` key, no ``provenance``) still round-trips: only ``run_id``
+    and ``source`` are read downstream, and both keys are unchanged.
 
     Args:
         results:     Dict keyed by subsystem name → entry dict (params + _meta).

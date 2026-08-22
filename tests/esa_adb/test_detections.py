@@ -25,6 +25,7 @@ from spacecraft_telemetry.esa_adb.detections import (
     channel_detection_intervals_from_spec,
     find_scoring_run,
     find_scoring_run_and_artifacts,
+    find_scoring_run_id,
     mission_detection_intervals,
     mission_intervals_from_per_channel,
     per_channel_detection_intervals,
@@ -143,7 +144,7 @@ def _log_scoring_run(
 class TestFindScoringRun:
     def test_raises_when_experiment_missing(self, mlflow_uri: str) -> None:
         with pytest.raises(RuntimeError, match="No MLflow experiment"):
-            find_scoring_run("does-not-exist", "channel_41", mlflow_uri, tuned=False)
+            find_scoring_run_id("does-not-exist", "channel_41", mlflow_uri, tuned=False)
 
     def test_finds_untuned_run(self, tmp_path: Path, mlflow_uri: str) -> None:
         settings = _settings(tmp_path / "processed", mlflow_uri)
@@ -157,7 +158,7 @@ class TestFindScoringRun:
             tuned=False,
         )
         exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
-        found = find_scoring_run(exp, "channel_41", mlflow_uri, tuned=False)
+        found = find_scoring_run_id(exp, "channel_41", mlflow_uri, tuned=False)
         assert found == run_id
 
     def test_raises_when_only_untuned_exists_but_tuned_requested(
@@ -175,7 +176,7 @@ class TestFindScoringRun:
         )
         exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
         with pytest.raises(RuntimeError, match="tuned scoring run"):
-            find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True)
+            find_scoring_run_id(exp, "channel_41", mlflow_uri, tuned=True)
 
     def test_finds_tuned_run_over_untuned(self, tmp_path: Path, mlflow_uri: str) -> None:
         settings = _settings(tmp_path / "processed", mlflow_uri)
@@ -198,7 +199,30 @@ class TestFindScoringRun:
             tuned=True,
         )
         exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
-        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == tuned_run_id
+        assert find_scoring_run_id(exp, "channel_41", mlflow_uri, tuned=True) == tuned_run_id
+
+    def test_returns_the_full_run_with_tags_not_just_the_id(
+        self, tmp_path: Path, mlflow_uri: str
+    ) -> None:
+        """docs/reviews/022, item A2: find_scoring_run now returns the Run
+        (search_runs already fully populates it, tags included) rather than
+        discarding everything but the id — callers that need tags (e.g.
+        tuned_provenance) no longer pay a second client.get_run() round trip
+        for a run this function already had in hand."""
+        settings = _settings(tmp_path / "processed", mlflow_uri)
+        tuned_run_id = _log_scoring_run(
+            settings,
+            _MISSION,
+            "channel_41",
+            smoothed=np.zeros(5),
+            threshold=np.ones(5),
+            min_run_length=1,
+            tuned=True,
+        )
+        exp = experiment_name(settings.model.model_type, "scoring", _MISSION)
+        run = find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True)
+        assert str(run.info.run_id) == tuned_run_id
+        assert "tuned_from_run" in run.data.tags
 
 
 class TestTunedRunClassification:
@@ -264,8 +288,8 @@ class TestTunedRunClassification:
             grid_id = run.info.run_id
         assert mlflow.MlflowClient(tracking_uri=mlflow_uri).get_run(grid_id) is not None
 
-        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=False) == baseline_id
-        assert find_scoring_run(exp, "channel_41", mlflow_uri, tuned=True) == grid_id
+        assert find_scoring_run_id(exp, "channel_41", mlflow_uri, tuned=False) == baseline_id
+        assert find_scoring_run_id(exp, "channel_41", mlflow_uri, tuned=True) == grid_id
 
 
 def _log_multivariate_scoring_run(
