@@ -349,11 +349,29 @@ supports a general claim.
    That is why a single "best trial" looked pinned at a bound when it wasn't, and why
    bound-proximity alone is not evidence of a truncated search.
 
-The remaining case for the joint model is **operational, not accuracy**: one model per
-subsystem instead of six (~100 → ~4–8 at production scale), ~6× fewer training batches
-per epoch-round, and correspondingly fewer registry entries, promotions, and served
-artifacts. It is not deployed yet — but it is the base the horizon result below builds on,
-and that result is what makes it worth serving.
+The remaining case for the joint model is **operational, not accuracy**: one model per channel
+group instead of one per channel, with ~6× fewer training batches per epoch-round and
+correspondingly fewer registry entries, promotions, and served artifacts.
+
+**How far that scales turned out to be a data question, not a modeling one.** Joint forecasting
+requires the grouped channels to share a timestamp grid, and ESA channels each carry their own
+sampling phase and rate — preprocessing forward-fills but never resamples. The validated group
+works because channels 41–46 happen to sit on a common 30 s grid; two channels in another
+subsystem, same 30 s cadence but a 16 s phase offset, share **no timestamps at all**. Measured
+across the mission, only 18 of 54 preprocessed target channels group usefully on the current
+grids — into 4 models — and the rest stay univariate. A larger 29-channel group technically
+aligns but shatters into 947k joint segments, yielding 31k training windows against 8.3M for a
+single member.
+
+Resampling to a common grid removes the obstacle — simulated on that same group, joint windows
+rise from 31k to 982k on one segment — and it is the real prerequisite for extending joint
+modeling past one subsystem. That work is not done. An earlier version of this section
+projected "~100 → ~4–8 models at production scale"; that figure was extrapolated from the one
+subsystem where the grids happen to line up, and the measurement above supersedes it.
+
+The joint model is also not deployed: the serving path has no multivariate support yet. It is
+still the base the horizon result below builds on, and that result is what makes it worth
+serving.
 
 ### The 10-step horizon: a real gain, but not from the horizon
 
@@ -866,7 +884,10 @@ channel-group data path, which is the part the work below actually reuses.
   configured exactly like their multivariate Telemanom — one model over a channel group,
   `input_channels = target_channels`, latent dimensionality scaling with channel count — so
   now that multivariate Telemanom exists, DC-VAE reuses the whole data path and genuinely
-  becomes a model-module swap.
+  becomes a model-module swap. It also inherits that path's constraint: being a grouped model,
+  it needs its channel group to share a timestamp grid, so the resampling work described
+  [above](#multivariate-forecasting-built-measured-no-gain) gates how many channels it can
+  cover — not just how many Telemanom can.
 
   The honest motivation is *not* "DC-VAE is the benchmark's best model" — it isn't. The paper
   reports DC-VAE-ESA performing *"very poorly"* event-wise on Mission1, *"especially
