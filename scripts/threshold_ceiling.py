@@ -49,6 +49,8 @@ from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_byt
 from spacecraft_telemetry.ray_fanout.threshold_grid import sweep_group, sweep_group_mission_level
 from spacecraft_telemetry.ray_fanout.threshold_search import (
     NonConvergenceError,
+    SweepFn,
+    WideningResult,
     threshold_grid_sweep_fn,
     widen_to_convergence,
 )
@@ -150,6 +152,107 @@ def _parse_floats(raw: str | None, default: list[float]) -> list[float]:
     if not raw:
         return default
     return [float(x) for x in raw.split(",") if x.strip()]
+
+
+def _make_sweep_fn(
+    objective: str,
+    *,
+    settings: Any,
+    mission: str,
+    channels: list[str],
+    per_channel: dict[str, tuple[Any, Any]],
+    eval_slice: slice,
+    metadata_by_channel: dict[str, Any],
+    select_on: str,
+    threshold_window: int,
+    min_run_length: int,
+) -> SweepFn:
+    """Select and bind the sweep_fn for --objective. Pure — no network I/O.
+
+    Extracted from main() (docs/reviews/022, stage 1.1) so the
+    functools.partial -> z_values=/floor_values= keyword contract is
+    testable in isolation.
+    """
+    if objective == "mission":
+        return threshold_grid_sweep_fn(
+            functools.partial(
+                _sweep_mission, settings, mission, channels, per_channel, eval_slice,
+                metadata_by_channel=metadata_by_channel,
+                select_on=select_on,
+                threshold_window=threshold_window,
+                min_run_length=min_run_length,
+            )
+        )
+    return threshold_grid_sweep_fn(
+        functools.partial(
+            sweep_group, per_channel,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            eval_slice=eval_slice,
+        )
+    )
+
+
+def _build_tuned_config(
+    subsystem_name: str,
+    *,
+    best_z: float,
+    best_floor: float,
+    threshold_window: int,
+    min_run_length: int,
+    smoothing_window: int,
+    objective: str,
+    select_on: str,
+    hpo_eval_fraction: float,
+    widening: WideningResult,
+) -> dict[str, Any]:
+    """Build the --emit-tuned-configs entry. Pure — no I/O.
+
+    Extracted from main() (docs/reviews/022, stage 1.1) so the 022.2 _meta
+    schema this writes is testable without a network round-trip. Schema
+    shared with ray_fanout.tune's Ray Tune writer — see
+    tune.write_tuned_configs' docstring (docs/plans/022, stage 022.2).
+    """
+    return {
+        subsystem_name: {
+            "threshold_z": best_z,
+            "min_error_value": best_floor,
+            "threshold_window": threshold_window,
+            "threshold_min_anomaly_len": min_run_length,
+            # MUST be pinned, not omitted. The grid swept a saved SMOOTHED
+            # array; scoring recomputes smoothing from scratch and would
+            # otherwise use the settings default, producing a different
+            # array for which the chosen (z, floor) was never evaluated.
+            "error_smoothing_window": smoothing_window,
+            "_meta": {
+                "provenance": "exhaustive_grid",
+                "source": f"scripts/threshold_ceiling.py exhaustive grid ({objective})",
+                # No HPO run backs a grid-selected config — fabricating an
+                # id would corrupt the tuned_from_run lineage tag.
+                "run_id": None,
+                "objective_name": (
+                    "mission_corrected_event_wise_f0_5"
+                    if objective == "mission"
+                    else "mean_per_channel_seg_f0_5"
+                ),
+                "objective_value": widening.best_score,
+                "selected_on": select_on,
+                "hpo_eval_fraction": hpo_eval_fraction,
+                "outer_split": "chronological_50_50",
+                "error_smoothing_window": smoothing_window,
+                "threshold_window": threshold_window,
+                "min_run_length": min_run_length,
+                "axes": {
+                    "threshold_z": widening.axes["threshold_z"],
+                    "min_error_value": widening.axes["min_error_value"],
+                },
+                "expansions": widening.expansions,
+                # widen_to_convergence never returns a non-interior result —
+                # a genuine grid-edge optimum raises instead.
+                "interior": True,
+            },
+        }
+    }
 
 
 def main() -> None:
@@ -348,7 +451,11 @@ def main() -> None:
             channel=channel, run_id=entry["run_id"], n_windows=len(entry["smoothed"]),
         )
 
-    assert threshold_window is not None and min_run_length is not None
+    assert (
+        threshold_window is not None
+        and min_run_length is not None
+        and smoothing_window is not None
+    )
     n_windows = len(next(iter(per_channel.values()))[1])
     n_hpo = int(n_windows * settings.tune.hpo_eval_fraction)
     # final_portion = the held-out remainder score_channel reports on (a ceiling
@@ -359,25 +466,18 @@ def main() -> None:
         slice(n_hpo, None) if args.select_on == "final_portion" else slice(None, n_hpo)
     )
 
-    if args.objective == "mission":
-        sweep_fn = threshold_grid_sweep_fn(
-            functools.partial(
-                _sweep_mission, settings, args.mission, channels, per_channel, eval_slice,
-                metadata_by_channel=metadata_by_channel,
-                select_on=args.select_on,
-                threshold_window=threshold_window,
-                min_run_length=min_run_length,
-            )
-        )
-    else:
-        sweep_fn = threshold_grid_sweep_fn(
-            functools.partial(
-                sweep_group, per_channel,
-                threshold_window=threshold_window,
-                min_run_length=min_run_length,
-                eval_slice=eval_slice,
-            )
-        )
+    sweep_fn = _make_sweep_fn(
+        args.objective,
+        settings=settings,
+        mission=args.mission,
+        channels=channels,
+        per_channel=per_channel,
+        eval_slice=eval_slice,
+        metadata_by_channel=metadata_by_channel,
+        select_on=args.select_on,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+    )
 
     # Mechanically widens past a grid-edge optimum instead of the old
     # print-a-warning-and-stop loop a human re-ran by hand (docs/plans/022,
@@ -427,47 +527,18 @@ def main() -> None:
         # (ray_fanout/runner.py). `_meta.run_id` is omitted deliberately: there
         # is no HPO run behind this config, and fabricating one would corrupt
         # the tuned_from_run lineage tag that scoring writes.
-        entry = {
-            args.subsystem_name: {
-                "threshold_z": best_z,
-                "min_error_value": best_floor,
-                "threshold_window": threshold_window,
-                "threshold_min_anomaly_len": min_run_length,
-                # MUST be pinned, not omitted. The grid swept a saved SMOOTHED
-                # array; scoring recomputes smoothing from scratch and would
-                # otherwise use the settings default, producing a different
-                # array for which the chosen (z, floor) was never evaluated.
-                "error_smoothing_window": smoothing_window,
-                # Schema shared with ray_fanout.tune's Ray Tune writer — see
-                # write_tuned_configs' docstring (docs/plans/022, stage 022.2).
-                "_meta": {
-                    "provenance": "exhaustive_grid",
-                    "source": (
-                        f"scripts/threshold_ceiling.py exhaustive grid ({args.objective})"
-                    ),
-                    # No HPO run backs a grid-selected config — fabricating an
-                    # id would corrupt the tuned_from_run lineage tag.
-                    "run_id": None,
-                    "objective_name": (
-                        "mission_corrected_event_wise_f0_5"
-                        if args.objective == "mission"
-                        else "mean_per_channel_seg_f0_5"
-                    ),
-                    "objective_value": best_score,
-                    "selected_on": args.select_on,
-                    "hpo_eval_fraction": settings.tune.hpo_eval_fraction,
-                    "outer_split": "chronological_50_50",
-                    "error_smoothing_window": smoothing_window,
-                    "threshold_window": threshold_window,
-                    "min_run_length": min_run_length,
-                    "axes": {"threshold_z": z_values, "min_error_value": floor_values},
-                    "expansions": widening.expansions,
-                    # widen_to_convergence never returns a non-interior
-                    # result — a genuine grid-edge optimum raises instead.
-                    "interior": True,
-                },
-            }
-        }
+        entry = _build_tuned_config(
+            args.subsystem_name,
+            best_z=best_z,
+            best_floor=best_floor,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            smoothing_window=smoothing_window,
+            objective=args.objective,
+            select_on=args.select_on,
+            hpo_eval_fraction=settings.tune.hpo_eval_fraction,
+            widening=widening,
+        )
         Path(args.emit_tuned_configs).parent.mkdir(parents=True, exist_ok=True)
         Path(args.emit_tuned_configs).write_text(json.dumps(entry, indent=2))
         print(f"\nWrote tuned_configs → {args.emit_tuned_configs}")
