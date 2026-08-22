@@ -90,6 +90,13 @@ _ENV = {
     "TRAIN_LOOKBACK": "730D",
     "RAY_IMAGE_TAG": "latest",
     "MULTIVARIATE_ARG": "",
+    # ESA common time grid (docs/plans/023 stage .3). GRID_INTERVAL is rendered
+    # here as a value rather than "" so the placeholder check is meaningful:
+    # its EMPTY spelling is the legitimate "no grid" case (config coerces it to
+    # None), so an empty fixture value could not distinguish "substituted to
+    # empty" from "never substituted".
+    "GRID_INTERVAL": "30",
+    "CHANNEL_GRIDS": "{}",
 }
 
 
@@ -319,6 +326,26 @@ class TestEnvValueContracts:
             f"{yaml_path.name}: head {key}={head.get(key)!r} did not interpolate "
             "FORECAST_STEPS"
         )
+
+    def test_channel_grids_renders_as_parseable_json(self) -> None:
+        """channel_grid_interval_seconds is a dict, so pydantic-settings parses
+        the env var as JSON. The manifest wraps it in SINGLE quotes precisely
+        so a value like '{"channel_12": 90}' survives YAML — switching to
+        double quotes would make YAML swallow the inner quotes and the pod
+        would die at startup on a validation error."""
+        import json
+
+        key = "SPACECRAFT_PREPROCESS__CHANNEL_GRID_INTERVAL_SECONDS"
+        path = _DEPLOY_DIR / "cluster_preprocess.yaml"
+        rendered = _render(path, CHANNEL_GRIDS='{"channel_12": 90}')
+        spec = yaml.safe_load(rendered)["spec"]["rayClusterSpec"]
+        for template in [spec["headGroupSpec"]["template"]] + [
+            w["template"] for w in spec["workerGroupSpecs"]
+        ]:
+            value = self._ENVS(template)[key]
+            assert json.loads(value) == {"channel_12": 90}, (
+                f"cluster_preprocess.yaml: {key}={value!r} is not the JSON that was passed"
+            )
 
     @pytest.mark.parametrize("yaml_path", _CLUSTER_SCORES, ids=lambda p: p.name)
     def test_error_reduction_present_wherever_scoring_happens(self, yaml_path: Path) -> None:
