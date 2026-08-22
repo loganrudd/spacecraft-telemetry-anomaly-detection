@@ -133,6 +133,35 @@ def _segment_bucketed(
     return segmented["segment_id"].to_numpy(dtype=np.int32)  # type: ignore[no-any-return]
 
 
+# Memo for _native_timestamps. Keyed on everything that selects a partition, so
+# two missions/variants/splits never collide. Process-lifetime: this is a
+# one-shot measurement script, and the underlying Parquet cannot change under it.
+_TIMESTAMP_CACHE: dict[tuple[str, str, str, str, str | None], pd.DatetimeIndex] = {}
+
+
+def _native_timestamps(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    split: Literal["train", "test"],
+) -> pd.DatetimeIndex:
+    """One channel's native timestamps, memoized for the life of the process.
+
+    build_cost_table evaluates every candidate rate over the same channels, and
+    --groups-file evaluates many groups; a 29-channel family re-read once per
+    rate is a few hundred GCS round trips for data that cannot have changed
+    between them.
+    """
+    processed_dir = str(settings.preprocess.processed_data_dir)
+    key = (processed_dir, mission, channel, split, settings.variant)
+    if key not in _TIMESTAMP_CACHE:
+        _seg, _anom, ts = load_series_metadata(
+            processed_dir, mission, channel, split, variant=settings.variant
+        )
+        _TIMESTAMP_CACHE[key] = pd.DatetimeIndex(ts)
+    return _TIMESTAMP_CACHE[key]
+
+
 def measure_resampled(
     settings: Settings,
     mission: str,
@@ -149,14 +178,11 @@ def measure_resampled(
     bucket grids, and re-derives joint segments/windows exactly as
     check_group does for the native case.
     """
-    processed_dir = settings.preprocess.processed_data_dir
-    variant = settings.variant
-
     per_channel_buckets: dict[str, pd.DatetimeIndex] = {}
     per_channel_rows: dict[str, int] = {}
     for ch in channels:
-        _seg, _anom, ts = load_series_metadata(processed_dir, mission, ch, split, variant=variant)
-        buckets = _bucket_timestamps_gap_preserving(pd.DatetimeIndex(ts), rate_s)
+        ts = _native_timestamps(settings, mission, ch, split)
+        buckets = _bucket_timestamps_gap_preserving(ts, rate_s)
         per_channel_buckets[ch] = buckets
         per_channel_rows[ch] = len(buckets)
 
@@ -241,7 +267,15 @@ def main() -> None:
     parser.add_argument("--mission", required=True, help="Mission name, e.g. ESA-Mission1.")
     parser.add_argument("--split", default="train", choices=["train", "test"])
     parser.add_argument(
-        "--channels", required=True, help="Comma-separated channel_ids to check as ONE group."
+        "--channels", help="Comma-separated channel_ids to check as ONE group."
+    )
+    parser.add_argument(
+        "--groups-file",
+        help="JSON file mapping group name -> channel list, measured as SEPARATE "
+        "groups in one process (so the per-channel metadata read is shared "
+        "across every group and rate). Mutually exclusive with --channels. "
+        "Accepts either {name: [channels]} or check_channel_group.py's "
+        "--enumerate-families output, whose families are named family_1, ....",
     )
     parser.add_argument(
         "--rates", required=True,
@@ -254,35 +288,71 @@ def main() -> None:
         "a combined grid_cost_summary.json.",
     )
     args = parser.parse_args()
+    if bool(args.channels) == bool(args.groups_file):
+        raise SystemExit("exactly one of --channels or --groups-file is required")
 
     settings = load_settings(args.env)
-    channels = [c.strip() for c in args.channels.split(",") if c.strip()]
     rates = [int(r.strip()) for r in args.rates.split(",") if r.strip()]
 
-    table = build_cost_table(
-        settings, args.mission, channels, rates, split=args.split,
-        gap_multiplier=args.gap_multiplier,
-    )
+    if args.channels:
+        groups = {"group": [c.strip() for c in args.channels.split(",") if c.strip()]}
+    else:
+        groups = _load_groups(Path(args.groups_file))
 
-    log.info(
-        "grid_resample_cost.measured",
-        mission=args.mission, channels=channels, rates=rates,
-        native_windows=table["native"]["joint_windows"],
-        best_rate_s=table["best_rate_s"], verdict=table["verdict"],
-    )
-    print(json.dumps(table, indent=2, default=str))
+    tables: dict[str, dict[str, Any]] = {}
+    for name, channels in groups.items():
+        table = build_cost_table(
+            settings, args.mission, channels, rates, split=args.split,
+            gap_multiplier=args.gap_multiplier,
+        )
+        tables[name] = table
+        log.info(
+            "grid_resample_cost.measured",
+            group=name, mission=args.mission, n_channels=len(channels), rates=rates,
+            native_windows=table["native"]["joint_windows"],
+            best_rate_s=table["best_rate_s"], verdict=table["verdict"],
+        )
+
+    print(json.dumps(tables, indent=2, default=str))
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for rate in rates:
         rate_report = {
             "mission": args.mission,
-            "channels": channels,
-            "native": table["native"],
-            "resampled": table["resampled"][str(rate)],
+            "groups": {
+                name: {
+                    "channels": t["channels"],
+                    "native": t["native"],
+                    "resampled": t["resampled"][str(rate)],
+                }
+                for name, t in tables.items()
+            },
         }
         (out_dir / f"grid_cost_{rate}s.json").write_text(json.dumps(rate_report, indent=2))
-    (out_dir / "grid_cost_summary.json").write_text(json.dumps(table, indent=2))
+    (out_dir / "grid_cost_summary.json").write_text(
+        json.dumps({"mission": args.mission, "groups": tables}, indent=2)
+    )
+
+
+def _load_groups(path: Path) -> dict[str, list[str]]:
+    """Read a group definition file — see --groups-file.
+
+    check_channel_group.py's --enumerate-families output is accepted directly so
+    the two 023 tools chain without a hand-written intermediate file.
+    """
+    raw = json.loads(path.read_text())
+    if isinstance(raw, dict) and "families" in raw:
+        return {
+            f"family_{i}": fam["channels"] for i, fam in enumerate(raw["families"], start=1)
+        }
+    if not isinstance(raw, dict) or not all(
+        isinstance(v, list) and v for v in raw.values()
+    ):
+        raise SystemExit(
+            f"{path}: expected {{group_name: [channel, ...]}} or an --enumerate-families report"
+        )
+    return {str(k): [str(c) for c in v] for k, v in raw.items()}
 
 
 if __name__ == "__main__":

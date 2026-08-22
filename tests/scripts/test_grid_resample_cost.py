@@ -12,6 +12,7 @@ script is a standalone CLI, not part of the installed package.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -246,7 +247,132 @@ def test_main_writes_per_rate_and_summary_json(
     assert (out_dir / "grid_cost_90s.json").exists()
     assert (out_dir / "grid_cost_summary.json").exists()
 
-    import json
+    summary = json.loads((out_dir / "grid_cost_summary.json").read_text())
+    assert summary["groups"]["group"]["best_rate_s"] == 30
+
+    per_rate = json.loads((out_dir / "grid_cost_30s.json").read_text())
+    assert per_rate["groups"]["group"]["resampled"]["rate_s"] == 30
+
+
+def test_main_measures_every_group_in_a_groups_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    # Stage .3 needs every family costed against every candidate rate; doing that
+    # one --channels invocation at a time re-reads each channel per rate.
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    for ch in ("channel_a", "channel_b", "channel_c"):
+        _write_channel(processed_dir, _MISSION, ch, "train", ts, [0] * 20)
+
+    groups_file = tmp_path / "groups.json"
+    groups_file.write_text(
+        json.dumps({"pair": ["channel_a", "channel_b"], "solo": ["channel_c"]})
+    )
+
+    out_dir = tmp_path / "outputs"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "grid_resample_cost.py",
+            "--env", "test",
+            "--mission", _MISSION,
+            "--groups-file", str(groups_file),
+            "--rates", "30",
+            "--out-dir", str(out_dir),
+        ],
+    )
+    monkeypatch.setattr(
+        script_module, "load_settings", lambda env: _settings(processed_dir, window_size=5)
+    )
+
+    script_module.main()
 
     summary = json.loads((out_dir / "grid_cost_summary.json").read_text())
-    assert summary["best_rate_s"] == 30
+    assert set(summary["groups"]) == {"pair", "solo"}
+    assert summary["groups"]["pair"]["channels"] == ["channel_a", "channel_b"]
+
+
+def test_main_accepts_an_enumerate_families_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    # check_channel_group.py --enumerate-families output chains in directly.
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    for ch in ("channel_a", "channel_b"):
+        _write_channel(processed_dir, _MISSION, ch, "train", ts, [0] * 20)
+
+    groups_file = tmp_path / "families.json"
+    groups_file.write_text(
+        json.dumps({"mission": _MISSION, "families": [{"channels": ["channel_a", "channel_b"]}]})
+    )
+
+    out_dir = tmp_path / "outputs"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "grid_resample_cost.py",
+            "--env", "test",
+            "--mission", _MISSION,
+            "--groups-file", str(groups_file),
+            "--rates", "30",
+            "--out-dir", str(out_dir),
+        ],
+    )
+    monkeypatch.setattr(
+        script_module, "load_settings", lambda env: _settings(processed_dir, window_size=5)
+    )
+
+    script_module.main()
+
+    summary = json.loads((out_dir / "grid_cost_summary.json").read_text())
+    assert list(summary["groups"]) == ["family_1"]
+
+
+def test_main_rejects_both_channels_and_groups_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "grid_resample_cost.py",
+            "--env", "test",
+            "--mission", _MISSION,
+            "--channels", "channel_a",
+            "--groups-file", str(tmp_path / "groups.json"),
+            "--rates", "30",
+        ],
+    )
+    with pytest.raises(SystemExit, match="exactly one of"):
+        script_module.main()
+
+
+def test_native_timestamps_reads_each_channel_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    # The memo is what makes a 29-channel family x 3 rates affordable over GCS.
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    _write_channel(processed_dir, _MISSION, "channel_a", "train", ts, [0] * 20)
+    script_module._TIMESTAMP_CACHE.clear()
+
+    calls = []
+    real = script_module.load_series_metadata
+
+    def counting(*args, **kwargs):
+        calls.append(args[2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(script_module, "load_series_metadata", counting)
+    settings = _settings(processed_dir, window_size=5)
+    for rate in (30, 90, 300):
+        script_module.measure_resampled(settings, _MISSION, ["channel_a"], rate)
+
+    assert calls == ["channel_a"]

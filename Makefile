@@ -10,6 +10,12 @@ VARIANT          ?=
 # 1 = train/score ONE joint n-in/n-out model per subsystem group instead of one
 # model per channel. See docs/plans/021-multivariate-telemanom.md.
 MULTIVARIATE     ?=
+# Common time grid for ESA preprocessing, in seconds. Empty = native timestamps
+# (today's behaviour). CHANNEL_GRIDS is a JSON object of per-channel overrides,
+# which is how per-GROUP rates are expressed — a joint model is bounded by its
+# coarsest member. See docs/plans/023-channel-time-grid.md stage .3.
+GRID_INTERVAL    ?=
+CHANNEL_GRIDS    ?= {}
 PORT             ?= 8000
 REPLAY_DATA_DIR  ?=
 INJECTED         ?=
@@ -399,10 +405,14 @@ cloud-down:       ## Destroy GKE + NAT to stop training billing. Leaves Cloud SQ
 # MLFLOW_URL is fetched live so the Makefile works without storing it.
 _mlflow_url = $(shell gcloud run services describe mlflow --region $(REGION) --project $(PROJECT_ID) --format='value(status.url)' 2>/dev/null)
 
-cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [CHANNELS=ch1,ch2,…])
+cloud-preprocess: ## Submit preprocessing RayJob to GKE (PROJECT_ID=… REGION=… MISSION=… [VARIANT=…] [CHANNELS=ch1,ch2,…] [GRID_INTERVAL=30 [CHANNEL_GRIDS='{"channel_12":90}']])
 	PROJECT_ID=$(PROJECT_ID) REGION=$(REGION) MISSION=$(MISSION) CHANNELS=$(CHANNELS) \
 		VARIANT=$(VARIANT) \
+		GRID_INTERVAL=$(GRID_INTERVAL) CHANNEL_GRIDS=$(CHANNEL_GRIDS) \
 		./scripts/cloud_preprocess.sh
+	# ESA common time grid (docs/plans/023 stage .3) — pair with a VARIANT so the
+	# native tree stays intact for the before/after comparison:
+	# make cloud-preprocess MISSION=ESA-Mission1 VARIANT=grid-30s GRID_INTERVAL=30
 	# ISS 6-channel validation set:
 	# make cloud-preprocess MISSION=ISS CHANNELS=S1000003,P1000003,P4000007,S4000007,P4000001,USLAB000018
 

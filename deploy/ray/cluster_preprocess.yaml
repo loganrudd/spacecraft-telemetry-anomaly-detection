@@ -64,6 +64,14 @@ spec:
                   value: "${TRAIN_FRACTION}"
                 - name: SPACECRAFT_PREPROCESS__TRAIN_LOOKBACK
                   value: "${TRAIN_LOOKBACK}"
+                # Common time grid (docs/plans/023 stage .3). Empty string
+                # coerces to None = native timestamps, today's output. Must
+                # match on head AND worker: the @ray.remote fan-out resamples
+                # inside worker tasks.
+                - name: SPACECRAFT_PREPROCESS__GRID_INTERVAL_SECONDS
+                  value: "${GRID_INTERVAL}"
+                - name: SPACECRAFT_PREPROCESS__CHANNEL_GRID_INTERVAL_SECONDS
+                  value: '${CHANNEL_GRIDS}'
                 # Experiment variant axis (plan 020) — empty string coerces
                 # to None (Settings.variant), reproducing today's output
                 # layout. Must match on head AND worker: the @ray.remote
@@ -137,6 +145,10 @@ spec:
                     value: "${TRAIN_FRACTION}"
                   - name: SPACECRAFT_PREPROCESS__TRAIN_LOOKBACK
                     value: "${TRAIN_LOOKBACK}"
+                  - name: SPACECRAFT_PREPROCESS__GRID_INTERVAL_SECONDS
+                    value: "${GRID_INTERVAL}"
+                  - name: SPACECRAFT_PREPROCESS__CHANNEL_GRID_INTERVAL_SECONDS
+                    value: '${CHANNEL_GRIDS}'
                   - name: SPACECRAFT_VARIANT
                     value: "${VARIANT}"
                   - name: SPACECRAFT_RAY__ADDRESS

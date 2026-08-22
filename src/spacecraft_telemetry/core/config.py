@@ -96,6 +96,53 @@ class PreprocessingConfig(BaseModel):
     # and excluded from preprocessing.
     profile_flat_threshold: float = 0.99   # frac_zero_diff at or above → flat/skip
     profile_min_rows: int = 1000           # fewer numeric rows → empty/skip
+    # Common time grid for the ESA pipeline (docs/plans/023 stage .3). None =
+    # native timestamps, i.e. today's behaviour: preprocessing forward-fills but
+    # never resamples, so every channel keeps its own sampling phase and rate and
+    # multivariate grouping is limited to channels that happen to coincide.
+    # An int resamples each channel onto that grid with gap-preserving semantics
+    # (preprocess.transforms.resample_to_grid) before gap detection.
+    # ISS does NOT read this — its grid is collect.grid_interval_seconds, which
+    # is mandatory rather than opt-in and uses the dense+ffill rule.
+    grid_interval_seconds: int | None = None
+    # Per-channel overrides of grid_interval_seconds, keyed by channel_id.
+    # A joint model is bounded by its COARSEST member, so the useful rate is a
+    # property of a channel group, not of a mission — family 1 yields 981,523
+    # windows at 30 s and 981,510 at 90 s, while a single mission-wide rate
+    # would needlessly cap groups whose members are all fast. Groups are
+    # disjoint (a channel belongs to one family), so a flat channel -> rate map
+    # expresses per-group rates without a group abstraction in config.
+    # Set as JSON when passed by env var:
+    #   SPACECRAFT_PREPROCESS__CHANNEL_GRID_INTERVAL_SECONDS='{"channel_12": 90}'
+    channel_grid_interval_seconds: dict[str, int] = {}
+
+    def grid_interval_for(self, channel_id: str) -> int | None:
+        """Grid interval this channel is resampled onto, or None for native timestamps.
+
+        Per-channel override first, then the mission-wide default. Single
+        lookup point so the pipeline never has to re-derive the precedence.
+        """
+        return self.channel_grid_interval_seconds.get(channel_id, self.grid_interval_seconds)
+
+    @field_validator("grid_interval_seconds", mode="before")
+    @classmethod
+    def coerce_grid_interval_none(cls, v: object) -> object:
+        return _coerce_none_sentinel(v)
+
+    @field_validator("grid_interval_seconds")
+    @classmethod
+    def grid_interval_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(f"grid_interval_seconds must be >= 1 second, got {v}")
+        return v
+
+    @field_validator("channel_grid_interval_seconds")
+    @classmethod
+    def channel_grid_intervals_positive(cls, v: dict[str, int]) -> dict[str, int]:
+        bad = {ch: rate for ch, rate in v.items() if rate < 1}
+        if bad:
+            raise ValueError(f"channel_grid_interval_seconds must all be >= 1 second, got {bad}")
+        return v
 
     @field_validator("processed_data_dir", mode="before")
     @classmethod

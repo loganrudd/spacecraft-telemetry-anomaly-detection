@@ -83,6 +83,18 @@ def _preprocess_channel(
     rows_in = len(raw_df)
     cleaned = handle_nulls(raw_df)
     del raw_df
+
+    # Optional common time grid (docs/plans/023 stage .3). None = native
+    # timestamps, byte-for-byte today's behaviour. Resampling runs AFTER
+    # handle_nulls so the only NaN buckets left are ones no tick landed in,
+    # which is exactly what gap_preserving=True drops; and BEFORE detect_gaps so
+    # segments are drawn on the grid the model will actually window over.
+    grid_seconds = settings.preprocess.grid_interval_for(channel)
+    if grid_seconds is not None:
+        cleaned = resample_to_grid(
+            cleaned, channel, mission, grid_seconds, gap_preserving=True
+        )
+
     gapped = detect_gaps(cleaned, gap_multiplier=settings.preprocess.gap_multiplier)
     del cleaned
     normalized, params = normalize(gapped, method=settings.preprocess.normalization)
