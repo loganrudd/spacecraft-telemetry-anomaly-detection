@@ -341,15 +341,6 @@ def _align_multi_channel(
             "align a multivariate window. Check that all channels were "
             "preprocessed over the same time range."
         )
-    loss_frac = 1.0 - n_aligned / min_channel_rows
-    log_fn = log.warning if loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
-    log_fn(
-        "model.dataset.multichannel_align",
-        channels=channels,
-        n_aligned=n_aligned,
-        min_channel_rows=min_channel_rows,
-        loss_frac=round(loss_frac, 4),
-    )
 
     n, c = n_aligned, len(channels)
     values = np.empty((n, c), dtype=np.float32)
@@ -367,7 +358,28 @@ def _align_multi_channel(
         segment_ids_2d[:, i] = seg_ids[pos]
         is_anomaly[:, i] = is_anom[pos]
 
-    return values, _joint_segment_ids(segment_ids_2d), is_anomaly, common.to_numpy()
+    joint_segment_ids = _joint_segment_ids(segment_ids_2d)
+
+    # Fragmentation (many small joint segments) starves windowing as badly as
+    # a low intersection does — plan 023 found a 29-channel family with 100%
+    # row alignment but a 264x drop in joint windows because one channel's
+    # gap detection sliced every other channel's segments too. Logging both
+    # numbers here, not just alignment loss, is what makes that visible on
+    # every training run rather than only when a script goes looking for it.
+    loss_frac = 1.0 - n_aligned / min_channel_rows
+    seg_lengths = np.bincount(joint_segment_ids)
+    log_fn = log.warning if loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
+    log_fn(
+        "model.dataset.multichannel_align",
+        channels=channels,
+        n_aligned=n_aligned,
+        min_channel_rows=min_channel_rows,
+        loss_frac=round(loss_frac, 4),
+        n_joint_segments=int(seg_lengths.size),
+        max_joint_segment_len=int(seg_lengths.max()),
+    )
+
+    return values, joint_segment_ids, is_anomaly, common.to_numpy()
 
 
 # Concurrency for per-channel parquet reads (docs/reviews/021, item D2).
