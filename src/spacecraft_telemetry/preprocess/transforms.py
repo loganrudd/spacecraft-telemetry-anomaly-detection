@@ -329,8 +329,11 @@ def resample_to_grid(
     Returns:
         DataFrame with columns [telemetry_timestamp, value, channel_id, mission_id].
     """
-    df = ticks_df[["telemetry_timestamp", "value"]].copy()
-    df = df.set_index("telemetry_timestamp").sort_index()
+    # No .copy() before set_index: the column selection already yields a new
+    # frame, set_index does not mutate the caller's, and nothing below writes to
+    # df. ESA's largest channels run to tens of millions of rows against a 5.7 GB
+    # worker kill threshold, so a redundant full copy is not free here.
+    df = ticks_df[["telemetry_timestamp", "value"]].set_index("telemetry_timestamp").sort_index()
     rule = f"{grid_interval_seconds}s"
     bucketed = df["value"].resample(rule).mean()
     # An empty bucket is NaN either way; the two rules differ only in whether it
