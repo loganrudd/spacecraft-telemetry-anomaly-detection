@@ -233,17 +233,25 @@ _ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
 # _align_multi_channel materialises ALL C channels densely: peak memory is
 # roughly C * N * 17 bytes (float32 values + int32 segment ids + bool flags)
 # plus the DatetimeIndex overhead of the join. Measured ~800 MB for 6 channels
-# x 7.7 M rows, i.e. ~130 MB per channel at ESA-Mission1 scale — so 32
-# channels is already ~4 GB, at the ceiling of a small worker, and passing a
-# whole ~100-channel mission as one group would need ~13 GB.
+# x 7.7 M rows at native ESA-Mission1 scale.
 #
-# Nothing bounded this before. Subsystem-sized groups (6-30 channels, see
-# ray_fanout/tune.py) fit under the limit, so the guard exists to catch the
-# pathological call — a whole mission handed in as one group — rather than to
-# constrain normal use. Note a subsystem at the TOP of that documented range
-# is already near the limit; raise this deliberately (and size the worker to
-# match) rather than by reflex if a legitimate group ever exceeds it.
-_MAX_MULTIVARIATE_CHANNELS = 32
+# This was originally expressed as a CHANNEL COUNT (32), taking N as fixed at
+# native scale. Plan 023 stage .3 broke that proxy: a 30 s common grid cuts N
+# about 11x (7.7 M -> ~680 k rows), so ESA-Mission1's 41-channel subsystem_6
+# costs ~0.44 GB gridded — nine times LESS than the ~3.9 GB the 32-channel
+# limit was calibrated to permit, and less than six native channels cost. A
+# count limit would have rejected it while still waving through a group nine
+# times heavier, which is the wrong question asked confidently.
+#
+# So the bound is now on the estimate itself. C and N are both known before the
+# join, so the guard costs nothing and stays honest under any future change to
+# either. A whole ~100-channel mission at native scale is still caught (~13 GB);
+# the same mission gridded (~0.67 GB) is correctly allowed.
+_MAX_MULTIVARIATE_BYTES = 4 * 1024**3
+
+# float32 value + int32 segment id + bool flag + DatetimeIndex share, per
+# aligned row per channel. See the measurement above.
+_BYTES_PER_ALIGNED_ROW_PER_CHANNEL = 17
 
 
 def _joint_segment_ids(
@@ -283,7 +291,8 @@ def _align_multi_channel(
         ]
     ],
     channels: list[str],
-    max_channels: int = _MAX_MULTIVARIATE_CHANNELS,
+    max_channels: int | None = None,
+    max_bytes: int = _MAX_MULTIVARIATE_BYTES,
 ) -> tuple[
     np.ndarray[Any, np.dtype[np.float32]],
     np.ndarray[Any, np.dtype[np.int32]],
@@ -307,27 +316,43 @@ def _align_multi_channel(
         timestamps:  (N,) datetime64[ns] — the aligned, sorted timestamp index.
 
     Args:
-        max_channels: Refuse groups larger than this — see
-            _MAX_MULTIVARIATE_CHANNELS for the memory arithmetic. An OOM on a
+        max_channels: Optional hard cap on group size. ``None`` (the default)
+            applies no count limit — see ``max_bytes``, which bounds the thing
+            that actually costs memory. Pass a number only to enforce a
+            deliberate count ceiling of your own.
+        max_bytes: Refuse groups whose dense materialisation is estimated above
+            this — see _MAX_MULTIVARIATE_BYTES for the arithmetic. An OOM on a
             spot worker is an expensive and confusing way to discover the
-            limit; this fails immediately with the number that was asked for.
+            limit; this fails immediately with the estimate that triggered it.
 
     Raises:
-        ValueError: If the group exceeds ``max_channels``, or the intersection
-            is empty.
+        ValueError: If the group exceeds ``max_channels`` or ``max_bytes``, or
+            the intersection is empty.
     """
-    if len(channels) > max_channels:
+    if max_channels is not None and len(channels) > max_channels:
         raise ValueError(
             f"Multivariate group has {len(channels)} channels, above the "
-            f"max_channels={max_channels} limit. _align_multi_channel "
-            "materialises every channel densely (~130 MB per channel at "
-            f"ESA-Mission1 scale), so this group would need roughly "
-            f"{len(channels) * 130 / 1024:.1f} GB and is likely to OOM the "
-            "worker. Group by subsystem rather than passing a whole mission, "
-            "or raise max_channels deliberately and size the worker to match."
+            f"max_channels={max_channels} limit."
         )
 
     indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
+
+    # The intersection cannot exceed the shortest member, so this is an upper
+    # bound on the join's cost and is computed before anything is materialised.
+    est_bytes = (
+        len(channels) * min(len(idx) for idx in indices)
+        * _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
+    )
+    if est_bytes > max_bytes:
+        raise ValueError(
+            f"Multivariate group of {len(channels)} channels x "
+            f"{min(len(idx) for idx in indices):,} rows would materialise "
+            f"roughly {est_bytes / 1024**3:.1f} GB densely, above the "
+            f"{max_bytes / 1024**3:.1f} GB limit, and is likely to OOM the "
+            "worker. Split the group, put the mission on a coarser time grid "
+            "(docs/plans/023), or raise max_bytes and size the worker to match."
+        )
+
     common = indices[0]
     for idx in indices[1:]:
         common = common.intersection(idx)
