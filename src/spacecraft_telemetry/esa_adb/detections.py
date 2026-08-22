@@ -151,9 +151,17 @@ def tuned_provenance(
     All channels normally share one tuned config — one subsystem's Ray Tune
     sweep, or threshold_ceiling.py's "first channel wins, the rest must
     agree" grid (docs/plans/022 stage 022.2b, Open Question 2) — so every
-    channel is read and required to agree, rather than trusting one. A
-    mismatch raises: asserting uniformity without checking it would be the
-    same class of misstatement this function exists to fix.
+    channel is read and compared, rather than trusting one. A mismatch (a
+    mixed-config arm — should be rare given run_all_sweeps' one-config-per-
+    subsystem and threshold_ceiling.py's mixed-config hard-fail, but not
+    impossible, e.g. a partial re-tune) renders a "mixed: ..." summary
+    naming every distinct source and how many channels used it, and logs the
+    full per-channel map at warning level (docs/reviews/022 stage 2.2).
+    Refusing to render at all — the previous behaviour — traded the one
+    situation where you most want to see the numbers AND the discrepancy for
+    no report at all; asserting uniformity without checking it would be the
+    misstatement this function exists to fix, but a checked, disclosed
+    mismatch is not that.
 
     Args:
         run_map: Offline mode (esa_adb/offline.py) — MLflow is never
@@ -161,11 +169,6 @@ def tuned_provenance(
             this returns None unconditionally. The caller must render an
             honest "provenance unavailable in offline mode" line, not fall
             back to the old hardcoded claim behind a harder-to-see branch.
-
-    Raises:
-        RuntimeError: channels disagree on provenance (a mixed-config arm —
-            should be unreachable given run_all_sweeps' one-config-per-
-            subsystem and threshold_ceiling.py's mixed-config hard-fail).
     """
     if run_map is not None or not channels:
         return None
@@ -193,12 +196,17 @@ def tuned_provenance(
 
     distinct = set(provenance_by_channel.values())
     if len(distinct) > 1:
-        raise RuntimeError(
-            f"Channels disagree on tuned-scoring provenance: {provenance_by_channel}. "
-            "A mixed-config arm cannot be described by a single footnote — this "
-            "should be unreachable (run_all_sweeps writes one config per "
-            "subsystem, and threshold_ceiling.py hard-fails a mixed-config arm)."
+        log.warning(
+            "esa_adb.detections.tuned_provenance.mixed_arm",
+            provenance_by_channel=provenance_by_channel,
         )
+        counts: dict[str, int] = {}
+        for source in provenance_by_channel.values():
+            counts[source] = counts.get(source, 0) + 1
+        parts = [
+            f"{n} channel{'' if n == 1 else 's'} {source!r}" for source, n in counts.items()
+        ]
+        return "mixed: " + ", ".join(parts)
     return next(iter(distinct))
 
 

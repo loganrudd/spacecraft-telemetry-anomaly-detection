@@ -1168,7 +1168,7 @@ def run_all_sweeps(
             **config,
             "_meta": {
                 "provenance": "ray_tune",
-                "source": "ray_fanout/tune.py Ray Tune HPO sweep",
+                "source": "per-subsystem Ray Tune HPO sweep",
                 "run_id": sweep_result.get("run_id"),
                 # Ray Tune's objective subtracts an FP penalty from mean
                 # per-channel seg_f0_5 (see _scoring_trial) — a different

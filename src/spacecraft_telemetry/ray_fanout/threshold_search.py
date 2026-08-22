@@ -139,9 +139,16 @@ def _expansion_points(
     """New points extending ``values`` by up to ``n_expand``, spaced by the
     interval between the two points nearest the edge being widened.
 
-    Stops early (fewer than ``n_expand`` points, possibly zero) if a
-    candidate would cross ``bound`` — the caller never receives a point
-    beyond the parameter's natural bound.
+    Stops early (fewer than ``n_expand`` points) once a candidate would
+    cross ``bound`` — the caller never receives a point beyond the
+    parameter's natural bound. The bound itself is emitted once, as the
+    last point, if not already present in ``values``: ``bound`` is a
+    legitimate, reachable setting (e.g. ``min_error_value=0.0``, "no
+    absolute error floor") and excluding it from every grid that doesn't
+    happen to start there would make it structurally unreachable (docs/
+    reviews/022, item C1). ``bound`` is exclusive for the purpose of
+    treating an edge value AT the bound as converged (see ``_axis_edges``),
+    but inclusive here, for the purpose of sweeping it.
     """
     ordered = sorted(values)
     if len(ordered) < 2:
@@ -158,9 +165,12 @@ def _expansion_points(
     for i in range(1, n_expand + 1):
         candidate = edge + sign * i * interval
         if bound is not None:
-            if direction == "low" and candidate <= bound:
-                break
-            if direction == "high" and candidate >= bound:
+            crossed = (
+                candidate <= bound if direction == "low" else candidate >= bound
+            )
+            if crossed:
+                if bound not in ordered and bound not in points:
+                    points.append(bound)
                 break
         points.append(candidate)
     return points

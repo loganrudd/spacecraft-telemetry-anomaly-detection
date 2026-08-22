@@ -550,11 +550,11 @@ class TestTunedRowProvenance:
         set (runner._tuned_meta reads _meta.source unconditionally, alongside
         _meta.run_id). tuned_provenance prefers tuned_source when present, so
         whatever ray_fanout.tune's _to_entry writes as `_meta.source` lands
-        verbatim here — this is the C4 regression (docs/reviews/022): today
-        that string is the literal module path `ray_fanout/tune.py Ray Tune
-        HPO sweep`, a user-visible output bug. Stage 2.1 changes the SOURCE
-        string to prose; this test is pinned to TODAY's actual (wrong)
-        behaviour and must be flipped in the same commit as that fix.
+        verbatim here. This was the C4 regression (docs/reviews/022 stage
+        2.1): the source string used to be the literal module path
+        `ray_fanout/tune.py Ray Tune HPO sweep`, a user-visible output bug —
+        `_meta.provenance: "ray_tune"` already carries the machine-readable
+        identity, so `source` is free to be prose describing the search.
         """
         processed_dir = tmp_path / "processed"
         sample_dir = tmp_path / "sample"
@@ -566,7 +566,7 @@ class TestTunedRowProvenance:
         _log_scoring_run(
             settings,
             tuned=True,
-            tuned_source="ray_fanout/tune.py Ray Tune HPO sweep",
+            tuned_source="per-subsystem Ray Tune HPO sweep",
             also_tuned_from_run=True,
         )
 
@@ -575,7 +575,8 @@ class TestTunedRowProvenance:
         tuned_rows = [r for r in report["rows"] if r["label"] == "ours (tuned)"]
         assert tuned_rows
         for row in tuned_rows:
-            assert row["params"] == "ray_fanout/tune.py Ray Tune HPO sweep"
+            assert row["params"] == "per-subsystem Ray Tune HPO sweep"
+        assert not any("ray_fanout/tune.py" in note for note in report["footnotes"])
 
     def test_run_map_mode_renders_neither_claim(self, tmp_path: Path, mlflow_uri: str) -> None:
         """--run-map mode never contacts MLflow, so tags are unreadable — the
@@ -662,14 +663,14 @@ class TestTunedProvenanceMultiChannel:
         for row in tuned_rows:
             assert row["params"] == "scripts/threshold_ceiling.py exhaustive grid (mission)"
 
-    def test_two_channels_disagreeing_on_provenance_raises(
+    def test_two_channels_disagreeing_on_provenance_renders_a_mixed_summary(
         self, tmp_path: Path, mlflow_uri: str
     ) -> None:
-        """Today's behaviour (C3): a mixed-config arm raises and the WHOLE
-        report fails to build, even though the untuned rows and one channel's
-        tuned data were perfectly renderable. docs/reviews/022 stage 2.2
-        changes this to a rendered "mixed: ..." summary instead — flip this
-        test in that same commit.
+        """docs/reviews/022 stage 2.2 (C3): a mixed-config arm used to raise
+        and fail the WHOLE report, even though the untuned rows and one
+        channel's tuned data were perfectly renderable. It now renders a
+        "mixed: ..." summary naming every distinct source and how many
+        channels used it, rather than refusing to show any numbers at all.
         """
         processed_dir = tmp_path / "processed"
         sample_dir = tmp_path / "sample"
@@ -688,8 +689,14 @@ class TestTunedProvenanceMultiChannel:
         _log_scoring_run(settings, tuned=False, channel=_CHANNEL_2)
         _log_scoring_run(settings, tuned=True, channel=_CHANNEL_2)  # tuned_from_run only
 
-        with pytest.raises(RuntimeError, match="disagree on tuned-scoring provenance"):
-            build_report(settings, _MISSION, channels=[_CHANNEL, _CHANNEL_2])
+        report = build_report(settings, _MISSION, channels=[_CHANNEL, _CHANNEL_2])
+
+        tuned_rows = [r for r in report["rows"] if r["label"] == "ours (tuned)"]
+        assert tuned_rows
+        for row in tuned_rows:
+            assert row["params"].startswith("mixed: ")
+            assert "scripts/threshold_ceiling.py exhaustive grid (mission)" in row["params"]
+            assert "per-subsystem Ray Tune HPO scoring" in row["params"]
 
 
 class TestScopeInvariants:

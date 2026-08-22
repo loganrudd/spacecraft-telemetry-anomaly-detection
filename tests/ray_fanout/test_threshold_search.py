@@ -173,6 +173,45 @@ class TestNaturalBound:
         assert all(b >= 0.0 for _a, b in result.grid)
 
 
+class TestInclusiveBound:
+    """docs/reviews/022, item C1: candidate <= bound used to be an exclusive
+    check, rejecting the bound itself. A floor axis stopping one interval
+    short of 0.0 (e.g. [0.1, 0.2, 0.3]) would then hard-fail rather than
+    converging at the legitimate, reachable min_error_value=0.0 setting."""
+
+    def test_optimum_reaches_the_natural_bound_when_grid_starts_short_of_it(self) -> None:
+        def objective(a: float, b: float) -> float:
+            return -((a - 5.0) ** 2) - b  # wants max a, MIN b -> b's optimum is the bound
+
+        sweep_fn, calls = _counting_sweep_fn(objective)
+        axes = {"a": [1.0, 3.0, 5.0, 7.0, 9.0], "b": [0.1, 0.2, 0.3]}
+
+        result = widen_to_convergence(sweep_fn, axes, natural_bounds={"b": (0.0, None)})
+
+        assert result.best_point == (5.0, 0.0)
+        assert 0.0 in result.axes["b"]
+        assert result.expansions > 0
+        # The bound is swept exactly once, not repeatedly across rounds.
+        assert calls[(5.0, 0.0)] == 1
+
+    def test_bound_already_present_is_not_re_swept(self) -> None:
+        """If the bound happens to already be a swept value, _expansion_points
+        must not re-add (and therefore re-sweep) it."""
+        def objective(a: float, b: float) -> float:
+            return -((a - 5.0) ** 2) - b
+
+        sweep_fn, calls = _counting_sweep_fn(objective)
+        # b's low edge (0.05) is already interior to the bound, and 0.0 is
+        # already present elsewhere in the axis — nothing to widen for b.
+        axes = {"a": [1.0, 3.0, 5.0, 7.0, 9.0], "b": [0.0, 0.05, 0.1]}
+
+        result = widen_to_convergence(sweep_fn, axes, natural_bounds={"b": (0.0, None)})
+
+        assert result.best_point == (5.0, 0.0)
+        assert result.axes["b"] == [0.0, 0.05, 0.1]
+        assert calls[(5.0, 0.0)] == 1
+
+
 class TestNonConvergence:
     def test_raises_when_the_optimum_keeps_moving_toward_an_unbounded_edge(self) -> None:
         def objective(a: float, b: float) -> float:
@@ -183,6 +222,22 @@ class TestNonConvergence:
 
         with pytest.raises(NonConvergenceError):
             widen_to_convergence(sweep_fn, axes, natural_bounds={}, max_expansions=2)
+
+    def test_stuck_with_no_room_to_widen_is_a_distinct_branch(self) -> None:
+        """T2: a DISTINCT failure branch from max_expansions exhaustion above
+        — every flagged axis's widen attempt yields zero new points
+        (n_expand=0), so nothing changes and the driver must fail immediately
+        with its own message rather than looping uselessly to
+        max_expansions. Previously uncovered — exactly why C1 shipped."""
+
+        def objective(a: float, b: float) -> float:
+            return a  # wants max a -> unbounded high edge; b is a flat tie
+
+        sweep_fn, _calls = _counting_sweep_fn(objective)
+        axes = {"a": [1.0, 2.0, 3.0], "b": [0.0]}
+
+        with pytest.raises(NonConvergenceError, match="no room to widen"):
+            widen_to_convergence(sweep_fn, axes, natural_bounds={}, n_expand=0)
 
 
 class TestThresholdGridSweepFn:
