@@ -18,11 +18,10 @@ import sys
 import types
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from spacecraft_telemetry.core.config import Settings
+from tests.scripts._helpers import write_channel_metadata as _write_channel
 
 _SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "check_channel_group.py"
 
@@ -46,44 +45,6 @@ def script_module() -> types.ModuleType:
 
 
 _MISSION = "ESA-Mission1"
-
-
-def _write_channel(
-    processed_dir: Path,
-    mission: str,
-    channel: str,
-    split: str,
-    timestamps_s: list[int],
-    segment_ids: list[int],
-) -> None:
-    """Write one channel's metadata columns at explicit timestamps/segment ids.
-
-    Full control over both, unlike test_dataset.py's evenly-spaced synthetic
-    writer, so tests can construct phase offsets and fragmentation directly.
-    """
-    assert len(timestamps_s) == len(segment_ids)
-    n = len(timestamps_s)
-    table = pa.table(
-        {
-            "telemetry_timestamp": pa.array(
-                [
-                    pa.scalar(t, type=pa.timestamp("s", tz="UTC")).cast(
-                        pa.timestamp("us", tz="UTC")
-                    )
-                    for t in timestamps_s
-                ],
-                type=pa.timestamp("us", tz="UTC"),
-            ),
-            "value_normalized": pa.array([0.0] * n, type=pa.float32()),
-            "segment_id": pa.array(segment_ids, type=pa.int32()),
-            "is_anomaly": pa.array([False] * n, type=pa.bool_()),
-        }
-    )
-    part_dir = (
-        processed_dir / mission / split / f"mission_id={mission}" / f"channel_id={channel}"
-    )
-    part_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, part_dir / "part.parquet")
 
 
 def _settings(processed_dir: Path, *, window_size: int = 5, forecast_steps: int = 1) -> Settings:
