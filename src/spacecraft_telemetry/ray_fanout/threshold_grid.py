@@ -25,6 +25,7 @@ with; only a real re-tune equalizes that axis.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -34,6 +35,22 @@ from spacecraft_telemetry.model.scoring import evaluate_overlap, flag_anomalies
 
 # A (z, floor) pair and the mean objective it achieved.
 GridPoint = tuple[float, float]
+
+# (lower, upper) bound each axis physically cannot cross, exclusive. `None`
+# means unbounded in that direction. threshold_z must stay > 0 (a
+# non-positive z-score threshold is meaningless); min_error_value is an
+# absolute error floor and cannot go negative. Both are conventionally
+# written as (0.0, None) here — see ray_fanout.threshold_search._axis_edges'
+# natural-bound check for how the 0.0 boundary is treated identically
+# regardless of whether the underlying parameter is strictly-positive
+# (threshold_z) or zero-inclusive (min_error_value): either way, there is
+# nothing to widen into below it. Lives here, not in threshold_search.py,
+# because that driver is axis-name-generic and must not carry an implicit
+# opinion about these two specific axes (docs/reviews/022, item A1).
+NATURAL_BOUNDS: dict[str, tuple[float | None, float | None]] = {
+    "threshold_z": (0.0, None),
+    "min_error_value": (0.0, None),
+}
 
 
 def precompute_threshold_terms(
@@ -248,38 +265,44 @@ def sweep_group_mission_level(
     return out
 
 
-def best_point(grid: dict[GridPoint, float]) -> tuple[GridPoint, float]:
-    """Return ((z, floor), score) for the grid's maximum.
+def threshold_grid_sweep_fn(
+    sweep: Callable[..., dict[GridPoint, float]], **fixed_kwargs: object
+) -> Callable[[dict[str, list[float]]], dict[GridPoint, float]]:
+    """Adapt a sweep function in this module to widen_to_convergence's interface.
 
-    Ties break toward the LOWER z and LOWER floor — the more conservative
-    detector of two equal-scoring configs, and deterministic regardless of dict
-    ordering.
+    Binds ``axes["threshold_z"]``/``axes["min_error_value"]`` onto
+    :func:`sweep_group`'s (or :func:`sweep_group_mission_level`'s)
+    ``z_values=``/``floor_values=`` keywords. Both those functions already
+    return a grid keyed by ``(z, floor)`` tuples, which is exactly
+    ``ray_fanout.threshold_search.widen_to_convergence``'s expected shape
+    PROVIDED axes are passed in ``{"threshold_z": ..., "min_error_value":
+    ...}`` order — enforced below rather than trusted, since a silent
+    transposition would pair z with floor's grid position and vice versa.
+
+    Lives here, not in ``threshold_search.py``, since it is a domain
+    adapter that hardcodes THIS module's keyword names and tuple order —
+    the generic driver it feeds carries no knowledge of either
+    (docs/reviews/022, item A3).
+
+    Args:
+        sweep: :func:`sweep_group` or :func:`sweep_group_mission_level`.
+        **fixed_kwargs: Everything else those functions need
+            (``per_channel``, ``threshold_window``, ``min_run_length``,
+            ``eval_slice``, and for the mission-level variant
+            ``channel_timestamps``/``mission_events``/``mission_timeline``).
     """
-    if not grid:
-        raise ValueError("grid is empty.")
-    best = max(grid.items(), key=lambda kv: (kv[1], -kv[0][0], -kv[0][1]))
-    return best[0], best[1]
 
+    def _sweep(axes: dict[str, list[float]]) -> dict[GridPoint, float]:
+        if list(axes) != ["threshold_z", "min_error_value"]:
+            raise ValueError(
+                "threshold_grid_sweep_fn requires axes in "
+                "{'threshold_z': ..., 'min_error_value': ...} order to match "
+                f"this module's (z, floor) tuple keys; got {list(axes)}."
+            )
+        return sweep(
+            z_values=axes["threshold_z"],
+            floor_values=axes["min_error_value"],
+            **fixed_kwargs,
+        )
 
-def bounds_report(
-    grid: dict[GridPoint, float], z_values: list[float], floor_values: list[float]
-) -> dict[str, Any]:
-    """Flag whether the grid's optimum sits on an edge of the swept region.
-
-    An optimum on the edge means the ceiling is a LOWER BOUND — the true
-    optimum may lie outside what was swept, and the grid should be widened
-    before the number is quoted. This is the same class of check the plan-021
-    Validation section requires for search-space bounds, applied to the grid
-    itself so the diagnostic cannot make the mistake it exists to catch.
-    """
-    (z, floor), score = best_point(grid)
-    at_z_edge = z in (min(z_values), max(z_values))
-    at_floor_edge = floor in (min(floor_values), max(floor_values))
-    return {
-        "best_z": z,
-        "best_floor": floor,
-        "best_score": score,
-        "at_z_edge": at_z_edge,
-        "at_floor_edge": at_floor_edge,
-        "is_lower_bound": at_z_edge or at_floor_edge,
-    }
+    return _sweep

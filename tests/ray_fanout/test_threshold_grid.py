@@ -14,12 +14,12 @@ import pytest
 
 from spacecraft_telemetry.model.scoring import dynamic_threshold
 from spacecraft_telemetry.ray_fanout.threshold_grid import (
-    best_point,
-    bounds_report,
+    GridPoint,
     precompute_threshold_terms,
     sweep_channel,
     sweep_group,
     threshold_from_terms,
+    threshold_grid_sweep_fn,
 )
 
 
@@ -197,33 +197,31 @@ class TestSweepGroupMissionLevel:
         assert all(isinstance(v, float) for v in grid.values())
 
 
-class TestBestPointAndBounds:
-    def test_picks_maximum(self) -> None:
-        grid = {(2.0, 0.0): 0.1, (3.0, 0.1): 0.9, (4.0, 0.2): 0.5}
-        assert best_point(grid) == ((3.0, 0.1), 0.9)
+class TestThresholdGridSweepFn:
+    """docs/reviews/022, item A3: moved from ray_fanout.threshold_search —
+    this is a domain adapter (hardcodes THIS module's z/floor keyword names
+    and tuple order), not part of the generic widening driver."""
 
-    def test_ties_break_toward_conservative_config(self) -> None:
-        """Deterministic and defensible: same score → prefer lower z/floor."""
-        grid = {(5.0, 0.2): 0.7, (3.0, 0.1): 0.7}
-        assert best_point(grid)[0] == (3.0, 0.1)
+    def test_binds_named_axes_onto_z_values_and_floor_values(self) -> None:
+        captured: dict[str, object] = {}
 
-    def test_flags_optimum_on_grid_edge_as_lower_bound(self) -> None:
-        """The exact situation that made plan 021's first ceiling estimate
-        provisional: both arms peaked at the grid's maximum floor."""
-        zs, floors = [4.0, 5.0], [0.0, 0.4]
-        grid = {(4.0, 0.0): 0.1, (4.0, 0.4): 0.9, (5.0, 0.0): 0.2, (5.0, 0.4): 0.3}
-        rep = bounds_report(grid, zs, floors)
-        assert rep["best_floor"] == 0.4
-        assert rep["at_floor_edge"] is True
-        assert rep["is_lower_bound"] is True
+        def fake_sweep(
+            *, z_values: list[float], floor_values: list[float], extra: str | None = None
+        ) -> dict[GridPoint, float]:
+            captured["z_values"] = z_values
+            captured["floor_values"] = floor_values
+            captured["extra"] = extra
+            return {(z, f): 0.0 for z in z_values for f in floor_values}
 
-    def test_interior_optimum_is_not_a_lower_bound(self) -> None:
-        zs, floors = [3.0, 4.0, 5.0], [0.0, 0.2, 0.4]
-        grid = {(z, f): 0.1 for z in zs for f in floors}
-        grid[(4.0, 0.2)] = 0.9
-        rep = bounds_report(grid, zs, floors)
-        assert rep["is_lower_bound"] is False
+        sweep_fn = threshold_grid_sweep_fn(fake_sweep, extra="pinned")
+        grid = sweep_fn({"threshold_z": [1.0, 2.0], "min_error_value": [0.0, 0.5]})
 
-    def test_empty_grid_raises(self) -> None:
-        with pytest.raises(ValueError, match="empty"):
-            best_point({})
+        assert captured["z_values"] == [1.0, 2.0]
+        assert captured["floor_values"] == [0.0, 0.5]
+        assert captured["extra"] == "pinned"
+        assert set(grid) == {(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)}
+
+    def test_wrong_axis_order_raises_rather_than_silently_transposing(self) -> None:
+        sweep_fn = threshold_grid_sweep_fn(lambda **_kwargs: {})
+        with pytest.raises(ValueError, match="threshold_z"):
+            sweep_fn({"min_error_value": [0.0], "threshold_z": [1.0]})

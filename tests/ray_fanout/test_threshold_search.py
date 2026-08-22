@@ -14,7 +14,6 @@ import pytest
 from spacecraft_telemetry.ray_fanout.threshold_search import (
     GridPoint,
     NonConvergenceError,
-    threshold_grid_sweep_fn,
     widen_to_convergence,
 )
 
@@ -22,7 +21,11 @@ from spacecraft_telemetry.ray_fanout.threshold_search import (
 def _counting_sweep_fn(
     objective: Callable[[float, float], float],
 ) -> tuple[Callable[[dict[str, list[float]]], dict[GridPoint, float]], dict[GridPoint, int]]:
-    """Wrap objective(a, b) -> float as a sweep_fn over named axes "a"/"b".
+    """Wrap objective(first_axis_value, second_axis_value) -> float as a
+    sweep_fn over whatever two axis names ``axes`` supplies, in that order —
+    most tests here name them "a"/"b", but the axis NAME is irrelevant to
+    this wrapper; only position matters (matching widen_to_convergence's own
+    axis-order-generic contract).
 
     ``calls`` counts how many times each point was actually computed — the
     no-drift gate needs to see that widening never recomputes an
@@ -31,9 +34,10 @@ def _counting_sweep_fn(
     calls: dict[GridPoint, int] = {}
 
     def _sweep(axes: dict[str, list[float]]) -> dict[GridPoint, float]:
+        first_name, second_name = axes
         out: dict[GridPoint, float] = {}
-        for a in axes["a"]:
-            for b in axes["b"]:
+        for a in axes[first_name]:
+            for b in axes[second_name]:
                 point = (a, b)
                 calls[point] = calls.get(point, 0) + 1
                 out[point] = objective(a, b)
@@ -206,6 +210,30 @@ class TestNaturalBound:
         assert result.axes["b"] == [0.0, 0.1, 0.2]
         assert all(b >= 0.0 for _a, b in result.grid)
 
+    def test_production_natural_bounds_are_the_only_untested_path(self) -> None:
+        """docs/reviews/022, item A1: natural_bounds became a REQUIRED
+        parameter (no more implicit default) specifically because the
+        default path — production's only path, via
+        threshold_grid.NATURAL_BOUNDS — had zero test coverage. Exercise it
+        directly with the real threshold_z/min_error_value axis names,
+        rather than only the synthetic "a"/"b" bounds every other test here
+        uses.
+        """
+        from spacecraft_telemetry.ray_fanout.threshold_grid import NATURAL_BOUNDS
+
+        def objective(threshold_z: float, min_error_value: float) -> float:
+            return -((threshold_z - 5.0) ** 2) - min_error_value
+
+        sweep_fn, _calls = _counting_sweep_fn(objective)
+        axes = {"threshold_z": [1.0, 3.0, 5.0, 7.0, 9.0], "min_error_value": [0.0, 0.1, 0.2]}
+
+        result = widen_to_convergence(sweep_fn, axes, natural_bounds=NATURAL_BOUNDS)
+
+        assert result.expansions == 0
+        assert result.best_point == (5.0, 0.0)
+        assert all(z > 0.0 for z, _f in result.grid)
+        assert all(f >= 0.0 for _z, f in result.grid)
+
 
 class TestInclusiveBound:
     """docs/reviews/022, item C1: candidate <= bound used to be an exclusive
@@ -274,27 +302,3 @@ class TestNonConvergence:
             widen_to_convergence(sweep_fn, axes, natural_bounds={}, n_expand=0)
 
 
-class TestThresholdGridSweepFn:
-    def test_binds_named_axes_onto_z_values_and_floor_values(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_sweep(
-            *, z_values: list[float], floor_values: list[float], extra: str | None = None
-        ) -> dict[GridPoint, float]:
-            captured["z_values"] = z_values
-            captured["floor_values"] = floor_values
-            captured["extra"] = extra
-            return {(z, f): 0.0 for z in z_values for f in floor_values}
-
-        sweep_fn = threshold_grid_sweep_fn(fake_sweep, extra="pinned")
-        grid = sweep_fn({"threshold_z": [1.0, 2.0], "min_error_value": [0.0, 0.5]})
-
-        assert captured["z_values"] == [1.0, 2.0]
-        assert captured["floor_values"] == [0.0, 0.5]
-        assert captured["extra"] == "pinned"
-        assert set(grid) == {(1.0, 0.0), (1.0, 0.5), (2.0, 0.0), (2.0, 0.5)}
-
-    def test_wrong_axis_order_raises_rather_than_silently_transposing(self) -> None:
-        sweep_fn = threshold_grid_sweep_fn(lambda **_kwargs: {})
-        with pytest.raises(ValueError, match="threshold_z"):
-            sweep_fn({"min_error_value": [0.0], "threshold_z": [1.0]})

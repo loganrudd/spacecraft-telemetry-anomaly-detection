@@ -47,15 +47,16 @@ from spacecraft_telemetry.model.dataset import (
 )
 from spacecraft_telemetry.model.io import bytes_to_errors, download_artifact_bytes
 from spacecraft_telemetry.ray_fanout.threshold_grid import (
+    NATURAL_BOUNDS,
     precompute_threshold_terms,
     sweep_group,
     sweep_group_mission_level,
+    threshold_grid_sweep_fn,
 )
 from spacecraft_telemetry.ray_fanout.threshold_search import (
     NonConvergenceError,
     SweepFn,
     WideningResult,
-    threshold_grid_sweep_fn,
     widen_to_convergence,
 )
 
@@ -527,6 +528,7 @@ def main() -> None:
     try:
         widening = widen_to_convergence(
             sweep_fn, {"threshold_z": z_values, "min_error_value": floor_values},
+            natural_bounds=NATURAL_BOUNDS,
             n_expand=args.n_expand, max_expansions=args.max_expansions,
         )
     except NonConvergenceError as exc:
