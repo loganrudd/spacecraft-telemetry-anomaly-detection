@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import load_channel_group_map
 from spacecraft_telemetry.esa_adb.intervals import union as _union
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
 from spacecraft_telemetry.model.dataset import (
@@ -242,13 +242,22 @@ def _find_multivariate_scoring_run(
     """Locate the scoring Run for a channel scored inside a multivariate group.
 
     A multivariate scoring run deliberately carries no ``channel_id`` tag
-    (model/scoring.py — the run's key is a subsystem, not a real channel), so
+    (model/scoring.py — the run's key is a group, not a real channel), so
     :func:`find_scoring_run` can never match it. This resolves the channel's
-    subsystem, takes the most recent run tagged with it, and — critically —
+    GROUP KEY, takes the most recent run tagged with it, and — critically —
     confirms the channel is actually listed in that run's ``channels`` tag
-    before trusting it: a subsystem name alone does not prove this particular
-    channel was in the scored group, since a narrower channel subset could
-    reuse the same subsystem name.
+    before trusting it: the key alone does not prove this particular channel
+    was in the scored group, since a narrower channel subset could reuse it.
+
+    The lookup uses ``load_channel_group_map`` because the run's ``subsystem``
+    tag holds whatever key the model was scored under — ``channel if
+    is_multivariate`` in model/scoring.py. Since docs/plans/023 stage .4 that
+    is the channel group (``subsystem_6_g09``), not the subsystem
+    (``subsystem_6``). Querying the subsystem matches nothing, every channel
+    resolves to "not scored", and the mission report silently loses its
+    multivariate detections. ``load_channel_group_map`` falls back to the
+    subsystem map for missions with no measured grouping, so the pre-023 path
+    is unchanged.
 
     Mirrors ray_fanout.tune._find_multivariate_scoring_run, which solves the
     identical lookup problem for HPO.
@@ -258,8 +267,8 @@ def _find_multivariate_scoring_run(
     """
     import mlflow
 
-    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    if subsystem is None:
+    group_key = load_channel_group_map(settings, mission).get(channel)
+    if group_key is None:
         return None
     client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
     exp = client.get_experiment_by_name(experiment)
@@ -267,7 +276,7 @@ def _find_multivariate_scoring_run(
         return None
     runs = client.search_runs(
         [exp.experiment_id],
-        filter_string=f"tags.subsystem = '{subsystem}'",
+        filter_string=f"tags.subsystem = '{group_key}'",
         order_by=["attributes.start_time DESC"],
     )
     for run in runs:

@@ -888,3 +888,75 @@ class TestMissionIntervalsFromPerChannel:
         composed = mission_intervals_from_per_channel(per_channel)
         fetched_again = mission_detection_intervals(settings, _MISSION, channels, tuned=False)
         assert composed == fetched_again
+
+
+class TestMultivariateRunLookupUsesGroupKey:
+    """The mission report resolves a multivariate run by the key it was SCORED
+    under, which since docs/plans/023 stage .4 is the channel GROUP.
+
+    model/scoring.py tags a multivariate run ``subsystem = <the key passed as
+    `channel`>`` — a group id like ``subsystem_6_g09``, not ``subsystem_6``.
+    Querying the subsystem matches nothing, every channel resolves to "not
+    scored", and the report silently drops its multivariate detections while
+    still producing a plausible-looking table. Asserting only "a run was
+    found" would pass against that bug, so this pins the tag value queried.
+    """
+
+    class _Run:
+        def __init__(self, tags: dict[str, str]) -> None:
+            class _D:
+                def __init__(self, t: dict[str, str]) -> None:
+                    self.tags = t
+
+            self.data = _D(tags)
+            self.info = type("I", (), {"run_id": "mv-run"})()
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, group_map: dict[str, str]) -> list[str]:
+        import sys
+        import types as _types
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        queried: list[str] = []
+        run = self._Run({"channels": "channel_47,channel_48,channel_49", "tuned_source": "grid"})
+
+        class _Client:
+            def __init__(self, *a: object, **k: object) -> None: ...
+            def get_experiment_by_name(self, _n: str) -> object:
+                return type("E", (), {"experiment_id": "1"})()
+            def search_runs(self, _ids: object, filter_string: str = "", **_k: object) -> list:
+                queried.append(filter_string)
+                return [run]
+
+        monkeypatch.setitem(
+            sys.modules, "mlflow", _types.SimpleNamespace(MlflowClient=_Client)
+        )
+        monkeypatch.setattr(_det, "load_channel_group_map", lambda *_a, **_k: group_map)
+        return queried
+
+    def test_queries_the_group_key_not_the_subsystem(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _find_multivariate_scoring_run
+
+        queried = self._patch(monkeypatch, {"channel_47": "subsystem_6_g09"})
+        settings = load_settings("test")
+        found = _find_multivariate_scoring_run(
+            settings, "ESA-Mission1", "exp", "channel_47", tuned=True
+        )
+        assert found is not None
+        assert queried == ["tags.subsystem = 'subsystem_6_g09'"], queried
+
+    def test_channel_absent_from_the_group_map_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from spacecraft_telemetry.esa_adb.detections import _find_multivariate_scoring_run
+
+        self._patch(monkeypatch, {})
+        settings = load_settings("test")
+        assert (
+            _find_multivariate_scoring_run(
+                settings, "ESA-Mission1", "exp", "channel_47", tuned=True
+            )
+            is None
+        )
