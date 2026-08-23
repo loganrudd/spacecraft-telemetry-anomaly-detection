@@ -452,10 +452,17 @@ the grids happened to line up.
 
 Detection quality did not pay for it. On channels 41–46 — the only group with a like-for-like
 predecessor, same split, same protocol, same 12 events — mission-level corrected event-wise F0.5
-is **0.865** on the gridded tree against 0.455 on the native one. Two differences beyond the
-grid are folded into that gap (the gridded arm is 6-in/6-out where the native is per-channel,
-and the two used independent HPO sweeps), so it is evidence the grid cost nothing, **not** a
-clean measurement of the grid's own contribution. Across all 54 target channels the mission-level
+is **0.865** on the gridded tree against 0.455 on the native one. **Both arms forecast a single
+step (H=1)**, so none of the horizon gain reported below is inside either number. Two
+differences beyond the grid *are* folded into the gap — the gridded arm is 6-in/6-out where the
+native is per-channel, and the two used independent HPO sweeps — so this is evidence the grid
+cost nothing, **not** a clean measurement of the grid's own contribution.
+
+Note this pair uses **this repo's default split** (`train_fraction=0.8`, `train_lookback=730D`,
+reported on the held-out final 40% = 12 events), which is *not* the paper's chronological 50/50
+split. It is therefore not comparable to the
+[benchmark table above](#head-to-head-with-the-esa-adb-benchmark), whose rows are measured on
+the paper's split over 25 held-out events. Across all 54 target channels the mission-level
 figure is 0.054, and the drop is structural rather than a regression: the metric ORs detections
 over every channel, so precision falls as the channel count rises — 341 detections across 54
 channels versus 11 across 6.
