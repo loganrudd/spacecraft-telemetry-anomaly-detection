@@ -358,16 +358,50 @@ requires the grouped channels to share a timestamp grid, and ESA channels each c
 sampling phase and rate — preprocessing forward-fills but never resamples. The validated group
 works because channels 41–46 happen to sit on a common 30 s grid; two channels in another
 subsystem, same 30 s cadence but a 16 s phase offset, share **no timestamps at all**. Measured
-across the mission, only 18 of 54 preprocessed target channels group usefully on the current
-grids — into 4 models — and the rest stay univariate. A larger 29-channel group technically
-aligns but shatters into 947k joint segments, yielding 31k training windows against 8.3M for a
-single member.
+across the mission *before* the grid work below, only 25 of 62 preprocessed channels grouped
+usefully — into 4 models — and the rest stayed univariate, ~41 models in total. A larger
+29-channel group technically aligned but shattered into 677k joint segments, yielding 12,771
+training windows against 2.06M for a single member.
 
-Resampling to a common grid removes the obstacle — simulated on that same group, joint windows
-rise from 31k to 982k on one segment — and it is the real prerequisite for extending joint
-modeling past one subsystem. That work is not done. An earlier version of this section
-projected "~100 → ~4–8 models at production scale"; that figure was extrapolated from the one
-subsystem where the grids happen to line up, and the measurement above supersedes it.
+**Resampling to a common grid removes the obstacle, and that work is now done.** Every channel
+is resampled onto a 30 s grid with gap-preserving semantics — only buckets a native tick landed
+in survive, so a genuine multi-month outage stays an outage instead of being forward-filled into
+one continuous segment. Measured on the real transform, not simulated: the 29-channel family
+goes from 12,771 joint training windows to **673,473**, and eight channels that shared *not one*
+native timestamp become a viable 8-channel group with 737,317. Value fidelity holds to float32
+round-trip noise (2.4×10⁻⁶ σ) with **zero fabricated buckets**.
+
+**The grouping key is ESA's own `Group` column, not the subsystem.** Two grouping rules were
+measured and rejected first. Union-find over timestamp overlap is transitive while intersection
+is not, so it merged all 62 channels into one "family" whose 62-way intersection is a single
+row. Grouping by subsystem fails too — `subsystem_6`'s 41 channels align to 1 row, because a
+common *sampling grid* cannot create a common *calendar range* and the strict intersection needs
+both. `channels.csv` ships a `Group` column that ESA describes as marking *"related channels
+with similar characteristics"*, and the dataset's anonymisation normalised values **per group**
+specifically *"to preserve the same dependencies between similar channels"* — so within-group
+dependencies are the ones the data guarantees survived, which is exactly what a joint forecaster
+should be fitting.
+
+That grouping also generalizes where "one model per subsystem" does not: subsystem sizes swing
+from 6 to 57 channels across the three ESA missions (Mission2's `subsystem_1` alone holds 57 of
+its 100), while `Group` sizes hold a median of 3 — and Mission3 is 12 groups of *exactly 4*.
+
+**The achieved model count: 62 channels → 16 models** (13 joint groups + 3 singletons that stay
+univariate), replacing the retired "~100 → ~4–8" projection. At production scale the same rule
+gives Mission2's 100 channels → **29 models**. That is a smaller headline than the projection it
+replaces, and it is the one the data supports: 16 models whose membership is mission metadata
+and transfers to Missions 2 and 3, rather than a larger reduction resting on one subsystem where
+the grids happened to line up.
+
+Detection quality did not pay for it. On channels 41–46 — the only group with a like-for-like
+predecessor, same split, same protocol, same 12 events — mission-level corrected event-wise F0.5
+is **0.865** on the gridded tree against 0.455 on the native one. Two differences beyond the
+grid are folded into that gap (the gridded arm is 6-in/6-out where the native is per-channel,
+and the two used independent HPO sweeps), so it is evidence the grid cost nothing, **not** a
+clean measurement of the grid's own contribution. Across all 54 target channels the mission-level
+figure is 0.054, and the drop is structural rather than a regression: the metric ORs detections
+over every channel, so precision falls as the channel count rises — 341 detections across 54
+channels versus 11 across 6.
 
 The joint model is also not deployed: the serving path has no multivariate support yet. It is
 still the base the horizon result below builds on, and that result is what makes it worth
