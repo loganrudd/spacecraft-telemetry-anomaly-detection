@@ -991,6 +991,30 @@ governing invariant.
 The detector roadmap below is sequenced deliberately: each step builds the infrastructure the next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now built and measured — it matched per-channel accuracy rather than beating it ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
+- **Fold the exhaustive threshold grid into the tuning job as a second stage.** This is a
+  **correctness** gap, not a performance one, and it is the highest-priority item here.
+  `scripts/threshold_ceiling.py` is documented above as a required step before any
+  architecture claim — but it is a local script, and the modules it drives
+  (`ray_fanout/threshold_search.py`, `ray_fanout/threshold_grid.py`) are library code that
+  `run_all_sweeps` never calls. So the required step is the one step the pipeline cannot
+  perform, and skipping it is the default rather than a mistake you have to make.
+
+  Measured cost, on the 30 s-grid arm over channels 41–46 (same split, same 25 held-out
+  events, same model): `cloud-tune`'s 50-sample Ray Tune sweep selected
+  `threshold_z = 1.393, min_error_value = 0.251` and scored **0.212** mission-level corrected
+  event-wise F0.5. The exhaustive grid over the same objective found
+  `threshold_z = 3.0, min_error_value = 0.4` at **0.798**, with the optimum interior to the
+  grid. The chosen z sat *below the entire swept range*, so the arm fired 113 detections at
+  0.18 precision — a config 4× worse than one a deterministic sweep finds in the same space.
+  Read as an architecture result rather than a tuning artifact, that number would have said
+  the common time grid *hurt* detection.
+
+  The fix is two stages, not a swap: the grid sweeps only `(threshold_z, min_error_value)`,
+  because `error_smoothing_window` is baked into the saved smoothed array and cannot be
+  re-evaluated post-hoc. So Ray Tune keeps the params that require re-scoring, and the
+  exhaustive driver deterministically refines the two that are cheap on cached errors —
+  making a ridge-refined config the automatic output of `cloud-tune` rather than a manual
+  follow-up. The parallelism item below is what makes stage 2 affordable at mission scale.
 - **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
   the table because the response surface is a narrow ridge, and `threshold_z` and
   `min_error_value` are substitutes rather than independent knobs — so sampling them
