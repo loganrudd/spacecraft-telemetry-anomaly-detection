@@ -293,7 +293,7 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 |---|---:|---:|---:|
 | ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
 | ours — tuned, 1-in/1-out (per-channel models) | 0.636 | 0.280 | **0.507** |
-| ours — tuned, 6-in/6-out (one joint model per subsystem) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out (one joint model over the channel group) | 0.636 | 0.280 | **0.507** |
 | ours — tuned, 6-in/6-out + **10-step horizon** | 0.917 | 0.440 | **0.753** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
@@ -312,6 +312,12 @@ both ways deliberately.
 The two tuned rows are not a rounding artifact: the 6-in/6-out model was built and
 measured, and the two architectures land within 2×10⁻⁶ of each other — see
 [Multivariate forecasting: built, measured, no gain](#multivariate-forecasting-built-measured-no-gain).
+
+The joint row says "channel group" rather than "subsystem" for a reason worth keeping
+straight: channels 41–46 are `subsystem_5`, which happens to contain **exactly one** ESA
+`Group`, so the two keys coincide here and only here. Grouping by subsystem is *not* the
+general rule — `subsystem_6`'s 41 channels intersect to a single row — which is why the
+mission-wide topology is keyed on `Group`, not subsystem.
 
 **What the ESA-ADB authors actually concluded.** They benchmarked ~40 algorithms,
 including a `telemanom_esa` variant adapted to ESA's channel scale, and found that
