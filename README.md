@@ -818,6 +818,31 @@ torn down between demos to control the ~$60/mo cost. It is reproducible from
 Terraform and runnable locally against the live feed; the recorded capture is the
 standing demonstration.
 
+**A channel cannot be a model input without also being a prediction target.**  
+`ModelConfig` requires `target_channels == input_channels` (enforced by a
+validator in `core/config.py`), so the multivariate path has no notion of an
+*exogenous covariate* — a signal the model reads but is never scored on.
+
+This matters because ESA's own dataset draws exactly that distinction. Of
+Mission1's 76 channels, 58 are **target** channels (monitored for anomalies) and
+18 are **non-target**, which the dataset paper describes as *"meant to support
+the detection process."* Telecommands sit in the same category. The architecture
+cannot express that role, so every non-target channel faces a lossy either/or:
+
+- **Model it as a target anyway** — it consumes training and serving compute and
+  adds registry entries for something nobody monitors; or
+- **Drop it** — the supporting signal it was published to provide is discarded.
+
+Measured cost on the 30 s-grid retrain: of 16 models, **4 cover only non-target
+channels** (8 channels), and two of those do not learn at all — validation loss
+0.99 and 0.72 on unit-variance data, i.e. no better than predicting the mean.
+That compute buys nothing, and the same channels might have improved the models
+that *are* scored, had they been usable as inputs.
+
+Lifting this is a validator change plus a scoring-time mask rather than a
+rearchitecture — the two fields are already kept separate for exactly this
+reason — but it is untested and not attempted here.
+
 ---
 
 
@@ -941,6 +966,20 @@ channel-group data path, which is the part the work below actually reuses.
   channels that a forecaster cannot help (flatlined sensors, forecaster blind spots),
   decided online from cheap signals rather than after a full train+score pass — see
   [docs/architecture/online-pruning-investigation.md](docs/architecture/online-pruning-investigation.md).
+- **Route grouped and ungrouped channels in one training sweep.** `--multivariate` is a
+  binary switch selecting `train_all_subsystems` over `train_all_channels`, and the joint
+  path drops any channel with no entry in `channel_groups.json` (deliberately — silently
+  guessing a channel's group is the plan-021 failure mode the warning exists to prevent).
+  Channels that land in a group of one are excluded from the map on purpose, since a
+  1-in/1-out "multivariate" model is a univariate model wearing extra machinery, and
+  registering it under a group id would break the convention that univariate models carry
+  their channel's name — which `promote`/`demote` discovery depends on. The consequence is
+  that a mission needs **two submissions** to train fully, and a forgotten second one leaves
+  channels untrained with only a log warning to say so. Worse, `cloud_train.sh`
+  delete-then-creates a fixed-name RayJob, so the second submission destroys the first if it
+  is still running. A single sweep that sends grouped channels to the joint path and
+  ungrouped ones to the univariate path would make "train this variant" one command and make
+  a silently-skipped channel impossible.
 - **Calibrate `feature_drift_threshold` against ESA labeled segments.** The 30%-of-features
   drift trigger is currently a sensible default, not an empirically tuned one. Calibrate
   it against the dataset's labeled anomaly segments so drift alerts correlate with real
