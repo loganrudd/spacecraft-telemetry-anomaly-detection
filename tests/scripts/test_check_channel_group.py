@@ -376,3 +376,80 @@ def test_main_rejects_write_groups_without_enumerate_families(
     )
     with pytest.raises(SystemExit, match="--enumerate-families"):
         script_module.main()
+
+
+def test_load_named_groups_rejects_a_channel_in_two_groups(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # A channel in two groups would be trained twice under different registry
+    # keys, and load_channel_group_map would silently keep whichever won the
+    # dict build. Refuse it at the door.
+    import json
+
+    path = tmp_path / "groups.json"
+    path.write_text(json.dumps({"a": ["channel_1", "channel_2"], "b": ["channel_2"]}))
+    with pytest.raises(SystemExit, match="belongs to exactly one"):
+        script_module._load_named_groups(path)
+
+
+def test_load_named_groups_rejects_an_enumerate_families_report(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # The union-find output is a CANDIDATE set, not a topology — installing it
+    # unchecked is the documented mistake. It must not be silently accepted.
+    import json
+
+    path = tmp_path / "families.json"
+    path.write_text(json.dumps({"mission": "ESA-Mission1", "families": [{"channels": ["c1"]}]}))
+    with pytest.raises(SystemExit, match="group_name"):
+        script_module._load_named_groups(path)
+
+
+def test_write_group_map_honours_explicit_names(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    settings = _settings(tmp_path / "processed")
+    script_module.write_group_map(
+        settings,
+        _MISSION,
+        [["channel_a", "channel_b"], ["channel_c", "channel_d"]],
+        names=["power_grid", "thermal_grid"],
+    )
+    assert load_channel_group_map(settings, _MISSION) == {
+        "channel_a": "power_grid",
+        "channel_b": "power_grid",
+        "channel_c": "thermal_grid",
+        "channel_d": "thermal_grid",
+    }
+
+
+def test_write_group_map_drops_singletons_but_keeps_name_alignment(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # The singleton is dropped from the map without shifting the names of the
+    # groups after it — an off-by-one here would mislabel every later group.
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    settings = _settings(tmp_path / "processed")
+    script_module.write_group_map(
+        settings,
+        _MISSION,
+        [["channel_a"], ["channel_b", "channel_c"]],
+        names=["solo", "pair"],
+    )
+    assert load_channel_group_map(settings, _MISSION) == {
+        "channel_b": "pair",
+        "channel_c": "pair",
+    }
+
+
+def test_write_group_map_rejects_mismatched_names(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    settings = _settings(tmp_path / "processed")
+    with pytest.raises(ValueError, match="names has 1 entries"):
+        script_module.write_group_map(
+            settings, _MISSION, [["a", "b"], ["c", "d"]], names=["only_one"]
+        )
