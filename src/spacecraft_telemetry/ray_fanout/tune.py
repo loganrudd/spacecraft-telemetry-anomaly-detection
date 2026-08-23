@@ -317,6 +317,58 @@ def _find_channel_errors_run(
     return None
 
 
+def _window_labels_matching_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    run: Any,
+    group_cache: dict[tuple[str, ...], Any],
+) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    """Per-window labels built over the SAME index the run's errors were.
+
+    A multivariate scoring run windows over the group's JOINT (intersected)
+    timestamp index, and saves one 1-D error array per member channel on that
+    index. Building this channel's labels from its OWN series instead produces
+    an array of a different length — by exactly however many rows the
+    intersection dropped — and the shape check downstream rejects the channel.
+
+    This stayed invisible until now because the only multivariate group ever
+    tuned (ESA-Mission1 channels 41-46, docs/plans/021) intersects at 100%, so
+    the two indices coincided. Plan 023's groups align at 99.999%, and an
+    18-window difference is enough to fail. scripts/threshold_ceiling.py builds
+    labels the same per-channel way and carries the same latent bug.
+
+    Univariate runs are untouched: no ``channels`` tag means a group of one and
+    the original per-channel call.
+
+    The group's labels are cached because every member of a group would
+    otherwise re-read the whole group's parquet — 7 channels x 2.9M rows, seven
+    times over, for one 7-channel group.
+    """
+    from spacecraft_telemetry.model.dataset import load_window_labels
+
+    group = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
+    if len(group) <= 1:
+        return load_window_labels(settings, mission, channel)
+
+    key = tuple(group)
+    if key not in group_cache:
+        group_settings = settings.model_copy(
+            update={
+                "model": settings.model.model_copy(
+                    update={"input_channels": group, "target_channels": group}
+                )
+            }
+        )
+        # `channel` is ignored when input_channels is set — the group supplies
+        # the members — but pass the run's own key so any log line reads right.
+        group_key = run.data.tags.get("subsystem") or channel
+        group_cache[key] = load_window_labels(group_settings, mission, group_key)
+
+    labels_2d = group_cache[key]
+    return np.asarray(labels_2d[:, group.index(channel)], dtype=bool)
+
+
 def _prepare_channel_data(
     settings: Settings,
     mission: str,
@@ -336,8 +388,7 @@ def _prepare_channel_data(
     labeled anomaly windows across all channels — both cases produce misleading
     F0.5 scores (always 0) that would silently corrupt HPO or final eval.
     """
-    from spacecraft_telemetry.model.dataset import load_window_labels
-
+    _group_label_cache: dict[tuple[str, ...], Any] = {}
     missing_errors: list[str] = []
     shape_mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
     load_failures: list[tuple[str, str]] = []
@@ -367,7 +418,9 @@ def _prepare_channel_data(
 
         errors: np.ndarray[Any, Any] = bytes_to_errors(raw)
         try:
-            labels = load_window_labels(settings, mission, channel)
+            labels = _window_labels_matching_run(
+                settings, mission, channel, _run, _group_label_cache
+            )
         except (FileNotFoundError, OSError, ValueError, RuntimeError) as exc:
             load_failures.append((channel, str(exc)))
             continue
