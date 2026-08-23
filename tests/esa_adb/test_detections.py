@@ -960,3 +960,98 @@ class TestMultivariateRunLookupUsesGroupKey:
             )
             is None
         )
+
+
+class TestMetadataMatchesTheScoringRunsIndex:
+    """A grouped channel's window timestamps must be rebuilt on the group's
+    JOINT index, the one its errors.npy was written on.
+
+    Using its own test partition yields a different window count and
+    _intervals_from_arrays raises a "window count mismatch" that reads like
+    stale data ("Re-run ray score") when nothing is stale — the report simply
+    rebuilt the wrong index. Same root cause as the HPO label bug.
+    """
+
+    def test_grouped_channel_uses_joint_metadata_and_its_own_anomaly_column(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        group = ["channel_a", "channel_b"]
+        joint_seg = np.array([0, 0, 0], dtype=np.int32)
+        joint_anom = np.array([[True, False], [False, True], [False, False]], dtype=bool)
+        joint_ts = np.arange(3).astype("datetime64[s]")
+
+        monkeypatch.setattr(
+            _det, "load_channel_group_map",
+            lambda *_a, **_k: {"channel_a": "grp", "channel_b": "grp"},
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata",
+            lambda *_a, **_k: (joint_seg, joint_anom, joint_ts),
+        )
+
+        def _unexpected(*_a: object, **_k: object) -> object:
+            raise AssertionError("grouped channel must not read its own partition")
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_series_metadata", _unexpected
+        )
+
+        out = _det.load_metadata_matching_runs(load_settings("test"), "M", group)
+        assert out["channel_a"][1].tolist() == [True, False, False]
+        assert out["channel_b"][1].tolist() == [False, True, False]
+        # segment_ids/timestamps are shared by reference across the group.
+        assert out["channel_a"][0] is out["channel_b"][0]
+        assert out["channel_a"][2] is out["channel_b"][2]
+
+    def test_joint_metadata_is_read_once_per_group(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        calls: list[int] = []
+        monkeypatch.setattr(
+            _det, "load_channel_group_map",
+            lambda *_a, **_k: {c: "grp" for c in ("channel_a", "channel_b", "channel_c")},
+        )
+
+        def _joint(*_a: object, **_k: object) -> object:
+            calls.append(1)
+            return (
+                np.zeros(2, dtype=np.int32),
+                np.zeros((2, 3), dtype=bool),
+                np.arange(2).astype("datetime64[s]"),
+            )
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata", _joint
+        )
+        _det.load_metadata_matching_runs(
+            load_settings("test"), "M", ["channel_a", "channel_b", "channel_c"]
+        )
+        assert len(calls) == 1
+
+    def test_ungrouped_channel_keeps_the_per_channel_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        monkeypatch.setattr(_det, "load_channel_group_map", lambda *_a, **_k: {})
+        sentinel = (
+            np.zeros(2, dtype=np.int32),
+            np.zeros(2, dtype=bool),
+            np.arange(2).astype("datetime64[s]"),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_series_metadata",
+            lambda *_a, **_k: sentinel,
+        )
+        out = _det.load_metadata_matching_runs(load_settings("test"), "M", ["channel_solo"])
+        assert out["channel_solo"] is sentinel

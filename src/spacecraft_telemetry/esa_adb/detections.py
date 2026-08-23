@@ -576,6 +576,66 @@ def channel_detection_intervals_from_spec(
     )
 
 
+def load_metadata_matching_runs(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+) -> dict[str, SeriesMetadata]:
+    """Per-channel test metadata on the index each channel was actually SCORED on.
+
+    A channel scored inside a multivariate group was windowed over the group's
+    JOINT (intersected) timestamp index, and its saved errors.npy has one entry
+    per joint window. Rebuilding its window timestamps from its OWN test
+    partition yields a different count — by exactly the rows the intersection
+    dropped — and ``_intervals_from_arrays`` rejects it with a window-count
+    mismatch that reads like stale data ("Re-run ray score") when nothing is
+    stale at all.
+
+    Same root cause as ray_fanout.tune._window_labels_matching_run, and hidden
+    for the same reason: the only group ever reported on before (channels 41-46,
+    docs/plans/021) intersects at 100%, so the joint and per-channel indices
+    coincided. Plan 023's groups align at 99.999%, which is enough to break it.
+
+    Channels with no group (univariate models) take the per-channel path
+    unchanged.
+
+    ``segment_ids`` and ``timestamps`` are SHARED BY REFERENCE across a group's
+    members — they are identical by construction, and copying them per member
+    would multiply a ~2.9M-row group's metadata by its channel count against
+    CLAUDE.md's local memory ceiling. Only the per-channel ``is_anomaly`` column
+    differs.
+    """
+    from spacecraft_telemetry.model.dataset import (
+        load_multichannel_series_metadata,
+        load_series_metadata,
+    )
+
+    group_of = load_channel_group_map(settings, mission)
+    members_of: dict[str, list[str]] = {}
+    for ch, member_key in sorted(group_of.items()):
+        members_of.setdefault(member_key, []).append(ch)
+
+    out: dict[str, SeriesMetadata] = {}
+    joint_cache: dict[str, tuple[Any, Any, Any]] = {}
+    for channel in channels:
+        key = group_of.get(channel)
+        members = members_of.get(key or "", [])
+        if key is None or len(members) <= 1:
+            out[channel] = load_series_metadata(
+                settings.preprocess.processed_data_dir, mission, channel, "test",
+                variant=settings.variant,
+            )
+            continue
+        if key not in joint_cache:
+            joint_cache[key] = load_multichannel_series_metadata(
+                settings.preprocess.processed_data_dir, mission, members, "test",
+                variant=settings.variant,
+            )
+        seg, is_anom_2d, ts = joint_cache[key]
+        out[channel] = (seg, is_anom_2d[:, members.index(channel)], ts)
+    return out
+
+
 def per_channel_detection_intervals(
     settings: Settings,
     mission: str,
