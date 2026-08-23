@@ -70,7 +70,10 @@ from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import (
+    load_channel_group_map,
+    load_channel_subsystem_map,
+)
 from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     common_tags as _common_tags,
@@ -246,22 +249,30 @@ def _find_multivariate_scoring_run(
 
     A multivariate scoring run carries no ``channel_id`` tag (model/scoring.py
     — it isn't a real channel), so ``find_latest_run_for_channel`` can never
-    find it. This resolves the channel's subsystem, finds the latest run
-    tagged with that subsystem, and confirms the channel is actually listed
-    in that run's ``channels`` tag before trusting it — a shared subsystem
-    name alone does not guarantee this exact channel was in the scored
-    group (a different variant, or a narrower channel subset, could reuse
-    the same subsystem name).
+    find it. This resolves the channel's GROUP KEY, finds the latest run
+    tagged with it, and confirms the channel is actually listed in that run's
+    ``channels`` tag before trusting it — a shared key alone does not
+    guarantee this exact channel was in the scored group (a different variant,
+    or a narrower channel subset, could reuse the same key).
+
+    The lookup must use ``load_channel_group_map``, not the subsystem map: the
+    run's ``subsystem`` tag holds whatever key the model was scored under, and
+    since docs/plans/023 stage .4 that is the channel GROUP (e.g.
+    ``subsystem_6_g09``) rather than the subsystem (``subsystem_6``). Asking
+    for the subsystem finds nothing, every channel looks unscored, and the
+    whole HPO sweep is skipped with only a "no errors.npy" note to show for
+    it. ``load_channel_group_map`` falls back to the subsystem map when a
+    mission has no measured grouping, so the pre-023 path is unchanged.
 
     Returns the run, or None if no matching multivariate run exists —
     callers already treat a missing channel as an ordinary "not scored yet"
     case, so this adds no new failure mode.
     """
-    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    if subsystem is None:
+    group_key = load_channel_group_map(settings, mission).get(channel)
+    if group_key is None:
         return None
     run = find_latest_run_by_tag(
-        scoring_exp, "subsystem", subsystem, settings.mlflow.tracking_uri, extra_filter
+        scoring_exp, "subsystem", group_key, settings.mlflow.tracking_uri, extra_filter
     )
     if run is None:
         return None

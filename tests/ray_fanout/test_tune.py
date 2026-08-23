@@ -108,7 +108,7 @@ def test_find_channel_errors_run_falls_back_to_multivariate(
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
         lambda *_a, **_k: {"channel_41": "subsystem_1"},
     )
     monkeypatch.setattr(
@@ -136,7 +136,7 @@ def test_find_multivariate_scoring_run_rejects_non_member_channel(
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
         lambda *_a, **_k: {"channel_99": "subsystem_1"},
     )
     monkeypatch.setattr(
@@ -1082,3 +1082,43 @@ def test_run_hpo_sweep_finds_multivariate_errors(
         "error_smoothing_window", "threshold_window",
         "threshold_z", "threshold_min_anomaly_len", "min_error_value",
     }
+
+
+def test_find_multivariate_scoring_run_looks_up_by_group_key_not_subsystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's `subsystem` tag holds the key the model was SCORED under.
+
+    Since docs/plans/023 stage .4 that is the channel group
+    (``subsystem_6_g09``), not the subsystem (``subsystem_6``). Querying the
+    subsystem finds nothing, every channel looks unscored, and the entire HPO
+    sweep is skipped with only a "no errors.npy" note — a silent no-op that
+    burns the whole tuning budget. This pins the tag actually queried.
+    """
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
+        lambda *_a, **_k: {"channel_47": "subsystem_6_g09"},
+    )
+    queried: list[str] = []
+
+    def _capture(_exp, _tag, value, *_a, **_k):
+        queried.append(value)
+        return _FakeRun("mv-run", tags={"channels": "channel_47,channel_48,channel_49"})
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag", _capture
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_47", "exp")
+    assert found is not None
+    assert queried == ["subsystem_6_g09"], (
+        f"looked up {queried!r}; must query the group key the run is tagged with"
+    )
+    assert found[1] == "errors/channel_47.npy"
