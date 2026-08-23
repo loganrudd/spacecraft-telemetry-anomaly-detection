@@ -212,14 +212,38 @@ are operationally costlier than late detections), deliberately *not* the
 point-adjust convention common in the SMAP/MSL literature, which inflates scores
 by crediting an entire anomaly segment for a single detected point.
 
-**Results (ESA-Mission1, held-out 40%, tuned).** Of 31 channels with labeled
-anomalies in the held-out window, **22 register detection** (segment-F0.5 > 0):
+**Results (ESA-Mission1, held-out 40%, tuned).** This is the **default
+configuration** — native timestamps, one model per channel — i.e. what the Quick
+Start below actually produces. Of 31 channels with labeled anomalies in the
+held-out window, **22 register detection** (segment-F0.5 > 0):
 
 | metric (mean over detected channels) | value |
 |---|---|
 | segment recall | 0.51 |
 | segment precision | 0.46 |
 | segment F0.5 | 0.41 |
+
+**The 30 s-grid arm scores higher, over more channels.** Re-preprocessing onto a
+common time grid and training one model per ESA channel group (see
+[Multivariate forecasting](#multivariate-forecasting-built-measured-no-gain))
+gives, on the same metric and the same held-out 40%:
+
+| metric (mean over detected channels) | default | 30 s grid + grouped |
+|---|---:|---:|
+| channels with labeled anomalies in window | 31 | **45** |
+| registering detection | 22 | **26** |
+| segment recall | 0.51 | **0.539** |
+| segment precision | 0.46 | **0.560** |
+| segment F0.5 | 0.41 | **0.457** |
+| channels at segment-F0.5 ≥ 0.7 | 5 | **7** |
+
+Two caveats keep this a second row rather than a replacement. It **changes two
+things at once** — the common grid *and* joint modeling — so neither is isolated
+here. And it is **opt-in**: `preprocess.grid_interval_seconds` defaults to
+`None`, the grid models are not promoted to `@champion`, and the serving path
+cannot load a grouped model at all, so nothing in the live demo runs this arm.
+Reproduce it with `make cloud-preprocess VARIANT=grid-30s GRID_INTERVAL=30`
+followed by `cloud-train`/`cloud-tune`/`cloud-score` with `MULTIVARIATE=1`.
 
 Precision and recall sit close together: the forecaster catches about half the
 labeled segments, and slightly under half of what it flags overlaps a labeled one.
