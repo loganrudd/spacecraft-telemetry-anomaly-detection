@@ -245,6 +245,16 @@ cannot load a grouped model at all, so nothing in the live demo runs this arm.
 Reproduce it with `make cloud-preprocess VARIANT=grid-30s GRID_INTERVAL=30`
 followed by `cloud-train`/`cloud-tune`/`cloud-score` with `MULTIVARIATE=1`.
 
+> **Both columns are Ray Tune-tuned, and both are therefore probably below their
+> achievable ceiling.** Neither has had the exhaustive `(threshold_z,
+> min_error_value)` sweep run against it. That keeps the *comparison* fair — same
+> tuning method on both sides — but it means neither absolute number is a ceiling.
+> On the one arm where the sweep has been run (channels 41–46 on the ESA-ADB
+> split), it moved mission-level F0.5 from 0.212 to 0.798, because Ray Tune had
+> selected a `threshold_z` below the entire swept range. Treat 0.457 as what the
+> pipeline currently produces, not as what this configuration can reach — see the
+> first [Future Work](#future-work) item.
+
 Precision and recall sit close together: the forecaster catches about half the
 labeled segments, and slightly under half of what it flags overlaps a labeled one.
 Nine of the 31 labeled channels produce no detection at all. Five channels reach
@@ -1015,6 +1025,19 @@ channel-group data path, which is the part the work below actually reuses.
   exhaustive driver deterministically refines the two that are cheap on cached errors —
   making a ridge-refined config the automatic output of `cloud-tune` rather than a manual
   follow-up. The parallelism item below is what makes stage 2 affordable at mission scale.
+
+  **Then re-score the 30 s-grid arm and refresh the Evaluation numbers.** Only that arm is
+  worth the pass — the default arm is a different data representation (native timestamps,
+  one model per channel) that this work supersedes, so tuning it to ceiling would be effort
+  spent on a configuration nothing else builds on. The scope is **45 channels, not 62**:
+  the rest carry no labeled anomaly in the held-out window and cannot move a detection
+  metric. It is also only **two sweeps**, since those 45 fall entirely in two subsystems —
+  `subsystem_6` (39 channels, ~4.4 GB resident) and `subsystem_5` (6, ~0.7 GB). The second
+  runs on a laptop today; the first sits right at CLAUDE.md's ~4–5 GB ceiling, which is the
+  concrete reason stage 2 wants Ray rather than a local script. Re-scoring lifts the
+  Evaluation table's 0.457 toward its ceiling, and the two arms there stop being
+  tuning-comparable at that point — so report the swept arm as its own row rather than
+  swapping the number in.
 - **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
   the table because the response surface is a narrow ridge, and `threshold_z` and
   `min_error_value` are substitutes rather than independent knobs — so sampling them
