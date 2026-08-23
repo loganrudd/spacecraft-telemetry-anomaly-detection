@@ -319,6 +319,33 @@ straight: channels 41–46 are `subsystem_5`, which happens to contain **exactly
 general rule — `subsystem_6`'s 41 channels intersect to a single row — which is why the
 mission-wide topology is keyed on `Group`, not subsystem.
 
+#### The same six channels on this repo's default split
+
+The table above is on the paper's split. The 30 s-grid arm was also measured on the
+repo's **default** split (`train_fraction=0.8`, `train_lookback=730D`) against the
+native tree — same channels, same metric, same protocol, same held-out slice — which
+isolates the grid + grouping change from the split:
+
+| channels 41–46, default split | scope | precision | recall | F0.5 | detections |
+|---|---|---:|---:|---:|---:|
+| native | all events, tuned | 0.500 | 0.333 | 0.455 | 10 |
+| **30 s grid + grouped** | all events, tuned | 0.900 | 0.750 | **0.865** | 11 |
+| native | anomalies only, tuned | 0.333 | 0.286 | 0.323 | 10 |
+| **30 s grid + grouped** | anomalies only, tuned | 0.857 | 0.857 | **0.857** | 11 |
+| native | all events, untuned | 0.001 | 0.760 | 0.001 | 20,080 |
+| **30 s grid + grouped** | all events, untuned | 0.002 | 0.920 | 0.002 | 13,013 |
+
+**These are not rows in the benchmark table above and must not be read as beating the
+paper's 0.786.** The split differs, and with it the event population: the paper's 50/50
+split leaves 25 events in the held-out 40%, this one leaves 12. Half as many events makes
+every rate noisier.
+
+The **untuned** pair is the most informative line here, because both sides use Hundman
+defaults — removing HPO-sweep variance, so only the grid and the grouping differ. The
+gridded arm raises recall 0.760 → 0.920 while firing **35% fewer** detections
+(20,080 → 13,013). Two changes still travel together there (common grid, joint model), so
+it is not an isolation of the grid alone.
+
 **What the ESA-ADB authors actually concluded.** They benchmarked ~40 algorithms,
 including a `telemanom_esa` variant adapted to ESA's channel scale, and found that
 **Telemanom-ESA-Pruned is the best algorithm for Mission1** — *"it achieves much
