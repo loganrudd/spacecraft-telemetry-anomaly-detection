@@ -228,12 +228,21 @@ def load_series_metadata(
 # that is a finding, not a detail."
 _ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
 
-# Upper bound on a multivariate group (docs/reviews/021, item A4).
+# Upper bound on a multivariate group's JOIN, not its load (docs/reviews/021,
+# item A4; docs/reviews/023-channel-time-grid.md item A2).
 #
 # _align_multi_channel materialises ALL C channels densely: peak memory is
 # roughly C * N * 17 bytes (float32 values + int32 segment ids + bool flags)
 # plus the DatetimeIndex overhead of the join. Measured ~800 MB for 6 channels
 # x 7.7 M rows at native ESA-Mission1 scale.
+#
+# This bounds the JOIN's dense copies only — by the time this guard runs,
+# _load_channels_ordered has already read every member channel's full arrays
+# into memory (A2's full pre-load preflight, estimating from Parquet footers
+# before any read, is deferred — see docs/reviews/023-channel-time-grid.md
+# "Deliberately not doing"). So a raise here still means a load already
+# happened; it only prevents the ADDITIONAL C-times-N-times-17-byte copy the
+# join itself would allocate on top of that.
 #
 # This was originally expressed as a CHANNEL COUNT (32), taking N as fixed at
 # native scale. Plan 023 stage .3 broke that proxy: a 30 s common grid cuts N
@@ -245,13 +254,24 @@ _ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
 #
 # So the bound is now on the estimate itself. C and N are both known before the
 # join, so the guard costs nothing and stays honest under any future change to
-# either. A whole ~100-channel mission at native scale is still caught (~13 GB);
-# the same mission gridded (~0.67 GB) is correctly allowed.
+# either. A whole ~100-channel mission at native scale is still caught (~12 GB);
+# the same mission gridded (~1 GB) is correctly allowed — see
+# tests/model/test_dataset.py::TestEstimateAlignBytes, which pins both.
 _MAX_MULTIVARIATE_BYTES = 4 * 1024**3
 
 # float32 value + int32 segment id + bool flag + DatetimeIndex share, per
 # aligned row per channel. See the measurement above.
 _BYTES_PER_ALIGNED_ROW_PER_CHANNEL = 17
+
+
+def _estimate_align_bytes(n_channels: int, n_rows: int) -> int:
+    """Estimated dense-join size for a group, in bytes — see _MAX_MULTIVARIATE_BYTES.
+
+    ``n_rows`` should be the SMALLEST member's row count: the intersection
+    cannot exceed the shortest channel, so this is an upper bound on the
+    join's cost, computable before anything is materialised.
+    """
+    return n_channels * n_rows * _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
 
 
 def _joint_segment_ids(
@@ -339,14 +359,12 @@ def _align_multi_channel(
 
     # The intersection cannot exceed the shortest member, so this is an upper
     # bound on the join's cost and is computed before anything is materialised.
-    est_bytes = (
-        len(channels) * min(len(idx) for idx in indices)
-        * _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
-    )
+    min_rows = min(len(idx) for idx in indices)
+    est_bytes = _estimate_align_bytes(len(channels), min_rows)
     if est_bytes > max_bytes:
         raise ValueError(
             f"Multivariate group of {len(channels)} channels x "
-            f"{min(len(idx) for idx in indices):,} rows would materialise "
+            f"{min_rows:,} rows would materialise "
             f"roughly {est_bytes / 1024**3:.1f} GB densely, above the "
             f"{max_bytes / 1024**3:.1f} GB limit, and is likely to OOM the "
             "worker. Split the group, put the mission on a coarser time grid "

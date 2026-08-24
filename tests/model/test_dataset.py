@@ -902,6 +902,33 @@ class TestMultivariateGroupSizeGuard:
         assert values.shape == (3, 6)
 
 
+class TestEstimateAlignBytes:
+    """Pins the calibration _MAX_MULTIVARIATE_BYTES's comment claims.
+
+    Every rejection test above passes an explicit max_bytes, so the SHIPPED
+    default constant itself could drift to e.g. 2**60 and the suite would
+    stay green (docs/reviews/023-channel-time-grid.md finding T2). These two
+    assert against the shipped constant directly, using the comment's own
+    ~100-channel native-vs-gridded numbers.
+    """
+
+    def test_a_100_channel_native_mission_is_rejected(self) -> None:
+        from spacecraft_telemetry.model.dataset import (
+            _MAX_MULTIVARIATE_BYTES,
+            _estimate_align_bytes,
+        )
+
+        assert _estimate_align_bytes(100, 7_700_000) > _MAX_MULTIVARIATE_BYTES
+
+    def test_the_same_mission_gridded_is_accepted(self) -> None:
+        from spacecraft_telemetry.model.dataset import (
+            _MAX_MULTIVARIATE_BYTES,
+            _estimate_align_bytes,
+        )
+
+        assert _estimate_align_bytes(100, 680_000) <= _MAX_MULTIVARIATE_BYTES
+
+
 def test_load_multichannel_series_parquet_missing_channel_raises(tmp_path: Path) -> None:
     mission = "ESA-Mission1"
     processed_dir = tmp_path / "processed"
