@@ -306,6 +306,7 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 | ours — tuned, 6-in/6-out (one joint model over the channel group) | 0.636 | 0.280 | **0.507** |
 | ours — tuned, 6-in/6-out + **30 s common grid** | 1.000 | 0.440 | **0.797** |
 | ours — tuned, 6-in/6-out + **10-step horizon** | 0.917 | 0.440 | **0.753** |
+| ours — tuned, 6-in/6-out + **grid + horizon together** | 0.571 | 0.480 | **0.550** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
 
@@ -352,6 +353,19 @@ precision. Reported against the grid-tuned 0.507 above, that would have said the
 grid *hurt* detection by a factor of two. It is the same tuning-luck failure this repo
 already documents once, in the opposite direction, and it is why the exhaustive sweep is
 listed first in [Future Work](#future-work) as a correctness gap rather than an optimisation.
+
+**The grid and the horizon do not compose.** Each helps alone — the grid takes 0.507 → 0.797,
+the horizon 0.507 → 0.753 — but applied together they give **0.550**, worse than either. The
+last row is not a weaker version of the other two; it is evidence that the two changes are
+substitutes rather than additive, and that stacking measured wins is itself an assumption
+worth testing. Reported because it was measured, not because it is flattering.
+
+The combined arm also shows a **generalization gap the others do not**. Its exhaustive grid
+peaked at 0.840 on the selection slice and delivered 0.550 on the held-out remainder; the
+grid-only arm went 0.798 → 0.797, essentially flat. A config that loses a third of its score
+between selection and held-out data is fitting the selection slice, which at 25 events is
+easy to do — and is exactly why every tuned row here is selected on `hpo_portion` and
+reported on the untouched remainder rather than on its own selection slice.
 
 #### The same six channels on this repo's default split
 
@@ -1040,6 +1054,13 @@ channel-group data path, which is the part the work below actually reuses.
   0.18 precision — a config 4× worse than one a deterministic sweep finds in the same space.
   Read as an architecture result rather than a tuning artifact, that number would have said
   the common time grid *hurt* detection.
+
+  **It is systematic, not one unlucky sweep.** The same thing happened independently on the
+  H=10 arm: Ray Tune chose `threshold_z = 1.481, min_error_value = 0.246` where that arm's
+  exhaustive grid put the optimum at `threshold_z = 7.0, min_error_value = 0.3`. Two separate
+  sweeps, two different horizons, both landing in the same low-`z` region the grid scores an
+  order of magnitude worse. The sampler is not unlucky; it is mis-matched to this response
+  surface.
 
   The fix is two stages, not a swap: the grid sweeps only `(threshold_z, min_error_value)`,
   because `error_smoothing_window` is baked into the saved smoothed array and cannot be
