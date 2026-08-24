@@ -18,15 +18,14 @@ Two independent things a common grid can fix, both measured here:
      otherwise 100% aligned. Bucketing coarsens away short native gaps that
      don't survive as a genuine missing bucket.
 
-Gap-preserving, NOT preprocess.transforms.resample_to_grid: that function is
-dense (pandas .resample().mean().ffill() fills every bucket between min and
-max, so no gap can ever survive it) and materially overstates the resampled
-window yield if reused as-is for ESA (measured 3x on family 1 @ 30s in plan
-023 — 2,945,402 windows dense vs 981,523 gap-preserving). This script buckets
-timestamps only and keeps a bucket only if a native tick actually landed in
-it — a real outage stays a real gap. Segment ids on the bucketed series are
-then re-derived with the SAME detect_gaps() production preprocessing already
-uses (unmodified, imported directly) so segment semantics match stage 023.3's
+This script buckets via preprocess.transforms.resample_to_grid(...,
+gap_preserving=True) — the SAME bucketing production preprocessing runs
+(023.3), so a bucket exists in the output iff at least one native tick floors
+into it; nothing is invented for buckets no channel ever sampled. Values are
+irrelevant here (only bucket timestamps are used downstream), so a dummy
+value column is passed in. Segment ids on the bucketed series are then
+re-derived with the SAME detect_gaps() production preprocessing already uses
+(unmodified, imported directly) so segment semantics match stage 023.3's
 eventual output rather than a bespoke approximation of it.
 
 This stage makes NO preprocessing changes — it is a measurement tool. Its
@@ -70,7 +69,7 @@ from spacecraft_telemetry.model.dataset import (
     load_series_metadata,
     window_span,
 )
-from spacecraft_telemetry.preprocess.transforms import detect_gaps
+from spacecraft_telemetry.preprocess.transforms import detect_gaps, resample_to_grid
 
 log = get_logger(__name__)
 
@@ -100,21 +99,6 @@ class RateCost:
             "max_joint_segment_len": self.max_joint_segment_len,
             "joint_windows": self.joint_windows,
         }
-
-
-def _bucket_timestamps_gap_preserving(
-    timestamps: pd.DatetimeIndex, rate_s: int
-) -> pd.DatetimeIndex:
-    """Floor timestamps onto a rate_s-second grid, keeping only non-empty buckets.
-
-    Deliberately NOT preprocess.transforms.resample_to_grid — see module
-    docstring. A bucket exists in the output iff at least one native tick
-    floors into it; nothing is invented for buckets no channel ever sampled.
-    """
-    if len(timestamps) == 0:
-        return pd.DatetimeIndex([])
-    floored = pd.DatetimeIndex(timestamps).floor(f"{rate_s}s")
-    return pd.DatetimeIndex(sorted(set(floored)))
 
 
 def _segment_bucketed(
@@ -182,7 +166,14 @@ def measure_resampled(
     per_channel_rows: dict[str, int] = {}
     for ch in channels:
         ts = _native_timestamps(settings, mission, ch, split)
-        buckets = _bucket_timestamps_gap_preserving(ts, rate_s)
+        # Only the resulting bucket timestamps are used downstream — segment
+        # ids are re-derived separately via detect_gaps — so the value column
+        # resample_to_grid's mean aggregation reads is a dummy.
+        ticks_df = pd.DataFrame({"telemetry_timestamp": ts, "value": 0.0})
+        resampled = resample_to_grid(
+            ticks_df, ch, mission, grid_interval_seconds=rate_s, gap_preserving=True
+        )
+        buckets = pd.DatetimeIndex(resampled["telemetry_timestamp"])
         per_channel_buckets[ch] = buckets
         per_channel_rows[ch] = len(buckets)
 

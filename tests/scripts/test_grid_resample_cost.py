@@ -54,32 +54,13 @@ def _settings(processed_dir: Path, *, window_size: int = 5, forecast_steps: int 
 
 
 # ---------------------------------------------------------------------------
-# _bucket_timestamps_gap_preserving
-# ---------------------------------------------------------------------------
-
-
-def test_bucket_timestamps_keeps_only_non_empty_buckets(
-    script_module: types.ModuleType,
-) -> None:
-    import pandas as pd
-
-    ts = pd.DatetimeIndex(
-        [pd.Timestamp(0, unit="s"), pd.Timestamp(5, unit="s"), pd.Timestamp(65, unit="s")]
-    )
-    buckets = script_module._bucket_timestamps_gap_preserving(ts, rate_s=30)
-    # t=0 and t=5 both floor to bucket 0; t=65 floors to bucket 60 — no bucket
-    # 30 was ever invented, unlike a dense resample().ffill().
-    assert list(buckets) == [pd.Timestamp(0, unit="s"), pd.Timestamp(60, unit="s")]
-
-
-def test_bucket_timestamps_empty_input(script_module: types.ModuleType) -> None:
-    import pandas as pd
-
-    assert len(script_module._bucket_timestamps_gap_preserving(pd.DatetimeIndex([]), 30)) == 0
-
-
-# ---------------------------------------------------------------------------
 # measure_resampled — phase-drift alignment recovery
+#
+# Bucketing itself (resample_to_grid(gap_preserving=True), including the
+# empty-input case) is covered by tests/preprocess/test_transforms.py; the
+# tests below exercise it through measure_resampled, e.g.
+# test_measure_resampled_per_channel_rows_reflects_bucket_count and
+# test_real_gap_survives_bucketing_short_jitter_does_not below.
 # ---------------------------------------------------------------------------
 
 
