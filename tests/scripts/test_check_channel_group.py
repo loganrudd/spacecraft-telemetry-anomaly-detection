@@ -80,6 +80,8 @@ def test_check_group_full_overlap_reports_zero_loss_and_expected_windows(
     assert report.n_joint_segments == 1
     assert report.max_joint_segment_len == 20
     assert report.joint_windows == 15  # 20 - span(6) + 1
+    assert report.status == "ok"
+    assert report.detail is None
 
 
 def test_check_group_as_dict_rounds_loss_frac(
@@ -122,7 +124,41 @@ def test_check_group_zero_overlap_reports_rather_than_raises(
     assert report.alignment_loss_frac == pytest.approx(1.0)
     assert report.n_joint_segments == 0
     assert report.joint_windows == 0
+    assert report.status == "no_overlap"
+    assert report.detail is not None and "No overlapping timestamps" in report.detail
     # Per-channel rows are still reported even though the join is empty.
+    assert report.per_channel_rows == {"channel_a": 20, "channel_b": 20}
+
+
+def test_check_group_oversized_group_reports_rather_than_raises(
+    tmp_path: Path, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """model.dataset._align_multi_channel's memory guard (a ValueError
+    naming the estimated GB and the limit) must be REPORTED like the
+    no-overlap case, not crash the run characterising the family — see the
+    62-channel ESA-Mission1 single family the module docstring records."""
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    _write_channel(processed_dir, _MISSION, "channel_a", "train", ts, [0] * 20)
+    _write_channel(processed_dir, _MISSION, "channel_b", "train", ts, [0] * 20)
+
+    def _raise_oversized(*_a: object, **_k: object) -> object:
+        raise ValueError(
+            "Multivariate group of 2 channels x 20 rows would materialise "
+            "roughly 999.0 GB densely, above the 4.0 GB limit, and is likely "
+            "to OOM the worker."
+        )
+
+    monkeypatch.setattr(script_module, "load_multichannel_series_metadata", _raise_oversized)
+
+    settings = _settings(processed_dir)
+    report = script_module.check_group(settings, _MISSION, ["channel_a", "channel_b"])
+
+    assert report.status == "oversized"
+    assert report.n_aligned == 0
+    assert report.joint_windows == 0
+    assert report.detail is not None and "would materialise" in report.detail
+    # Per-channel rows (cheap, metadata-only, read before the join) still report.
     assert report.per_channel_rows == {"channel_a": 20, "channel_b": 20}
 
 

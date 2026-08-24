@@ -27,6 +27,12 @@ Reported per group:
                                 window_size / prediction_horizon / forecast_steps
                                 (model.dataset.window_span), summed over joint
                                 segments
+    status                   — "ok", "no_overlap" (empty intersection), or
+                                "oversized" (model.dataset._align_multi_channel's
+                                memory guard refused to even attempt the join).
+                                A family this tool exists to characterise must be
+                                REPORTED, not crash the run that's characterising
+                                it — see the 62-channel single-family case below.
 
 Fragmentation: a group can have near-100% alignment and still yield almost no
 usable windows, because ``_align_multi_channel`` cuts a joint segment boundary
@@ -93,9 +99,11 @@ class GroupReport:
     n_joint_segments: int
     max_joint_segment_len: int
     joint_windows: int
+    status: str = "ok"
+    detail: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "channels": self.channels,
             "per_channel_rows": self.per_channel_rows,
             "n_aligned": self.n_aligned,
@@ -103,7 +111,11 @@ class GroupReport:
             "n_joint_segments": self.n_joint_segments,
             "max_joint_segment_len": self.max_joint_segment_len,
             "joint_windows": self.joint_windows,
+            "status": self.status,
         }
+        if self.detail is not None:
+            out["detail"] = self.detail
+        return out
 
 
 def check_group(
@@ -118,6 +130,13 @@ def check_group(
     (cheap, metadata-only); alignment and joint segmentation come from
     load_multichannel_series_metadata, i.e. the SAME join
     (_align_multi_channel) training will run — not a re-derivation of it.
+
+    Both of _align_multi_channel's ValueErrors (empty intersection, and the
+    memory guard refusing an oversized join — see _MAX_MULTIVARIATE_BYTES)
+    are reported via ``status``/``detail`` rather than raised: a preflight
+    tool that dies on the oversized case reports nothing about the exact
+    input its own module docstring records this happening for (the 62-channel
+    ESA-Mission1 single family on the plan-023 30s grid).
     """
     processed_dir = settings.preprocess.processed_data_dir
     variant = settings.variant
@@ -133,7 +152,12 @@ def check_group(
             processed_dir, mission, channels, split, variant=variant
         )
     except ValueError as exc:
-        if "No overlapping timestamps" not in str(exc):
+        msg = str(exc)
+        if "No overlapping timestamps" in msg:
+            status = "no_overlap"
+        elif "would materialise" in msg:
+            status = "oversized"
+        else:
             raise
         return GroupReport(
             channels=channels,
@@ -143,6 +167,8 @@ def check_group(
             n_joint_segments=0,
             max_joint_segment_len=0,
             joint_windows=0,
+            status=status,
+            detail=msg,
         )
 
     n_aligned = len(timestamps)
