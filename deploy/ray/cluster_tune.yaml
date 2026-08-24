@@ -109,6 +109,15 @@ spec:
                 # None (Settings.variant), reproducing today's output layout.
                 - name: SPACECRAFT_VARIANT
                   value: "${VARIANT}"
+                # HPO never builds a forecast head — but it DOES rebuild window
+                # labels (load_window_labels), and window_span() is
+                # window_size + prediction_horizon + forecast_steps - 1. Omitting
+                # this computes labels at H=1's span against errors written at
+                # H=10's, and the sweep aborts on a shape mismatch. That is why
+                # every H=10 tuned config to date came from the post-hoc grid
+                # rather than from Tune: Tune could not run on an H=10 arm.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -198,6 +207,8 @@ spec:
                   # splits inside worker tasks (plan 019 B2).
                   - name: SPACECRAFT_VARIANT
                     value: "${VARIANT}"
+                  - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                    value: "${FORECAST_STEPS}"
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS

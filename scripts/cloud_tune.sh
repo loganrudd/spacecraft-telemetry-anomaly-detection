@@ -94,8 +94,16 @@ fi
 # neither needs a config switch.
 RAY_IMAGE_TAG="${RAY_IMAGE_TAG:-latest}"
 
+# Defaulted here, not left to the pod's config, for the same reason
+# cloud_train.sh does it: envsubst would otherwise emit an empty string and
+# ModelConfig rejects it at container start. HPO builds no forecast head, but it
+# rebuilds window labels, whose span depends on the horizon — see the comment on
+# SPACECRAFT_MODEL__FORECAST_STEPS in cluster_tune.yaml. MUST match the horizon
+# the arm was SCORED with or the sweep aborts on a shape mismatch.
+FORECAST_STEPS="${FORECAST_STEPS:-${SPACECRAFT_MODEL__FORECAST_STEPS:-1}}"
+
 export PROJECT_ID REGION MLFLOW_URL MISSION VARIANT VARIANT_SEG PROCESSED_DATA_DIR \
-  CHANNELS_ARG WINDOW_SIZE_OVERRIDE RAY_IMAGE_TAG
+  CHANNELS_ARG WINDOW_SIZE_OVERRIDE RAY_IMAGE_TAG FORECAST_STEPS
 
 echo "==> Submitting spacecraft-tune RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}, image tag=${RAY_IMAGE_TAG})"
 

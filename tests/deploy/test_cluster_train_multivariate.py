@@ -53,13 +53,22 @@ _SUBSYSTEM_AWARE_YAMLS = [
     _DEPLOY_DIR / "cluster_tune.yaml",
     *_CLUSTER_SCORES,
 ]
-# Every cluster that trains or scores a forecaster, and therefore needs the
-# 021.7 horizon present at all. cluster_tune.yaml is absent deliberately: HPO
-# searches thresholds over saved error arrays, so it never builds a forecast
-# head. (Parity for the key is covered generally; this list is about PRESENCE.)
+# Every cluster that needs the 021.7 horizon present at all.
+#
+# cluster_tune.yaml WAS excluded, on the reasoning that "HPO searches thresholds
+# over saved error arrays, so it never builds a forecast head". True, and
+# incomplete: HPO rebuilds window LABELS, and window_span() is
+# window_size + prediction_horizon + forecast_steps - 1. Without the horizon the
+# sweep computes labels at H=1's span (251) against errors written at H=10's
+# (260) and aborts — 10 windows short per segment. Measured on the grid-30s-adb-h10
+# arm: labels(7267955) vs errors(7267820), a 135-window gap over ~13.5 segments.
+# That is why every H=10 tuned config to date came from the post-hoc grid rather
+# than Tune: Tune could not run on an H=10 arm at all.
+# (Parity for the key is covered generally; this list is about PRESENCE.)
 _FORECAST_AWARE_YAMLS = [
     _DEPLOY_DIR / "cluster_train.yaml",
     _DEPLOY_DIR / "cluster_train_cpu.yaml",
+    _DEPLOY_DIR / "cluster_tune.yaml",
     *_CLUSTER_SCORES,
 ]
 
