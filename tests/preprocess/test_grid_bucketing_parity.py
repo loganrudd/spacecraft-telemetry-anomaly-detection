@@ -20,6 +20,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from spacecraft_telemetry.core.config import PreprocessingConfig
+
 # Candidates 023.2 measured and 023.3 shipped — all divide 86400.
 _DIVISOR_RATES = [30, 90, 300]
 # Do not divide 86400; chosen because they are empirically shown below to
@@ -61,16 +63,20 @@ def test_floor_matches_resample_for_rates_dividing_a_day(rate_s: int) -> None:
 
 
 @pytest.mark.parametrize("rate_s", _NON_DIVISOR_RATES)
-def test_floor_diverges_from_resample_for_rates_not_dividing_a_day(rate_s: int) -> None:
-    # This divergence is the finding, not a bug in the test: resample()'s
-    # start_day origin and floor's epoch anchor fall out of phase for a rate
-    # that does not divide a day, so the two bucketings disagree on this
-    # dataset. 0.2 turns that into a config-time rejection.
+def test_non_divisor_rates_are_rejected_by_config(rate_s: int) -> None:
+    # This divergence (proven below, against the fixture) is the reason 0.2
+    # makes non-divisor rates a config-time error rather than a documented
+    # caveat: resample()'s start_day origin and floor's epoch anchor fall out
+    # of phase for a rate that doesn't divide a day, so the two bucketings can
+    # silently disagree on a real dataset.
     assert 86400 % rate_s != 0
     series = _irregular_series_with_outage()
     rule = f"{rate_s}s"
-
     via_resample = series.resample(rule).mean().dropna()
     via_floor = series.groupby(series.index.floor(rule)).mean()
-
     assert not via_resample.index.equals(via_floor.index)
+
+    with pytest.raises(ValueError, match="must divide 86400"):
+        PreprocessingConfig(grid_interval_seconds=rate_s)
+    with pytest.raises(ValueError, match="must all divide 86400"):
+        PreprocessingConfig(channel_grid_interval_seconds={"channel_12": rate_s})

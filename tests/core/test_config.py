@@ -214,6 +214,22 @@ class TestPreprocessingGridInterval:
         with pytest.raises(ValueError, match="channel_grid_interval_seconds"):
             PreprocessingConfig(channel_grid_interval_seconds={"channel_12": 0})
 
+    @pytest.mark.parametrize("rate", [30, 90, 300, 60, 1, 86400])
+    def test_grid_interval_accepts_rates_dividing_a_day(self, rate: int) -> None:
+        assert PreprocessingConfig(grid_interval_seconds=rate).grid_interval_seconds == rate
+
+    @pytest.mark.parametrize("rate", [7, 11, 13, 25000])
+    def test_grid_interval_rejects_rates_not_dividing_a_day(self, rate: int) -> None:
+        # See docs/reviews/023-channel-time-grid.md stage 0.2: resample()'s
+        # start_day origin and the rewritten floor()'s epoch origin only
+        # coincide, for every dataset, when the rate divides 86400.
+        with pytest.raises(ValueError, match="must divide 86400"):
+            PreprocessingConfig(grid_interval_seconds=rate)
+
+    def test_channel_grid_interval_rejects_rate_not_dividing_a_day(self) -> None:
+        with pytest.raises(ValueError, match="must all divide 86400"):
+            PreprocessingConfig(channel_grid_interval_seconds={"channel_12": 11})
+
 
 # ---------------------------------------------------------------------------
 # load_settings / Settings

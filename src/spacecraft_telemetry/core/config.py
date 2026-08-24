@@ -136,12 +136,44 @@ class PreprocessingConfig(BaseModel):
             raise ValueError(f"grid_interval_seconds must be >= 1 second, got {v}")
         return v
 
+    @field_validator("grid_interval_seconds")
+    @classmethod
+    def grid_interval_divides_a_day(cls, v: int | None) -> int | None:
+        # preprocess.transforms.resample_to_grid's gap-preserving bucketing
+        # switches from resample().mean() to floor()+groupby() (docs/reviews/
+        # 023-channel-time-grid.md stage 3.1). The two agree for ANY dataset
+        # only when the rate divides 86400: resample()'s start_day origin and
+        # floor()'s epoch origin are both always day-aligned, so they coincide
+        # exactly when a day boundary is also a rate boundary. For a rate that
+        # doesn't divide a day, whether a given dataset's buckets happen to
+        # coincide depends on its start date — that's luck, not a contract, so
+        # it is rejected here rather than left as a silent, data-dependent trap.
+        if v is not None and 86400 % v != 0:
+            raise ValueError(
+                f"grid_interval_seconds must divide 86400 (one day), got {v} — "
+                "bucket edges must be day-anchored AND epoch-anchored for the "
+                "gap-preserving resample and the 023.2 cost table to agree "
+                "(see docs/reviews/023-channel-time-grid.md stage 0.2)."
+            )
+        return v
+
     @field_validator("channel_grid_interval_seconds")
     @classmethod
     def channel_grid_intervals_positive(cls, v: dict[str, int]) -> dict[str, int]:
         bad = {ch: rate for ch, rate in v.items() if rate < 1}
         if bad:
             raise ValueError(f"channel_grid_interval_seconds must all be >= 1 second, got {bad}")
+        return v
+
+    @field_validator("channel_grid_interval_seconds")
+    @classmethod
+    def channel_grid_intervals_divide_a_day(cls, v: dict[str, int]) -> dict[str, int]:
+        bad = {ch: rate for ch, rate in v.items() if 86400 % rate != 0}
+        if bad:
+            raise ValueError(
+                f"channel_grid_interval_seconds must all divide 86400 (one day), got {bad} "
+                "— see grid_interval_seconds's validator for why."
+            )
         return v
 
     @field_validator("processed_data_dir", mode="before")
