@@ -335,12 +335,17 @@ def resample_to_grid(
     # worker kill threshold, so a redundant full copy is not free here.
     df = ticks_df[["telemetry_timestamp", "value"]].set_index("telemetry_timestamp").sort_index()
     rule = f"{grid_interval_seconds}s"
-    bucketed = df["value"].resample(rule).mean()
-    # An empty bucket is NaN either way; the two rules differ only in whether it
-    # is carried forward or dropped. Callers that ffill nulls upstream
-    # (handle_nulls) leave no other source of NaN here, so dropna() removes
-    # exactly the never-sampled buckets.
-    resampled = bucketed.dropna() if gap_preserving else bucketed.ffill()
+    if gap_preserving:
+        # groupby(floor) only ever materialises buckets that received a tick,
+        # unlike resample(rule).mean().dropna() which allocates every bucket
+        # between the first and last tick (including multi-month ESA outages)
+        # before dropping the empty ones — the doubled peak RSS plan 023 measured.
+        # floor() and resample()'s start_day origin agree exactly when
+        # grid_interval_seconds divides 86400 (see test_grid_bucketing_parity.py);
+        # PreprocessingConfig enforces that divisibility so the two never diverge.
+        resampled = df["value"].groupby(df.index.floor(rule)).mean()
+    else:
+        resampled = df["value"].resample(rule).mean().ffill()
     result = resampled.reset_index()
     result.columns = pd.Index(["telemetry_timestamp", "value"])
     result["value"] = result["value"].astype("float32")
