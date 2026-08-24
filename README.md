@@ -304,6 +304,7 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 | ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
 | ours — tuned, 1-in/1-out (per-channel models) | 0.636 | 0.280 | **0.507** |
 | ours — tuned, 6-in/6-out (one joint model over the channel group) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out + **30 s common grid** | 1.000 | 0.440 | **0.797** |
 | ours — tuned, 6-in/6-out + **10-step horizon** | 0.917 | 0.440 | **0.753** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
@@ -313,11 +314,16 @@ side using an error floor — and there we are far behind. The tuned rows apply
 per-subsystem threshold selection the paper never ran (an exhaustive grid over
 `(threshold_z, min_error_value)`, selected on the first 60% of the test half — *not*
 a Ray Tune sweep; the report reads that distinction from each run's tags rather than
-asserting it), so even the 0.753, close as it looks to the paper's pruned 0.786, is
-**not** a like-for-like win. It differs on two axes at
+asserting it), so neither the 0.753 nor the **0.797 — which does sit above the paper's
+pruned 0.786 — is a like-for-like win**. Both differ on two axes at
 once: we tuned and they did not, *and* our tuned rows are measured on the held-out
 final 40% (25 events) while theirs covers the full test half (65 events). Reported
 both ways deliberately.
+
+Read the tuned rows as comparisons **against each other**, where split, event set and
+tuning method are all held fixed, and only against the paper with those two differences
+stated. A number crossing 0.786 does not settle the benchmark; it says this configuration
+reaches the paper's operating range under a protocol the paper did not run.
 
 The two tuned rows are not a rounding artifact: the 6-in/6-out model was built and
 measured, and the two architectures land within 2×10⁻⁶ of each other — see
@@ -328,6 +334,24 @@ straight: channels 41–46 are `subsystem_5`, which happens to contain **exactly
 `Group`, so the two keys coincide here and only here. Grouping by subsystem is *not* the
 general rule — `subsystem_6`'s 41 channels intersect to a single row — which is why the
 mission-wide topology is keyed on `Group`, not subsystem.
+
+**The 30 s-grid row is the one clean single-variable comparison in this table.** It differs
+from the 6-in/6-out row above it in exactly one respect — the common time grid. Same
+channels, same chronological 50/50 split, same 25 held-out events, same joint architecture,
+same one-step horizon, and — the part that took a second pass to get right — the same
+**tuning method**: both configurations come from the exhaustive `(threshold_z,
+min_error_value)` grid, read from each run's MLflow tags rather than assumed. Under those
+matched conditions the grid moves F0.5 from **0.507 to 0.797**, almost entirely through
+precision (0.636 → 1.000) while recall also rises (0.280 → 0.440); detections stay flat at
+18 → 19, so this is a cleaner operating point rather than simply a quieter one.
+
+Getting that comparison honest required discarding a first attempt. Tuned by `cloud-tune`'s
+50-sample Ray Tune sweep instead, the same arm scored **0.212** — the sweep had selected
+`threshold_z = 1.393`, below the entire range the grid sweeps, firing 113 detections at 0.18
+precision. Reported against the grid-tuned 0.507 above, that would have said the common time
+grid *hurt* detection by a factor of two. It is the same tuning-luck failure this repo
+already documents once, in the opposite direction, and it is why the exhaustive sweep is
+listed first in [Future Work](#future-work) as a correctness gap rather than an optimisation.
 
 #### The same six channels on this repo's default split
 
@@ -460,22 +484,20 @@ replaces, and it is the one the data supports: 16 models whose membership is mis
 and transfers to Missions 2 and 3, rather than a larger reduction resting on one subsystem where
 the grids happened to line up.
 
-Detection quality did not pay for it. On channels 41–46 — the only group with a like-for-like
-predecessor, same split, same protocol, same 12 events — mission-level corrected event-wise F0.5
-is **0.865** on the gridded tree against 0.455 on the native one. **Both arms forecast a single
-step (H=1)**, so none of the horizon gain reported below is inside either number. Two
-differences beyond the grid *are* folded into the gap — the gridded arm is 6-in/6-out where the
-native is per-channel, and the two used independent HPO sweeps — so this is evidence the grid
-cost nothing, **not** a clean measurement of the grid's own contribution.
+Detection quality did not pay for it — and on the benchmark's own split the grid is measurably
+*better*, isolated to a single variable. Holding channels, chronological 50/50 split, the 25
+held-out events, the joint 6-in/6-out architecture, the one-step horizon **and the tuning
+method** all fixed, the common grid moves mission-level corrected event-wise F0.5 from **0.507
+to 0.797** — almost entirely through precision (0.636 → 1.000), with recall also rising (0.280
+→ 0.440) and detections flat at 18 → 19. See the [head-to-head
+table](#head-to-head-with-the-esa-adb-benchmark). Everything except the time grid is matched,
+which is what makes it an attribution rather than an observation.
 
-Note this pair uses **this repo's default split** (`train_fraction=0.8`, `train_lookback=730D`,
-reported on the held-out final 40% = 12 events), which is *not* the paper's chronological 50/50
-split. It is therefore not comparable to the
-[benchmark table above](#head-to-head-with-the-esa-adb-benchmark), whose rows are measured on
-the paper's split over 25 held-out events. Across all 54 target channels the mission-level
-figure is 0.054, and the drop is structural rather than a regression: the metric ORs detections
-over every channel, so precision falls as the channel count rises — 341 detections across 54
-channels versus 11 across 6.
+Across all 54 target channels of the default-split arm the mission-level figure is 0.054. That
+is not a contradiction: the metric ORs detections over every channel, so precision falls as the
+channel count rises — 341 detections across 54 channels versus 19 across 6. Mission-level
+corrected event-wise F0.5 is only comparable at a fixed channel set, which is why the
+attribution above is made on the 6-channel benchmark scope.
 
 The joint model is also not deployed: the serving path has no multivariate support yet. It is
 still the base the horizon result below builds on, and that result is what makes it worth
