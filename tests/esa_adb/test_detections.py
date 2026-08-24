@@ -963,30 +963,78 @@ class TestMultivariateRunLookupUsesGroupKey:
 
 
 class TestMetadataMatchesTheScoringRunsIndex:
-    """A grouped channel's window timestamps must be rebuilt on the group's
-    JOINT index, the one its errors.npy was written on.
-
-    Using its own test partition yields a different window count and
-    _intervals_from_arrays raises a "window count mismatch" that reads like
-    stale data ("Re-run ray score") when nothing is stale — the report simply
-    rebuilt the wrong index. Same root cause as the HPO label bug.
+    """A grouped channel's window timestamps must be rebuilt on the index its
+    SCORING RUN actually used, not on what a group map says — the two can
+    disagree when a tree holds both a univariate and a multivariate arm for
+    the same channel mid-experiment (docs/reviews/023-channel-time-grid.md
+    finding A1). These drive load_metadata_matching_runs with a fake run
+    resolver so they assert the PROPERTY (grouping follows the resolved run),
+    not a stubbed-out branch (finding T3).
     """
 
-    def test_grouped_channel_uses_joint_metadata_and_its_own_anomaly_column(
+    @staticmethod
+    def _fake_run(members: list[str] | None) -> object:
+        from types import SimpleNamespace
+
+        tags = {"channels": ",".join(members)} if members else {}
+        return SimpleNamespace(data=SimpleNamespace(tags=tags))
+
+    def test_univariate_run_wins_even_if_group_map_says_grouped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """(a) The group map says channel_a is grouped, but its actually-
+        resolved run is univariate — the run wins, per-channel metadata."""
         import numpy as np
 
         from spacecraft_telemetry.esa_adb import detections as _det
 
-        group = ["channel_a", "channel_b"]
+        sentinel = (
+            np.zeros(2, dtype=np.int32), np.zeros(2, dtype=bool),
+            np.arange(2).astype("datetime64[s]"),
+        )
+        monkeypatch.setattr(
+            _det, "load_channel_group_map",
+            lambda *_a, **_k: {"channel_a": "grp", "channel_b": "grp"},
+        )
+        monkeypatch.setattr(
+            _det, "_resolve_scoring_run",
+            lambda *_a, **_k: (self._fake_run(None), False),
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_series_metadata",
+            lambda *_a, **_k: sentinel,
+        )
+
+        def _unexpected(*_a: object, **_k: object) -> object:
+            raise AssertionError("a univariate run must not read joint metadata")
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata",
+            _unexpected,
+        )
+
+        out = _det.load_metadata_matching_runs(
+            load_settings("test"), "M", ["channel_a"], tuned=False
+        )
+        assert out["channel_a"] is sentinel
+
+    def test_multivariate_run_wins_even_if_group_map_says_ungrouped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) The group map has nothing for these channels, but the
+        resolved run IS multivariate — the run wins, joint metadata."""
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
         joint_seg = np.array([0, 0, 0], dtype=np.int32)
         joint_anom = np.array([[True, False], [False, True], [False, False]], dtype=bool)
         joint_ts = np.arange(3).astype("datetime64[s]")
 
+        monkeypatch.setattr(_det, "load_channel_group_map", lambda *_a, **_k: {})
         monkeypatch.setattr(
-            _det, "load_channel_group_map",
-            lambda *_a, **_k: {"channel_a": "grp", "channel_b": "grp"},
+            _det, "_resolve_scoring_run",
+            lambda *_a, **_k: (self._fake_run(["channel_a", "channel_b"]), True),
         )
         monkeypatch.setattr(
             "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata",
@@ -994,18 +1042,59 @@ class TestMetadataMatchesTheScoringRunsIndex:
         )
 
         def _unexpected(*_a: object, **_k: object) -> object:
-            raise AssertionError("grouped channel must not read its own partition")
+            raise AssertionError("a multivariate run must not read per-channel metadata")
 
         monkeypatch.setattr(
             "spacecraft_telemetry.model.dataset.load_series_metadata", _unexpected
         )
 
-        out = _det.load_metadata_matching_runs(load_settings("test"), "M", group)
+        out = _det.load_metadata_matching_runs(
+            load_settings("test"), "M", ["channel_a", "channel_b"], tuned=False
+        )
         assert out["channel_a"][1].tolist() == [True, False, False]
         assert out["channel_b"][1].tolist() == [False, True, False]
-        # segment_ids/timestamps are shared by reference across the group.
+        # segment_ids are shared by reference across the group.
         assert out["channel_a"][0] is out["channel_b"][0]
-        assert out["channel_a"][2] is out["channel_b"][2]
+
+    def test_run_channels_tag_wins_over_a_wider_group_map_entry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(c) The group map's entry for channel_a has THREE members, but the
+        resolved run's `channels` tag — a SUBSET — only lists two. The run's
+        list wins: a run only ever proves membership for what it lists.
+        Mirrors ray_fanout.tune's non-member rejection test, which detections
+        never had an equivalent of (finding T3)."""
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        joint_seg = np.array([0, 0], dtype=np.int32)
+        joint_anom = np.array([[True, False], [False, True]], dtype=bool)
+        joint_ts = np.arange(2).astype("datetime64[s]")
+
+        monkeypatch.setattr(
+            _det, "load_channel_group_map",
+            lambda *_a, **_k: {"channel_a": "grp", "channel_b": "grp", "channel_c": "grp"},
+        )
+        monkeypatch.setattr(
+            _det, "_resolve_scoring_run",
+            lambda *_a, **_k: (self._fake_run(["channel_a", "channel_b"]), True),
+        )
+
+        captured: dict[str, list[str]] = {}
+
+        def _joint(
+            _processed_dir: object, _mission: object, members: list[str], *_a: object, **_k: object
+        ) -> object:
+            captured["members"] = members
+            return (joint_seg, joint_anom, joint_ts)
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata", _joint
+        )
+
+        _det.load_metadata_matching_runs(load_settings("test"), "M", ["channel_a"], tuned=False)
+        assert captured["members"] == ["channel_a", "channel_b"]
 
     def test_joint_metadata_is_read_once_per_group(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1016,8 +1105,10 @@ class TestMetadataMatchesTheScoringRunsIndex:
 
         calls: list[int] = []
         monkeypatch.setattr(
-            _det, "load_channel_group_map",
-            lambda *_a, **_k: {c: "grp" for c in ("channel_a", "channel_b", "channel_c")},
+            _det, "_resolve_scoring_run",
+            lambda *_a, **_k: (
+                self._fake_run(["channel_a", "channel_b", "channel_c"]), True,
+            ),
         )
 
         def _joint(*_a: object, **_k: object) -> object:
@@ -1032,7 +1123,7 @@ class TestMetadataMatchesTheScoringRunsIndex:
             "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata", _joint
         )
         _det.load_metadata_matching_runs(
-            load_settings("test"), "M", ["channel_a", "channel_b", "channel_c"]
+            load_settings("test"), "M", ["channel_a", "channel_b", "channel_c"], tuned=False
         )
         assert len(calls) == 1
 
@@ -1043,7 +1134,9 @@ class TestMetadataMatchesTheScoringRunsIndex:
 
         from spacecraft_telemetry.esa_adb import detections as _det
 
-        monkeypatch.setattr(_det, "load_channel_group_map", lambda *_a, **_k: {})
+        monkeypatch.setattr(
+            _det, "_resolve_scoring_run", lambda *_a, **_k: (self._fake_run(None), False)
+        )
         sentinel = (
             np.zeros(2, dtype=np.int32),
             np.zeros(2, dtype=bool),
@@ -1053,5 +1146,44 @@ class TestMetadataMatchesTheScoringRunsIndex:
             "spacecraft_telemetry.model.dataset.load_series_metadata",
             lambda *_a, **_k: sentinel,
         )
-        out = _det.load_metadata_matching_runs(load_settings("test"), "M", ["channel_solo"])
+        out = _det.load_metadata_matching_runs(
+            load_settings("test"), "M", ["channel_solo"], tuned=False
+        )
         assert out["channel_solo"] is sentinel
+
+    def test_offline_run_map_keeps_the_group_map_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit (offline) run map carries no per-run `channels` tag to
+        read — it stays on load_channel_group_map, since a pinned run map is
+        by construction one known configuration, not a tree with two arms
+        in flight."""
+        import numpy as np
+
+        from spacecraft_telemetry.esa_adb import detections as _det
+
+        joint_seg = np.array([0, 0, 0], dtype=np.int32)
+        joint_anom = np.array([[True, False], [False, True], [False, False]], dtype=bool)
+        joint_ts = np.arange(3).astype("datetime64[s]")
+
+        monkeypatch.setattr(
+            _det, "load_channel_group_map",
+            lambda *_a, **_k: {"channel_a": "grp", "channel_b": "grp"},
+        )
+
+        def _unexpected(*_a: object, **_k: object) -> object:
+            raise AssertionError("run_map mode must not resolve a scoring run")
+
+        monkeypatch.setattr(_det, "_resolve_scoring_run", _unexpected)
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_multichannel_series_metadata",
+            lambda *_a, **_k: (joint_seg, joint_anom, joint_ts),
+        )
+
+        fake_run_map = OfflineRunMap(mission="M", baseline={}, tuned={})
+        out = _det.load_metadata_matching_runs(
+            load_settings("test"), "M", ["channel_a", "channel_b"],
+            tuned=False, run_map=fake_run_map,
+        )
+        assert out["channel_a"][1].tolist() == [True, False, False]
+

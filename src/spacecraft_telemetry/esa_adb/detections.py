@@ -580,6 +580,10 @@ def load_metadata_matching_runs(
     settings: Settings,
     mission: str,
     channels: list[str],
+    *,
+    tuned: bool,
+    run_map: OfflineRunMap | None = None,
+    group_cache: dict[tuple[str, ...], SeriesMetadata] | None = None,
 ) -> dict[str, SeriesMetadata]:
     """Per-channel test metadata on the index each channel was actually SCORED on.
 
@@ -591,49 +595,92 @@ def load_metadata_matching_runs(
     mismatch that reads like stale data ("Re-run ray score") when nothing is
     stale at all.
 
-    Same root cause as ray_fanout.tune._window_labels_matching_run, and hidden
-    for the same reason: the only group ever reported on before (channels 41-46,
-    docs/plans/021) intersects at 100%, so the joint and per-channel indices
-    coincided. Plan 023's groups align at 99.999%, which is enough to break it.
+    Grouping is resolved from the channel's ACTUAL scoring run (mirroring
+    :func:`_resolve_scoring_run`'s univariate-then-multivariate lookup and
+    reading the winning run's ``channels`` tag), not from
+    ``load_channel_group_map``. A group map can disagree with a specific run:
+    ``find_scoring_run_and_artifacts`` tries the univariate lookup first, so a
+    tree holding both a univariate and a multivariate arm for the same channel
+    mid-experiment would otherwise get joint metadata against per-channel
+    errors (or vice versa) — the same window-count mismatch this function
+    exists to avoid, just introduced by the metadata side instead of the
+    errors side (docs/reviews/023-channel-time-grid.md finding A1). The run's
+    ``channels`` tag also wins over a WIDER group map entry: a run only ever
+    proves membership for the channels it actually lists.
 
-    Channels with no group (univariate models) take the per-channel path
-    unchanged.
+    ``run_map`` (offline/provenance mode, see esa_adb/offline.py) carries no
+    per-run ``channels`` tag to read — a ``RunSpec`` is deliberately just a
+    pinned artifact path — so that path keeps the ``load_channel_group_map``
+    fallback. An explicit run map is, by construction, pinned to one known
+    configuration, so the tree-holds-both-arms ambiguity this function
+    otherwise resolves does not arise there.
 
-    ``segment_ids`` and ``timestamps`` are SHARED BY REFERENCE across a group's
-    members — they are identical by construction, and copying them per member
-    would multiply a ~2.9M-row group's metadata by its channel count against
-    CLAUDE.md's local memory ceiling. Only the per-channel ``is_anomaly`` column
-    differs.
+    Call once per untuned/tuned variant — a channel's grouping can legitimately
+    differ between them mid-experiment (that's the mixed state this function
+    must tolerate, not reject) — and share ``group_cache`` across both calls.
+    Groups are looked up by their resolved MEMBER TUPLE (a 1-tuple for an
+    ungrouped channel), so the common case where both variants agree still
+    loads each group's arrays exactly once, preserving the docs/plans/019
+    P2/P3 preload.
+
+    Args:
+        tuned:       Which scoring-run variant to resolve grouping from.
+        run_map:     See above — falls back to the group map when given.
+        group_cache: Shared across the untuned and tuned calls for one report.
     """
     from spacecraft_telemetry.model.dataset import (
         load_multichannel_series_metadata,
         load_series_metadata,
     )
 
-    group_of = load_channel_group_map(settings, mission)
-    members_of: dict[str, list[str]] = {}
-    for ch, member_key in sorted(group_of.items()):
-        members_of.setdefault(member_key, []).append(ch)
+    if group_cache is None:
+        group_cache = {}
+
+    members_by_channel: dict[str, list[str]]
+    if run_map is not None:
+        group_of = load_channel_group_map(settings, mission)
+        members_of: dict[str, list[str]] = {}
+        for ch, member_key in sorted(group_of.items()):
+            members_of.setdefault(member_key, []).append(ch)
+        members_by_channel = {
+            channel: members_of.get(group_of.get(channel, ""), [channel])
+            for channel in channels
+        }
+    else:
+        exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
+        members_by_channel = {}
+        for channel in channels:
+            run, is_multivariate = _resolve_scoring_run(
+                settings, mission, exp, channel, tuned=tuned
+            )
+            if not is_multivariate:
+                members_by_channel[channel] = [channel]
+                continue
+            members = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
+            members_by_channel[channel] = members or [channel]
 
     out: dict[str, SeriesMetadata] = {}
-    joint_cache: dict[str, tuple[Any, Any, Any]] = {}
     for channel in channels:
-        key = group_of.get(channel)
-        members = members_of.get(key or "", [])
-        if key is None or len(members) <= 1:
-            out[channel] = load_series_metadata(
-                settings.preprocess.processed_data_dir, mission, channel, "test",
-                variant=settings.variant,
-            )
+        members = members_by_channel[channel]
+        if len(members) <= 1:
+            key: tuple[str, ...] = (channel,)
+            if key not in group_cache:
+                group_cache[key] = load_series_metadata(
+                    settings.preprocess.processed_data_dir, mission, channel, "test",
+                    variant=settings.variant,
+                )
+            out[channel] = group_cache[key]
             continue
-        if key not in joint_cache:
-            joint_cache[key] = load_multichannel_series_metadata(
+        key = tuple(members)
+        if key not in group_cache:
+            group_cache[key] = load_multichannel_series_metadata(
                 settings.preprocess.processed_data_dir, mission, members, "test",
                 variant=settings.variant,
             )
-        seg, is_anom_2d, ts = joint_cache[key]
+        seg, is_anom_2d, ts = group_cache[key]
         out[channel] = (seg, is_anom_2d[:, members.index(channel)], ts)
     return out
+
 
 
 def per_channel_detection_intervals(
