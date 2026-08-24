@@ -47,9 +47,18 @@ def script_module() -> types.ModuleType:
 _MISSION = "ESA-Mission1"
 
 
-def _settings(processed_dir: Path, *, window_size: int = 5, forecast_steps: int = 1) -> Settings:
+def _settings(
+    processed_dir: Path,
+    *,
+    window_size: int = 5,
+    forecast_steps: int = 1,
+    channel_grid_interval_seconds: dict[str, int] | None = None,
+) -> Settings:
     return Settings(
-        preprocess={"processed_data_dir": processed_dir},
+        preprocess={
+            "processed_data_dir": processed_dir,
+            "channel_grid_interval_seconds": channel_grid_interval_seconds or {},
+        },
         model={
             "window_size": window_size,
             "prediction_horizon": 1,
@@ -332,6 +341,32 @@ def test_write_group_map_omits_singletons(
 
     mapping = json.loads(Path(path).read_text())
     assert mapping == {"channel_a": "group_01", "channel_b": "group_01"}
+
+
+def test_write_group_map_raises_when_group_members_disagree_on_grid_rate(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    """A joint model is bounded by its coarsest member (docs/reviews/023-
+    channel-time-grid.md item A3) — installing a group whose members resolve
+    to different grid_interval_for rates would silently cap it at a rate
+    nobody chose, several stages downstream of a CHANNEL_GRIDS typo."""
+    processed_dir = tmp_path / "processed"
+    settings = _settings(
+        processed_dir, channel_grid_interval_seconds={"channel_a": 30, "channel_b": 90}
+    )
+    with pytest.raises(SystemExit, match="different grid_interval_for rates"):
+        script_module.write_group_map(settings, _MISSION, [["channel_a", "channel_b"]])
+
+
+def test_write_group_map_allows_agreeing_grid_rates(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    processed_dir = tmp_path / "processed"
+    settings = _settings(
+        processed_dir, channel_grid_interval_seconds={"channel_a": 30, "channel_b": 30}
+    )
+    path = script_module.write_group_map(settings, _MISSION, [["channel_a", "channel_b"]])
+    assert Path(path).exists()
 
 
 def test_write_group_map_numbers_groups_in_family_order(

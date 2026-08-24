@@ -171,6 +171,48 @@ def _preprocess_channel_remote(
     )
 
 
+def _warn_on_group_grid_rate_mismatch(
+    settings: Settings, mission: str, channels: list[str]
+) -> None:
+    """Log a warning when a multivariate group's members disagree on grid rate.
+
+    A joint model is bounded by its COARSEST member (docs/plans/023 stage .3),
+    so a one-character typo in CHANNEL_GRIDS silently collapses a group's
+    intersection several stages downstream of the actual cause — the group map
+    (which channels belong together) and the grid rate (settings.preprocess.
+    channel_grid_interval_seconds) are two independently hand-maintained
+    sources for one fact, and nothing else cross-checks them.
+
+    Observability only: this never raises or changes what gets preprocessed,
+    since a member's grid rate is legitimate to set per-channel and the group
+    map may list channels this preprocessing run wasn't asked to touch.
+    """
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    group_of = load_channel_group_map(settings, mission)
+    if not group_of:
+        return
+
+    requested = set(channels)
+    members_by_group: dict[str, list[str]] = {}
+    for ch, key in group_of.items():
+        members_by_group.setdefault(key, []).append(ch)
+
+    for key, members in members_by_group.items():
+        if not requested.intersection(members):
+            continue
+        rates = {ch: settings.preprocess.grid_interval_for(ch) for ch in members}
+        if len(set(rates.values())) > 1:
+            log.warning(
+                "pipeline.group_grid_rate_mismatch",
+                mission=mission,
+                group=key,
+                rates=rates,
+                reason="a joint model is bounded by its coarsest member — "
+                "mismatched rates within a group silently shrink its intersection",
+            )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -261,6 +303,8 @@ def run_preprocessing(
     labels_df: pd.DataFrame | None = None
     if labels_path.exists():
         labels_df = read_labels(labels_path)
+
+    _warn_on_group_grid_rate_mismatch(settings, mission, channel_list)
 
     # Clear output dirs: re-runs must not accumulate duplicates.
     # Use the underlying fsspec fs.rm() so this works for both local and gs://.

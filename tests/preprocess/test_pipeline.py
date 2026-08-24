@@ -326,6 +326,107 @@ class TestRunPreprocessingTimeGrid:
         assert len(common) >= min(len(a), len(b)) - 1
 
 
+class TestGroupGridRateMismatchWarning:
+    """docs/reviews/023-channel-time-grid.md item A3.
+
+    The group map (which channels belong together) and the grid rate
+    (channel_grid_interval_seconds) are two independently hand-maintained
+    sources for one fact, and nothing else cross-checks them. A joint model
+    is bounded by its coarsest member, so a mismatch silently shrinks a
+    group's intersection several stages downstream of a CHANNEL_GRIDS typo.
+    """
+
+    @staticmethod
+    def _write_group_map(out_dir: Path, mission: str, mapping: dict[str, str]) -> None:
+        from spacecraft_telemetry.core.paths import output_path
+
+        metadata_dir = output_path(out_dir, mission, None, "metadata")
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        (metadata_dir / "channel_groups.json").write_text(json.dumps(mapping))
+
+    @staticmethod
+    def _recording_logger() -> tuple[object, list[tuple[str, dict[str, object]]]]:
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+            def info(self, event: str, **kwargs: object) -> None:
+                pass  # run_preprocessing also emits several info events
+
+        return _RecordingLogger(), recorded
+
+    def test_mismatched_rates_within_a_group_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_mismatch"
+        out_dir.mkdir()
+        self._write_group_map(out_dir, "ESA-Mission1", {"channel_70": "grp", "channel_71": "grp"})
+        s = _settings_with_grid(
+            input_dir, out_dir,
+            channel_grid_interval_seconds={"channel_70": 30, "channel_71": 90},
+        )
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        matches = [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+        assert len(matches) == 1
+        _event, fields = matches[0]
+        assert fields["group"] == "grp"
+        assert fields["rates"] == {"channel_70": 30, "channel_71": 90}
+
+    def test_agreeing_rates_do_not_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_agree"
+        out_dir.mkdir()
+        self._write_group_map(out_dir, "ESA-Mission1", {"channel_70": "grp", "channel_71": "grp"})
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        assert not [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+
+    def test_no_group_map_never_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+        from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_nogroup"
+        out_dir.mkdir()
+        # channel_70/channel_71 are real ESA-Mission1 channel ids with a real
+        # subsystem entry in the repo's committed data/raw channels.csv —
+        # DataConfig.raw_data_dir defaults there, so load_channel_group_map's
+        # CSV fallback would otherwise pick it up. Isolate raw_data_dir too, so
+        # this test exercises "no group map anywhere", not "leaked repo data".
+        s = Settings(
+            data=DataConfig(sample_data_dir=input_dir, raw_data_dir=tmp_path / "empty_raw"),
+            preprocess=PreprocessingConfig(
+                processed_data_dir=out_dir, train_fraction=0.8,
+                channel_grid_interval_seconds={"channel_70": 30, "channel_71": 90},
+            ),
+        )
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        assert not [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+
+
 class TestSmallTaskCpus:
     """Packing headroom for the Ray fan-out — docs/plans/023 stage .3.
 

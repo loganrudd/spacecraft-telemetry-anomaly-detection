@@ -326,11 +326,37 @@ def write_group_map(
     grouping that already carries meaningful names (--groups-file).
 
     Returns the path written, for the caller's report.
+
+    Raises:
+        SystemExit: If any group's members resolve to different
+            ``settings.preprocess.grid_interval_for`` rates. A joint model is
+            bounded by its COARSEST member, so installing a group whose rates
+            disagree would silently cap the group at a rate nobody chose for
+            it — a one-character typo in CHANNEL_GRIDS several stages upstream
+            of the symptom. Fail here, where the mismatch is one line to read,
+            not downstream where it looks like a fragmentation finding.
     """
     if names is not None and len(names) != len(families):
         raise ValueError(
             f"names has {len(names)} entries but there are {len(families)} groups"
         )
+
+    mismatched = {
+        tuple(family): rates
+        for family in families
+        if len(family) > 1
+        for rates in [{ch: settings.preprocess.grid_interval_for(ch) for ch in family}]
+        if len(set(rates.values())) > 1
+    }
+    if mismatched:
+        detail = "; ".join(f"{list(fam)}: {rates}" for fam, rates in mismatched.items())
+        raise SystemExit(
+            f"--write-groups refused: {len(mismatched)} group(s) have members that "
+            f"resolve to different grid_interval_for rates ({detail}). A joint model "
+            "is bounded by its coarsest member — fix channel_grid_interval_seconds "
+            "(CHANNEL_GRIDS) so every member of a group agrees."
+        )
+
     keep = [
         (name, family)
         for name, family in zip(
