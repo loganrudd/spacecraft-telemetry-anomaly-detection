@@ -8,11 +8,15 @@ pipeline.py handles cross-channel parallelism, so no per-channel grouping is nee
 Parity between the parallel (Ray) and sequential (pandas) code paths is verified
 by tests/preprocess/test_parity.py.
 
-ISS-specific transforms
------------------------
-resample_to_grid    — bin raw irregular ticks onto a regular time grid
-compute_los_mask    — cross-channel Loss-of-Signal detection
+Time-grid and ISS-specific transforms
+--------------------------------------
+resample_to_grid    — bin raw irregular ticks onto a regular time grid. Shared
+                      by both missions (docs/plans/023 stage .3): ISS uses the
+                      dense+ffill default, ESA opts into gap_preserving=True —
+                      see the function's own docstring for the two rules.
+compute_los_mask    — cross-channel Loss-of-Signal detection (ISS-specific)
 augment_with_los    — merge is_los flag into a resampled channel DataFrame
+                      (ISS-specific)
 
 All three are pure pandas with no ISS-specific imports so the Phase 17 live pump
 can import them from this module without dragging in ingest or collector code.

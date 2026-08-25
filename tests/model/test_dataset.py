@@ -921,11 +921,6 @@ class TestMultivariateGroupSizeGuard:
         values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
         assert values.shape == (3, 41)
 
-    def test_limit_is_overridable_for_a_deliberate_large_group(self) -> None:
-        per_channel, names = self._channels(3)
-        with pytest.raises(ValueError, match="above the max_channels=2"):
-            _align_multi_channel(per_channel, names, max_channels=2)
-
     def test_six_channel_path_is_untouched(self) -> None:
         """The size plan 021 actually runs — pinned so tightening the limit
         later cannot silently break the published configuration."""

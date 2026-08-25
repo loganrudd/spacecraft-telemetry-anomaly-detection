@@ -311,7 +311,6 @@ def _align_multi_channel(
         ]
     ],
     channels: list[str],
-    max_channels: int | None = None,
     max_bytes: int = _MAX_MULTIVARIATE_BYTES,
 ) -> tuple[
     np.ndarray[Any, np.dtype[np.float32]] | None,
@@ -347,24 +346,19 @@ def _align_multi_channel(
         timestamps:  (N,) datetime64[ns] — the aligned, sorted timestamp index.
 
     Args:
-        max_channels: Optional hard cap on group size. ``None`` (the default)
-            applies no count limit — see ``max_bytes``, which bounds the thing
-            that actually costs memory. Pass a number only to enforce a
-            deliberate count ceiling of your own.
         max_bytes: Refuse groups whose dense materialisation is estimated above
             this — see _MAX_MULTIVARIATE_BYTES for the arithmetic. An OOM on a
             spot worker is an expensive and confusing way to discover the
             limit; this fails immediately with the estimate that triggered it.
+            (An earlier channel-COUNT cap lived here too; retired in favour of
+            this byte estimate, see _MAX_MULTIVARIATE_BYTES's own comment for
+            why a count proxy stopped being the right question once a common
+            time grid could change a group's row count by 10x+.)
 
     Raises:
-        ValueError: If the group exceeds ``max_channels`` or ``max_bytes``, or
-            the intersection is empty.
+        ValueError: If the group exceeds ``max_bytes``, or the intersection
+            is empty.
     """
-    if max_channels is not None and len(channels) > max_channels:
-        raise ValueError(
-            f"Multivariate group has {len(channels)} channels, above the "
-            f"max_channels={max_channels} limit."
-        )
 
     indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
     has_values = per_channel[0][0] is not None
@@ -424,15 +418,23 @@ def _align_multi_channel(
     # gap detection sliced every other channel's segments too. Logging both
     # numbers here, not just alignment loss, is what makes that visible on
     # every training run rather than only when a script goes looking for it.
-    loss_frac = 1.0 - n_aligned / min_channel_rows
+    #
+    # Named min_member_loss_frac (docs/reviews/023-channel-time-grid.md 6.2),
+    # not loss_frac, to distinguish it from scripts/check_channel_group.py's
+    # alignment_loss_frac: that one divides by the LARGEST member's row count
+    # (how much of the biggest member's own data the join throws away), this
+    # one by the SMALLEST (how much even the best-case member loses) — the
+    # two report a group's viability from opposite ends and are not
+    # interchangeable despite the similar name.
+    min_member_loss_frac = 1.0 - n_aligned / min_channel_rows
     seg_lengths = np.bincount(joint_segment_ids)
-    log_fn = log.warning if loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
+    log_fn = log.warning if min_member_loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
     log_fn(
         "model.dataset.multichannel_align",
         channels=channels,
         n_aligned=n_aligned,
         min_channel_rows=min_channel_rows,
-        loss_frac=round(loss_frac, 4),
+        min_member_loss_frac=round(min_member_loss_frac, 4),
         n_joint_segments=int(seg_lengths.size),
         max_joint_segment_len=int(seg_lengths.max()),
     )

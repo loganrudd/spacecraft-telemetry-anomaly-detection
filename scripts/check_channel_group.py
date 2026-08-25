@@ -172,7 +172,11 @@ def check_group(
         )
 
     n_aligned = len(timestamps)
-    loss_frac = 1.0 - (n_aligned / max_rows) if max_rows else 0.0
+    # Denominator is the LARGEST member's row count (docs/reviews/023-channel
+    # -time-grid.md 6.2) — see model.dataset._align_multi_channel's
+    # min_member_loss_frac for the complementary smallest-member view logged
+    # during training; the two are not the same metric despite the similar name.
+    max_member_loss_frac = 1.0 - (n_aligned / max_rows) if max_rows else 0.0
 
     seg_lengths = np.bincount(joint_segment_ids)
     span = window_span(settings.model)
@@ -182,7 +186,7 @@ def check_group(
         channels=channels,
         per_channel_rows=per_channel_rows,
         n_aligned=n_aligned,
-        alignment_loss_frac=loss_frac,
+        alignment_loss_frac=max_member_loss_frac,
         n_joint_segments=int(seg_lengths.size),
         max_joint_segment_len=int(seg_lengths.max()),
         joint_windows=joint_windows,
