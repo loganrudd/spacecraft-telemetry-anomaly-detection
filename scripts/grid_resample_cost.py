@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -118,9 +119,18 @@ def _segment_bucketed(
 
 
 # Memo for _native_timestamps. Keyed on everything that selects a partition, so
-# two missions/variants/splits never collide. Process-lifetime: this is a
-# one-shot measurement script, and the underlying Parquet cannot change under it.
-_TIMESTAMP_CACHE: dict[tuple[str, str, str, str, str | None], pd.DatetimeIndex] = {}
+# two missions/variants/splits never collide. LRU-bounded rather than
+# process-lifetime unbounded: both 023 scripts advertise "base install only" —
+# laptop use — and each entry holds a full channel's native timestamp array
+# (measured ~1.4GB total for ESA-Mission1's 62 channels held at once). A
+# --groups-file run over --enumerate-families output can touch every channel
+# in a mission, so an unbounded cache scales with the mission, not the
+# channels actually needed at once; capping trades a possible re-read (a GCS
+# round trip) for a fixed memory ceiling.
+_TIMESTAMP_CACHE_MAX_ENTRIES = 16
+_TIMESTAMP_CACHE: OrderedDict[tuple[str, str, str, str, str | None], pd.DatetimeIndex] = (
+    OrderedDict()
+)
 
 
 def _native_timestamps(
@@ -134,15 +144,21 @@ def _native_timestamps(
     build_cost_table evaluates every candidate rate over the same channels, and
     --groups-file evaluates many groups; a 29-channel family re-read once per
     rate is a few hundred GCS round trips for data that cannot have changed
-    between them.
+    between them. LRU-bounded at _TIMESTAMP_CACHE_MAX_ENTRIES — see that
+    constant's comment.
     """
     processed_dir = str(settings.preprocess.processed_data_dir)
     key = (processed_dir, mission, channel, split, settings.variant)
-    if key not in _TIMESTAMP_CACHE:
-        _seg, _anom, ts = load_series_metadata(
-            processed_dir, mission, channel, split, variant=settings.variant
-        )
-        _TIMESTAMP_CACHE[key] = pd.DatetimeIndex(ts)
+    if key in _TIMESTAMP_CACHE:
+        _TIMESTAMP_CACHE.move_to_end(key)
+        return _TIMESTAMP_CACHE[key]
+
+    _seg, _anom, ts = load_series_metadata(
+        processed_dir, mission, channel, split, variant=settings.variant
+    )
+    _TIMESTAMP_CACHE[key] = pd.DatetimeIndex(ts)
+    if len(_TIMESTAMP_CACHE) > _TIMESTAMP_CACHE_MAX_ENTRIES:
+        _TIMESTAMP_CACHE.popitem(last=False)
     return _TIMESTAMP_CACHE[key]
 
 

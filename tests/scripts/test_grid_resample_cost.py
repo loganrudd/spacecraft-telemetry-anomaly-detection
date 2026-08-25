@@ -357,3 +357,59 @@ def test_native_timestamps_reads_each_channel_once(
         script_module.measure_resampled(settings, _MISSION, ["channel_a"], rate)
 
     assert calls == ["channel_a"]
+
+
+def test_native_timestamps_cache_is_lru_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    # docs/reviews/023-channel-time-grid.md P3: the cache is bounded, so
+    # touching more distinct channels than the cap evicts the oldest and a
+    # later re-read of it is a real cache miss, not a bug.
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    n_channels = script_module._TIMESTAMP_CACHE_MAX_ENTRIES + 1
+    channel_names = [f"channel_{i}" for i in range(n_channels)]
+    for ch in channel_names:
+        _write_channel(processed_dir, _MISSION, ch, "train", ts, [0] * 20)
+    script_module._TIMESTAMP_CACHE.clear()
+
+    settings = _settings(processed_dir, window_size=5)
+    for ch in channel_names:
+        script_module._native_timestamps(settings, _MISSION, ch, "train")
+
+    assert len(script_module._TIMESTAMP_CACHE) == script_module._TIMESTAMP_CACHE_MAX_ENTRIES
+    key0 = (str(processed_dir), _MISSION, channel_names[0], "train", None)
+    assert key0 not in script_module._TIMESTAMP_CACHE  # oldest entry evicted
+    key_last = (str(processed_dir), _MISSION, channel_names[-1], "train", None)
+    assert key_last in script_module._TIMESTAMP_CACHE  # most recent survives
+
+
+def test_native_timestamps_reaccess_moves_entry_to_the_front(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_module: types.ModuleType,
+) -> None:
+    # Re-reading an already-cached channel must count as a "recent" access
+    # (move-to-end), not leave it as the next eviction candidate.
+    processed_dir = tmp_path / "processed"
+    ts = list(range(0, 20 * 30, 30))
+    cap = script_module._TIMESTAMP_CACHE_MAX_ENTRIES
+    channel_names = [f"channel_{i}" for i in range(cap + 1)]
+    for ch in channel_names:
+        _write_channel(processed_dir, _MISSION, ch, "train", ts, [0] * 20)
+    script_module._TIMESTAMP_CACHE.clear()
+
+    settings = _settings(processed_dir, window_size=5)
+    for ch in channel_names[:cap]:
+        script_module._native_timestamps(settings, _MISSION, ch, "train")
+    # Touch channel_0 again — it should no longer be the eviction candidate.
+    script_module._native_timestamps(settings, _MISSION, channel_names[0], "train")
+    # One more distinct channel forces an eviction.
+    script_module._native_timestamps(settings, _MISSION, channel_names[cap], "train")
+
+    key0 = (str(processed_dir), _MISSION, channel_names[0], "train", None)
+    key1 = (str(processed_dir), _MISSION, channel_names[1], "train", None)
+    assert key0 in script_module._TIMESTAMP_CACHE  # re-touched, survived
+    assert key1 not in script_module._TIMESTAMP_CACHE  # least-recently-used, evicted
