@@ -66,3 +66,47 @@ def test_parallel_matches_sequential(settings, ray_local, tmp_path) -> None:
         (par_out / "ESA-Mission1" / "normalization_params.json").read_text()
     )
     assert seq_params == par_params
+
+
+@pytest.mark.slow
+def test_parallel_matches_sequential_with_grid(pipeline_input_dir, ray_local, tmp_path) -> None:
+    """docs/reviews/023-channel-time-grid.md T1: grid+Ray was untested by
+    construction — the settings.preprocess.model_copy(...) reconstruction
+    above rebuilds a fresh PreprocessingConfig from named fields only, so a
+    grid_interval_seconds set on the input settings never reached the
+    parallel run at all. This test carries the grid fields through both arms
+    from the start rather than reconstructing settings mid-test.
+    """
+    from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+    def _grid_settings(out_dir: Path) -> Settings:
+        return Settings(
+            data=DataConfig(sample_data_dir=pipeline_input_dir),
+            preprocess=PreprocessingConfig(
+                processed_data_dir=out_dir, train_fraction=0.8, grid_interval_seconds=30,
+            ),
+        )
+
+    seq_out = tmp_path / "seq_output"
+    seq_out.mkdir()
+    seq_summary = run_preprocessing(_grid_settings(seq_out), "ESA-Mission1", parallel=False)
+
+    par_out = tmp_path / "par_output"
+    par_out.mkdir()
+    par_summary = run_preprocessing(_grid_settings(par_out), "ESA-Mission1", parallel=True)
+
+    assert seq_summary == par_summary
+
+    for split in ("train", "test"):
+        seq_df = _read_sorted(seq_out, "ESA-Mission1", split, "channel_1")
+        par_df = _read_sorted(par_out, "ESA-Mission1", split, "channel_1")
+        pd.testing.assert_frame_equal(seq_df, par_df, check_like=False)
+        # Confirm the grid actually applied on both arms, not just that they
+        # agree with each other (they'd also agree if both silently ignored it).
+        epoch = seq_df["telemetry_timestamp"] - pd.Timestamp("1970-01-01", tz="UTC")
+        epoch_s = epoch.dt.total_seconds()
+        assert (epoch_s % 30 == 0).all()
+
+    seq_params = json.loads((seq_out / "ESA-Mission1" / "normalization_params.json").read_text())
+    par_params = json.loads((par_out / "ESA-Mission1" / "normalization_params.json").read_text())
+    assert seq_params == par_params

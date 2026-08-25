@@ -599,3 +599,89 @@ class TestSmallTaskCpus:
 
         cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_99": 30})
         assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 1
+
+
+class TestPackingWiring:
+    """docs/reviews/023-channel-time-grid.md T1: small_task_cpus is pure and
+    tested above, but nothing asserted it actually reaches
+    _preprocess_channel_remote.options(num_cpus=...) — the grid path never
+    ran through Ray at all in this suite. Monkeypatches .options/ray.put/
+    ray.get so this runs with no Ray cluster, per the plan's own framing.
+    """
+
+    def _run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        *, grid_interval_seconds: int | None, large_channels: set[str],
+    ) -> dict[str, int]:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+        from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+        data_dir = tmp_path / "data"
+        channels_dir = data_dir / "ESA-Mission1" / "channels"
+        channels_dir.mkdir(parents=True)
+        channel_names = ["channel_small_a", "channel_small_b", "channel_large"]
+        for name in channel_names:
+            # A "large" channel's stat() lookup deliberately fails (no file
+            # written) — _run_parallel's except-fallback treats an unknown
+            # size as large ("unknown -> conservative/safe default"), which
+            # exercises is_large=True without writing a real 150MB fixture.
+            if name not in large_channels:
+                (channels_dir / f"{name}.parquet").write_bytes(b"x")
+
+        recorded: dict[str, int] = {}
+
+        class _FakeTaskRecorder:
+            # .options() itself doesn't know which channel it's for — the
+            # channel arrives as a positional arg at the .remote(...) call
+            # site, so recording happens there instead.
+            def __init__(self, num_cpus: int) -> None:
+                self._num_cpus = num_cpus
+
+            def remote(
+                self, settings_ref: object, mission: str, channel: str, *args: object,
+            ) -> str:
+                recorded[channel] = self._num_cpus
+                return channel
+
+        def fake_options(*, num_cpus: int) -> _FakeTaskRecorder:
+            return _FakeTaskRecorder(num_cpus)
+
+        monkeypatch.setattr(_pipeline.ray, "put", lambda x: x)
+        monkeypatch.setattr(_pipeline.ray, "get", lambda futures: [
+            {"channel_id": f, "rows_in": 0, "train_rows": 0, "test_rows": 0, "params": {}}
+            for f in futures
+        ])
+        monkeypatch.setattr(_pipeline._preprocess_channel_remote, "options", fake_options)
+
+        s = Settings(
+            data=DataConfig(sample_data_dir=data_dir),
+            preprocess=PreprocessingConfig(
+                processed_data_dir=tmp_path / "out",
+                grid_interval_seconds=grid_interval_seconds,
+            ),
+        )
+        _pipeline._run_parallel(
+            s, "ESA-Mission1", channel_names,
+            tmp_path / "out" / "train", tmp_path / "out" / "test", None,
+        )
+        return recorded
+
+    def test_native_large_gets_four_small_gets_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded = self._run(
+            tmp_path, monkeypatch,
+            grid_interval_seconds=None, large_channels={"channel_large"},
+        )
+        assert recorded == {"channel_small_a": 1, "channel_small_b": 1, "channel_large": 4}
+
+    def test_gridded_large_still_gets_four_small_gets_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A4: large channels have num_cpus=4 regardless of small_task_cpus —
+        # resampling does not change their packing, only small channels'.
+        recorded = self._run(
+            tmp_path, monkeypatch,
+            grid_interval_seconds=30, large_channels={"channel_large"},
+        )
+        assert recorded == {"channel_small_a": 2, "channel_small_b": 2, "channel_large": 4}
