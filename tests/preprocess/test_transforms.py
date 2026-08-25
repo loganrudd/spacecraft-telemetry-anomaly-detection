@@ -611,3 +611,57 @@ class TestResampleToGridGapPreserving:
         assert len(result) == 10
         diffs = result["telemetry_timestamp"].diff().iloc[1:].dt.total_seconds()
         assert (diffs == 90.0).all()
+
+
+# ---------------------------------------------------------------------------
+# resample_to_grid + label_timesteps interaction — docs/reviews/023-review B3/4.1
+#
+# label_timesteps runs on the GRIDDED rows, whose timestamps are bucket
+# floors, not native tick times. A labeled interval that spans several
+# buckets survives; one narrower than a single bucket, and never containing a
+# bucket floor, can vanish even though it genuinely overlaps ticks the
+# channel recorded. Every grid test elsewhere in this suite runs with
+# labels_df=None, so this is the first to exercise both together.
+# ---------------------------------------------------------------------------
+
+
+def _labels(rows: list[tuple[str, str, float, float]]) -> pd.DataFrame:
+    """labels_df fixture: (anomaly_id, channel_id, start_offset_s, end_offset_s)."""
+    base = pd.Timestamp("2000-01-01", tz="UTC")
+    return pd.DataFrame(
+        {
+            "anomaly_id": [r[0] for r in rows],
+            "channel_id": [r[1] for r in rows],
+            "start_time": [base + pd.Timedelta(seconds=r[2]) for r in rows],
+            "end_time": [base + pd.Timedelta(seconds=r[3]) for r in rows],
+        }
+    )
+
+
+class TestGridLabelInteraction:
+    def test_interval_spanning_several_buckets_survives(self) -> None:
+        # One tick per 30s bucket across [0, 90) — the interval exactly
+        # spans three buckets, and all three carry a bucket-floor timestamp
+        # the half-open interval contains.
+        gridded = resample_to_grid(
+            _ticks([0.0, 30.0, 60.0], [1.0, 2.0, 3.0]),
+            "channel_1", "ESA-Mission1", 30, gap_preserving=True,
+        )
+        labeled = label_timesteps(gridded, _labels([("id_1", "channel_1", 0.0, 90.0)]))
+        assert labeled["is_anomaly"].tolist() == [True, True, True]
+
+    def test_sub_grid_interval_can_vanish(self) -> None:
+        # Two native ticks land in the same 30s bucket (floor=0): one at t=0,
+        # one at t=20 — a genuinely recorded anomalous reading. The interval
+        # [15, 25) covers that t=20 tick, but the bucketed row's timestamp is
+        # the bucket FLOOR (0), which the half-open interval does not
+        # contain — the anomaly is lost by the grid, not by label_timesteps.
+        ticks = _ticks([0.0, 20.0], [1.0, 2.0])
+        assert ((ticks["telemetry_timestamp"] - pd.Timestamp("2000-01-01", tz="UTC"))
+                .dt.total_seconds() == 20.0).any()  # the t=20 tick is real
+
+        gridded = resample_to_grid(ticks, "channel_1", "ESA-Mission1", 30, gap_preserving=True)
+        assert len(gridded) == 1  # both ticks landed in the same bucket
+
+        labeled = label_timesteps(gridded, _labels([("id_1", "channel_1", 15.0, 25.0)]))
+        assert labeled["is_anomaly"].tolist() == [False]

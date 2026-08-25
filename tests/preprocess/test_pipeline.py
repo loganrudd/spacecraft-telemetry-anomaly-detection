@@ -326,6 +326,140 @@ class TestRunPreprocessingTimeGrid:
         assert len(common) >= min(len(a), len(b)) - 1
 
 
+# ---------------------------------------------------------------------------
+# Grid + labels — docs/reviews/023-channel-time-grid.md B3/4.1, 4.2
+#
+# Every grid test above runs with labels_df=None; the README's F0.5 numbers
+# all depend on the labeling branch, which has never been exercised together
+# with a grid until here.
+# ---------------------------------------------------------------------------
+
+
+def _write_channel_with_labels(
+    base: Path,
+    channel: str,
+    offsets_s: list[float],
+    values: list[float],
+    label_rows: list[tuple[str, float, float]],
+) -> Path:
+    """{base}/input/ESA-Mission1/channels/{channel}.parquet + labels.csv.
+
+    label_rows: (anomaly_id, start_offset_s, end_offset_s), same channel.
+    """
+    mission = "ESA-Mission1"
+    channels_dir = base / "input" / mission / "channels"
+    channels_dir.mkdir(parents=True, exist_ok=True)
+    start = pd.Timestamp("2000-01-01", tz="UTC")
+    idx = pd.DatetimeIndex(
+        [start + pd.Timedelta(seconds=o) for o in offsets_s], name="datetime"
+    ).as_unit("us")
+    pd.DataFrame(
+        {channel: pd.array(values, dtype="float32")}, index=idx
+    ).to_parquet(channels_dir / f"{channel}.parquet")
+
+    pd.DataFrame(
+        {
+            "ID": [r[0] for r in label_rows],
+            "Channel": [channel] * len(label_rows),
+            "StartTime": [(start + pd.Timedelta(seconds=r[1])).isoformat().replace("+00:00", "Z")
+                          for r in label_rows],
+            "EndTime": [(start + pd.Timedelta(seconds=r[2])).isoformat().replace("+00:00", "Z")
+                        for r in label_rows],
+        }
+    ).to_csv(base / "input" / mission / "labels.csv", index=False)
+    return base / "input"
+
+
+class TestGridLabelIntegrity:
+    def test_interval_spanning_several_buckets_survives_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        # Ticks exactly on the 30s grid from t=0 to t=600 (exclusive); a label
+        # interval [300, 600) spans 10 buckets, all of which carry a tick.
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [30.0 * i for i in range(20)], [1.0] * 20,
+            [("id_1", 300.0, 600.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        train = _read_partition(out_dir, "ESA-Mission1", "train", "channel_1")
+        test = _read_partition(out_dir, "ESA-Mission1", "test", "channel_1")
+        combined = pd.concat([train, test])
+        assert int(combined["is_anomaly"].sum()) == 10
+
+    def test_sub_grid_interval_loss_is_logged(self, tmp_path: Path, monkeypatch) -> None:
+        # Two ticks share bucket floor=0 (t=0, t=20); the label interval
+        # [15, 25) covers the real t=20 tick but not the bucket-floor
+        # timestamp, so the grid loses it — 4.2 must warn, not silently
+        # produce a better-looking F0.5.
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def info(self, event: str, **kwargs: object) -> None:
+                pass
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+        monkeypatch.setattr(_pipeline, "log", _RecordingLogger())
+
+        # Padding ticks (t=30..600, one per bucket) give the series enough
+        # rows for a non-empty train/test split — the bucket-0 pair (t=0,
+        # t=20) is what exercises the sub-grid loss, unrelated to the split.
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [0.0, 20.0] + [30.0 * i for i in range(1, 21)],
+            [1.0, 2.0] + [1.0] * 20,
+            [("id_1", 15.0, 25.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        lost = [r for r in recorded if r[0] == "pipeline.channel.label_interval_lost"]
+        assert len(lost) == 1, f"expected exactly one warning, got {recorded}"
+        _, fields = lost[0]
+        assert fields["channel_id"] == "channel_1"
+        assert fields["n_lost"] == 1
+        assert fields["n_labels"] == 1
+
+    def test_no_warning_when_every_interval_survives(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def info(self, event: str, **kwargs: object) -> None:
+                pass
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+        monkeypatch.setattr(_pipeline, "log", _RecordingLogger())
+
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [30.0 * i for i in range(20)], [1.0] * 20,
+            [("id_1", 300.0, 600.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        lost = [r for r in recorded if r[0] == "pipeline.channel.label_interval_lost"]
+        assert lost == []
+
+
 class TestGroupGridRateMismatchWarning:
     """docs/reviews/023-channel-time-grid.md item A3.
 

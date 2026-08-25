@@ -60,6 +60,47 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _log_label_coverage(labeled: pd.DataFrame, labels_df: pd.DataFrame, channel: str) -> None:
+    """Log n_anomaly_rows and warn about label intervals that map to zero rows.
+
+    Observability only (docs/reviews/023-channel-time-grid.md, B3/4.2) — does
+    not change label_timesteps' half-open contract. A grid can make a real,
+    sub-grid-interval anomaly vanish: the grid row's timestamp is the bucket
+    FLOOR, not any native tick's timestamp, so a narrow interval that never
+    contains a bucket floor produces zero rows even though it genuinely
+    overlaps ticks the channel recorded.
+
+    Point labels (start == end) are excluded — label_timesteps widens those
+    internally (median-interval half-width), and re-deriving that same
+    widening here would duplicate logic this function has no need to know.
+    """
+    is_anomaly = labeled["is_anomaly"]
+    n_anomaly_rows = int(is_anomaly.sum())
+    log.info("pipeline.channel.n_anomaly_rows", channel_id=channel, n_anomaly_rows=n_anomaly_rows)
+
+    channel_labels = labels_df[labels_df["channel_id"] == channel]
+    if channel_labels.empty:
+        return
+
+    ts = labeled["telemetry_timestamp"]
+    span_start, span_end = ts.min(), ts.max()
+    lost_intervals = 0
+    for _, row in channel_labels.iterrows():
+        start, end = row["start_time"], row["end_time"]
+        if start == end or end <= span_start or start > span_end:
+            continue
+        if not ((ts >= start) & (ts < end) & is_anomaly).any():
+            lost_intervals += 1
+
+    if lost_intervals:
+        log.warning(
+            "pipeline.channel.label_interval_lost",
+            channel_id=channel,
+            n_lost=lost_intervals,
+            n_labels=len(channel_labels),
+        )
+
+
 def _preprocess_channel(
     settings: Settings,
     mission: str,
@@ -102,6 +143,7 @@ def _preprocess_channel(
 
     if labels_df is not None:
         labeled = label_timesteps(normalized, labels_df)
+        _log_label_coverage(labeled, labels_df, channel)
     else:
         labeled = normalized.copy()
         labeled["is_anomaly"] = False
