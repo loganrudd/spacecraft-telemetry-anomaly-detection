@@ -8,11 +8,15 @@ pipeline.py handles cross-channel parallelism, so no per-channel grouping is nee
 Parity between the parallel (Ray) and sequential (pandas) code paths is verified
 by tests/preprocess/test_parity.py.
 
-ISS-specific transforms
------------------------
-resample_to_grid    — bin raw irregular ticks onto a regular time grid
-compute_los_mask    — cross-channel Loss-of-Signal detection
+Time-grid and ISS-specific transforms
+--------------------------------------
+resample_to_grid    — bin raw irregular ticks onto a regular time grid. Shared
+                      by both missions (docs/plans/023 stage .3): ISS uses the
+                      dense+ffill default, ESA opts into gap_preserving=True —
+                      see the function's own docstring for the two rules.
+compute_los_mask    — cross-channel Loss-of-Signal detection (ISS-specific)
 augment_with_los    — merge is_los flag into a resampled channel DataFrame
+                      (ISS-specific)
 
 All three are pure pandas with no ISS-specific imports so the Phase 17 live pump
 can import them from this module without dragging in ingest or collector code.
@@ -260,7 +264,7 @@ def label_timesteps(df: pd.DataFrame, labels_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# ISS-specific transforms
+# Time-grid transforms (ISS by construction; ESA opt-in — plan 023 stage .3)
 # ---------------------------------------------------------------------------
 
 
@@ -269,16 +273,15 @@ def resample_to_grid(
     channel_id: str,
     mission_id: str,
     grid_interval_seconds: int = 30,
+    gap_preserving: bool = False,
 ) -> pd.DataFrame:
-    """Resample raw irregular ISS ticks to a regular time grid.
+    """Resample irregular ticks onto a regular time grid.
 
-    Takes the raw tick DataFrame produced by ``read_iss_ticks`` (which has
-    event-driven, variable-cadence rows) and bins it onto a uniform grid by:
+    Takes a tick DataFrame with event-driven, variable-cadence rows and bins it
+    onto a uniform grid by:
       1. Setting ``telemetry_timestamp`` as a DatetimeIndex.
       2. Resampling with mean aggregation per bucket.
-      3. Forward-filling sparse buckets (P4000001 power-voltage has p90=40s
-         between ticks, so occasional 30s buckets receive no ticks and are
-         filled from the previous value).
+      3. Filling buckets that received no tick — see ``gap_preserving``.
 
     The output column contract is identical to ``read_channel()`` for ESA:
         telemetry_timestamp  datetime64[us, UTC]
@@ -289,30 +292,79 @@ def resample_to_grid(
     This means all downstream transforms (handle_nulls, detect_gaps, normalize,
     label_timesteps, temporal_train_test_split) accept the output unchanged.
 
+    Why a common grid at all
+    ------------------------
+    A multivariate model needs its member channels to share timestamps —
+    ``model.dataset._align_multi_channel`` takes a strict intersection. ISS gets
+    that by construction. ESA channels each carry their own sampling phase and
+    rate, so two channels on the same 30 s cadence 16 s out of phase share *no*
+    timestamps at all, and a group whose members' native gap boundaries disagree
+    shatters into unusably short joint segments (docs/plans/023, stage .2).
+
+    Dense vs gap-preserving
+    -----------------------
+    ``gap_preserving=False`` (default, the ISS path) emits **every** bucket
+    between the first and last tick and forward-fills the empty ones. ISS wants
+    that: its only long silences are LOS, which is flagged separately by
+    ``compute_los_mask`` and cut into its own segment downstream, and the live
+    pump depends on this exact behaviour for train/serve parity.
+
+    ``gap_preserving=True`` (the ESA path) keeps only buckets that actually
+    received a native tick. ESA missions contain genuine multi-month outages;
+    under the dense rule ``detect_gaps`` would see an unbroken cadence across
+    them and merge years of disconnected telemetry into one segment. Measured
+    on plan 023's 29-channel family at a 30 s grid, the dense rule reports
+    2,945,402 joint training windows against 981,523 real ones — two thirds
+    fabricated from buckets no channel ever sampled.
+
+    The distinction is a caller's decision, not a mission lookup, so it is an
+    explicit parameter here rather than a second resampler or an ``if mission
+    == "ISS"`` branch. The default preserves ISS behaviour exactly.
+
     Args:
-        ticks_df:              Raw tick DataFrame with columns
-                               [telemetry_timestamp, value, aos_timestamp].
-        channel_id:            ISS PUI string (e.g. "S1000003").
-        mission_id:            Mission name (always "ISS" in practice).
+        ticks_df:              Tick DataFrame with columns
+                               [telemetry_timestamp, value, ...].
+        channel_id:            Channel key (ISS PUI, or ESA "channel_41").
+        mission_id:            Mission name.
         grid_interval_seconds: Grid step in seconds (default 30).
+        gap_preserving:        Drop buckets no tick landed in instead of
+                               forward-filling them (default False).
 
     Returns:
         DataFrame with columns [telemetry_timestamp, value, channel_id, mission_id].
     """
-    df = ticks_df[["telemetry_timestamp", "value"]].copy()
-    df = df.set_index("telemetry_timestamp").sort_index()
+    # No .copy() before set_index: the column selection already yields a new
+    # frame, set_index does not mutate the caller's, and nothing below writes to
+    # df. ESA's largest channels run to tens of millions of rows against a 5.7 GB
+    # worker kill threshold, so a redundant full copy is not free here.
+    df = ticks_df[["telemetry_timestamp", "value"]].set_index("telemetry_timestamp").sort_index()
     rule = f"{grid_interval_seconds}s"
-    resampled = df["value"].resample(rule).mean().ffill()
+    if gap_preserving:
+        # groupby(floor) only ever materialises buckets that received a tick,
+        # unlike resample(rule).mean().dropna() which allocates every bucket
+        # between the first and last tick (including multi-month ESA outages)
+        # before dropping the empty ones — the doubled peak RSS plan 023 measured.
+        # floor() and resample()'s start_day origin agree exactly when
+        # grid_interval_seconds divides 86400 (see test_grid_bucketing_parity.py);
+        # PreprocessingConfig enforces that divisibility so the two never diverge.
+        resampled = df["value"].groupby(df.index.floor(rule)).mean()
+    else:
+        resampled = df["value"].resample(rule).mean().ffill()
     result = resampled.reset_index()
     result.columns = pd.Index(["telemetry_timestamp", "value"])
     result["value"] = result["value"].astype("float32")
-    result["channel_id"] = channel_id
-    result["mission_id"] = mission_id
+    # Categorical rather than a scalar string assignment, matching io.read_channel:
+    # ESA channels reach millions of grid rows, where an object column costs 8
+    # bytes/row per column for a value that is constant by construction.
+    _codes = np.zeros(len(result), dtype=np.int8)
+    result["channel_id"] = pd.Categorical.from_codes(_codes, categories=pd.Index([channel_id]))
+    result["mission_id"] = pd.Categorical.from_codes(_codes, categories=pd.Index([mission_id]))
 
     log.info(
         "resample_to_grid",
         channel_id=channel_id,
         grid_interval_s=grid_interval_seconds,
+        gap_preserving=gap_preserving,
         raw_rows=len(ticks_df),
         grid_rows=len(result),
     )

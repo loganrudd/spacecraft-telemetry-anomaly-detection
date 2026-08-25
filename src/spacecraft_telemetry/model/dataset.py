@@ -228,22 +228,50 @@ def load_series_metadata(
 # that is a finding, not a detail."
 _ALIGNMENT_LOSS_WARN_THRESHOLD = 0.10
 
-# Upper bound on a multivariate group (docs/reviews/021, item A4).
+# Upper bound on a multivariate group's JOIN, not its load (docs/reviews/021,
+# item A4; docs/reviews/023-channel-time-grid.md item A2).
 #
 # _align_multi_channel materialises ALL C channels densely: peak memory is
 # roughly C * N * 17 bytes (float32 values + int32 segment ids + bool flags)
 # plus the DatetimeIndex overhead of the join. Measured ~800 MB for 6 channels
-# x 7.7 M rows, i.e. ~130 MB per channel at ESA-Mission1 scale — so 32
-# channels is already ~4 GB, at the ceiling of a small worker, and passing a
-# whole ~100-channel mission as one group would need ~13 GB.
+# x 7.7 M rows at native ESA-Mission1 scale.
 #
-# Nothing bounded this before. Subsystem-sized groups (6-30 channels, see
-# ray_fanout/tune.py) fit under the limit, so the guard exists to catch the
-# pathological call — a whole mission handed in as one group — rather than to
-# constrain normal use. Note a subsystem at the TOP of that documented range
-# is already near the limit; raise this deliberately (and size the worker to
-# match) rather than by reflex if a legitimate group ever exceeds it.
-_MAX_MULTIVARIATE_CHANNELS = 32
+# This bounds the JOIN's dense copies only — by the time this guard runs,
+# _load_channels_ordered has already read every member channel's full arrays
+# into memory (A2's full pre-load preflight, estimating from Parquet footers
+# before any read, is deferred — see docs/reviews/023-channel-time-grid.md
+# "Deliberately not doing"). So a raise here still means a load already
+# happened; it only prevents the ADDITIONAL C-times-N-times-17-byte copy the
+# join itself would allocate on top of that.
+#
+# This was originally expressed as a CHANNEL COUNT (32), taking N as fixed at
+# native scale. Plan 023 stage .3 broke that proxy: a 30 s common grid cuts N
+# about 11x (7.7 M -> ~680 k rows), so ESA-Mission1's 41-channel subsystem_6
+# costs ~0.44 GB gridded — nine times LESS than the ~3.9 GB the 32-channel
+# limit was calibrated to permit, and less than six native channels cost. A
+# count limit would have rejected it while still waving through a group nine
+# times heavier, which is the wrong question asked confidently.
+#
+# So the bound is now on the estimate itself. C and N are both known before the
+# join, so the guard costs nothing and stays honest under any future change to
+# either. A whole ~100-channel mission at native scale is still caught (~12 GB);
+# the same mission gridded (~1 GB) is correctly allowed — see
+# tests/model/test_dataset.py::TestEstimateAlignBytes, which pins both.
+_MAX_MULTIVARIATE_BYTES = 4 * 1024**3
+
+# float32 value + int32 segment id + bool flag + DatetimeIndex share, per
+# aligned row per channel. See the measurement above.
+_BYTES_PER_ALIGNED_ROW_PER_CHANNEL = 17
+
+
+def _estimate_align_bytes(n_channels: int, n_rows: int) -> int:
+    """Estimated dense-join size for a group, in bytes — see _MAX_MULTIVARIATE_BYTES.
+
+    ``n_rows`` should be the SMALLEST member's row count: the intersection
+    cannot exceed the shortest channel, so this is an upper bound on the
+    join's cost, computable before anything is materialised.
+    """
+    return n_channels * n_rows * _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
 
 
 def _joint_segment_ids(
@@ -276,16 +304,16 @@ def _joint_segment_ids(
 def _align_multi_channel(
     per_channel: list[
         tuple[
-            np.ndarray[Any, np.dtype[np.float32]],
+            np.ndarray[Any, np.dtype[np.float32]] | None,
             np.ndarray[Any, np.dtype[np.int32]],
             np.ndarray[Any, np.dtype[np.bool_]],
             np.ndarray[Any, Any],
         ]
     ],
     channels: list[str],
-    max_channels: int = _MAX_MULTIVARIATE_CHANNELS,
+    max_bytes: int = _MAX_MULTIVARIATE_BYTES,
 ) -> tuple[
-    np.ndarray[Any, np.dtype[np.float32]],
+    np.ndarray[Any, np.dtype[np.float32]] | None,
     np.ndarray[Any, np.dtype[np.int32]],
     np.ndarray[Any, np.dtype[np.bool_]],
     np.ndarray[Any, Any],
@@ -294,40 +322,61 @@ def _align_multi_channel(
 
     Each element of ``per_channel`` is one channel's
     ``(values, segment_ids, is_anomaly, timestamps)`` as returned by
-    ``load_series_parquet``, already sorted by timestamp. The intersection of
-    all channels' timestamps is the defensible default alignment (Design,
+    ``load_series_parquet``, already sorted by timestamp. ``values`` may be
+    ``None`` for every element — the metadata-only callers (docs/reviews/023
+    -channel-time-grid.md P2) have no values column to align and skip
+    materialising one, rather than synthesising a dummy array this function
+    would otherwise copy for nothing. The intersection of all channels'
+    timestamps is the defensible default alignment (Design,
     docs/plans/021-multivariate-telemanom.md) — a row that any channel is
     missing cannot be forecast jointly.
 
+    ``per_channel`` is consumed: each element is released (set to ``None`` in
+    the caller's list) as soon as its column is copied into the aligned
+    output, so peak memory is the aligned arrays plus at most one still-live
+    input channel, not every input channel plus the aligned arrays at once.
+    Callers must not reuse ``per_channel`` after this call.
+
     Returns:
-        values:      (N, C) float32 — column i is channels[i]'s normalized value.
+        values:      (N, C) float32, or None iff every input's values was
+                     None — column i is channels[i]'s normalized value.
         segment_ids: (N,) int32     — joint segment id, see _joint_segment_ids.
         is_anomaly:  (N, C) bool    — per-channel flag, preserved (not OR'd)
                                        so callers can report per-channel recall.
         timestamps:  (N,) datetime64[ns] — the aligned, sorted timestamp index.
 
     Args:
-        max_channels: Refuse groups larger than this — see
-            _MAX_MULTIVARIATE_CHANNELS for the memory arithmetic. An OOM on a
+        max_bytes: Refuse groups whose dense materialisation is estimated above
+            this — see _MAX_MULTIVARIATE_BYTES for the arithmetic. An OOM on a
             spot worker is an expensive and confusing way to discover the
-            limit; this fails immediately with the number that was asked for.
+            limit; this fails immediately with the estimate that triggered it.
+            (An earlier channel-COUNT cap lived here too; retired in favour of
+            this byte estimate, see _MAX_MULTIVARIATE_BYTES's own comment for
+            why a count proxy stopped being the right question once a common
+            time grid could change a group's row count by 10x+.)
 
     Raises:
-        ValueError: If the group exceeds ``max_channels``, or the intersection
+        ValueError: If the group exceeds ``max_bytes``, or the intersection
             is empty.
     """
-    if len(channels) > max_channels:
-        raise ValueError(
-            f"Multivariate group has {len(channels)} channels, above the "
-            f"max_channels={max_channels} limit. _align_multi_channel "
-            "materialises every channel densely (~130 MB per channel at "
-            f"ESA-Mission1 scale), so this group would need roughly "
-            f"{len(channels) * 130 / 1024:.1f} GB and is likely to OOM the "
-            "worker. Group by subsystem rather than passing a whole mission, "
-            "or raise max_channels deliberately and size the worker to match."
-        )
 
     indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
+    has_values = per_channel[0][0] is not None
+
+    # The intersection cannot exceed the shortest member, so this is an upper
+    # bound on the join's cost and is computed before anything is materialised.
+    min_rows = min(len(idx) for idx in indices)
+    est_bytes = _estimate_align_bytes(len(channels), min_rows)
+    if est_bytes > max_bytes:
+        raise ValueError(
+            f"Multivariate group of {len(channels)} channels x "
+            f"{min_rows:,} rows would materialise "
+            f"roughly {est_bytes / 1024**3:.1f} GB densely, above the "
+            f"{max_bytes / 1024**3:.1f} GB limit, and is likely to OOM the "
+            "worker. Split the group, put the mission on a coarser time grid "
+            "(docs/plans/023), or raise max_bytes and size the worker to match."
+        )
+
     common = indices[0]
     for idx in indices[1:]:
         common = common.intersection(idx)
@@ -341,33 +390,56 @@ def _align_multi_channel(
             "align a multivariate window. Check that all channels were "
             "preprocessed over the same time range."
         )
-    loss_frac = 1.0 - n_aligned / min_channel_rows
-    log_fn = log.warning if loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
-    log_fn(
-        "model.dataset.multichannel_align",
-        channels=channels,
-        n_aligned=n_aligned,
-        min_channel_rows=min_channel_rows,
-        loss_frac=round(loss_frac, 4),
-    )
 
     n, c = n_aligned, len(channels)
-    values = np.empty((n, c), dtype=np.float32)
+    values = np.empty((n, c), dtype=np.float32) if has_values else None
     segment_ids_2d = np.empty((n, c), dtype=np.int32)
     is_anomaly = np.empty((n, c), dtype=bool)
-    zipped = zip(per_channel, indices, strict=True)
-    for i, ((vals, seg_ids, is_anom, _ts), idx) in enumerate(zipped):
+    for i, idx in enumerate(indices):
+        vals, seg_ids, is_anom, _ts = per_channel[i]
+        per_channel[i] = None  # type: ignore[call-overload]  # release once copied
         pos = idx.get_indexer(common)
         if (pos < 0).any():
             raise AssertionError(
                 f"common index is not a subset of channel {channels[i]!r}'s "
                 "timestamps — intersection() invariant violated"
             )
-        values[:, i] = vals[pos]
+        if values is not None:
+            assert vals is not None
+            values[:, i] = vals[pos]
         segment_ids_2d[:, i] = seg_ids[pos]
         is_anomaly[:, i] = is_anom[pos]
 
-    return values, _joint_segment_ids(segment_ids_2d), is_anomaly, common.to_numpy()
+    joint_segment_ids = _joint_segment_ids(segment_ids_2d)
+
+    # Fragmentation (many small joint segments) starves windowing as badly as
+    # a low intersection does — plan 023 found a 29-channel family with 100%
+    # row alignment but a 264x drop in joint windows because one channel's
+    # gap detection sliced every other channel's segments too. Logging both
+    # numbers here, not just alignment loss, is what makes that visible on
+    # every training run rather than only when a script goes looking for it.
+    #
+    # Named min_member_loss_frac (docs/reviews/023-channel-time-grid.md 6.2),
+    # not loss_frac, to distinguish it from scripts/check_channel_group.py's
+    # alignment_loss_frac: that one divides by the LARGEST member's row count
+    # (how much of the biggest member's own data the join throws away), this
+    # one by the SMALLEST (how much even the best-case member loses) — the
+    # two report a group's viability from opposite ends and are not
+    # interchangeable despite the similar name.
+    min_member_loss_frac = 1.0 - n_aligned / min_channel_rows
+    seg_lengths = np.bincount(joint_segment_ids)
+    log_fn = log.warning if min_member_loss_frac > _ALIGNMENT_LOSS_WARN_THRESHOLD else log.info
+    log_fn(
+        "model.dataset.multichannel_align",
+        channels=channels,
+        n_aligned=n_aligned,
+        min_channel_rows=min_channel_rows,
+        min_member_loss_frac=round(min_member_loss_frac, 4),
+        n_joint_segments=int(seg_lengths.size),
+        max_joint_segment_len=int(seg_lengths.max()),
+    )
+
+    return values, joint_segment_ids, is_anomaly, common.to_numpy()
 
 
 # Concurrency for per-channel parquet reads (docs/reviews/021, item D2).
@@ -448,7 +520,9 @@ def load_multichannel_series_parquet(
         lambda ch: load_series_parquet(processed_dir, mission, ch, split, variant=variant),
         channels,
     )
-    return _align_multi_channel(per_channel, channels)
+    values, segment_ids, is_anomaly, timestamps = _align_multi_channel(per_channel, channels)
+    assert values is not None  # every element here carries real values, never None
+    return values, segment_ids, is_anomaly, timestamps
 
 
 def load_multichannel_series_metadata(
@@ -476,13 +550,19 @@ def load_multichannel_series_metadata(
         lambda ch: load_series_metadata(processed_dir, mission, ch, split, variant=variant),
         channels,
     )
-    # _align_multi_channel expects a values column; synthesize a dummy one so
-    # the exact same alignment code path (and its logging) is reused rather
-    # than duplicated for the metadata-only case.
-    per_channel = [
-        (np.empty(len(seg_ids), dtype=np.float32), seg_ids, is_anom, ts)
-        for seg_ids, is_anom, ts in per_channel_meta
-    ]
+    # _align_multi_channel accepts values=None for a metadata-only alignment
+    # (docs/reviews/023-channel-time-grid.md P2) — no dummy array to allocate
+    # or copy, unlike the np.empty(...) this used to synthesize per channel
+    # (~110MB for a 41-channel gridded group, ~480MB native) purely so every
+    # element had a values column _align_multi_channel would never read.
+    per_channel: list[
+        tuple[
+            np.ndarray[Any, np.dtype[np.float32]] | None,
+            np.ndarray[Any, np.dtype[np.int32]],
+            np.ndarray[Any, np.dtype[np.bool_]],
+            np.ndarray[Any, Any],
+        ]
+    ] = [(None, seg_ids, is_anom, ts) for seg_ids, is_anom, ts in per_channel_meta]
     _values, segment_ids, is_anomaly, timestamps = _align_multi_channel(per_channel, channels)
     return segment_ids, is_anomaly, timestamps
 

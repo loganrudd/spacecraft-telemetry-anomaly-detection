@@ -12,6 +12,7 @@ from spacecraft_telemetry.preprocess.transforms import (
     handle_nulls,
     label_timesteps,
     normalize,
+    resample_to_grid,
     temporal_train_test_split,
 )
 
@@ -485,3 +486,182 @@ class TestLabelTimesteps:
         )
         out = label_timesteps(df, labels)
         assert not out["is_anomaly"].any()
+
+
+# ---------------------------------------------------------------------------
+# resample_to_grid — gap-preserving (ESA) semantics, docs/plans/023 stage .3
+# ---------------------------------------------------------------------------
+
+
+def _ticks(offsets_s: list[float], values: list[float], start: str = "2000-01-01") -> pd.DataFrame:
+    """Tick DataFrame at explicit second offsets from ``start``."""
+    base = pd.Timestamp(start, tz="UTC")
+    return pd.DataFrame(
+        {
+            "telemetry_timestamp": pd.array(
+                [base + pd.Timedelta(seconds=o) for o in offsets_s],
+                dtype="datetime64[us, UTC]",
+            ),
+            "value": pd.array(values, dtype="float32"),
+        }
+    )
+
+
+class TestResampleToGridGapPreserving:
+    """The ESA arm of the shared transform.
+
+    ESA missions contain genuine multi-month outages. Under the dense+ffill rule
+    (the ISS default) detect_gaps would see an unbroken cadence across them and
+    merge years of disconnected telemetry into one segment, inflating the
+    trainable-window count with rows no channel ever sampled.
+    """
+
+    def test_empty_bucket_is_dropped_not_ffilled(self) -> None:
+        # Ticks at t=0 and t=91: the t=30 and t=60 buckets received nothing.
+        result = resample_to_grid(
+            _ticks([0, 91], [42.0, 99.0]), "channel_1", "ESA-Mission1", 30,
+            gap_preserving=True,
+        )
+        offsets = (
+            result["telemetry_timestamp"] - pd.Timestamp("2000-01-01", tz="UTC")
+        ).dt.total_seconds().tolist()
+        assert offsets == [0.0, 90.0]
+
+    def test_default_is_still_dense_ffill(self) -> None:
+        # Guards ISS parity: the live pump depends on the dense rule for
+        # train/serve skew, so the default must not drift.
+        result = resample_to_grid(_ticks([0, 91], [42.0, 99.0]), "S1000003", "ISS", 30)
+        offsets = (
+            result["telemetry_timestamp"] - pd.Timestamp("2000-01-01", tz="UTC")
+        ).dt.total_seconds().tolist()
+        assert offsets == [0.0, 30.0, 60.0, 90.0]
+        assert float(result["value"].iloc[1]) == pytest.approx(42.0)
+
+    def test_real_outage_survives_as_a_gap(self) -> None:
+        # 10 regular ticks, a 10-day silence, then 10 more. Gap-preserving
+        # bucketing must leave detect_gaps two segments, not one.
+        offsets = [30.0 * i for i in range(10)]
+        offsets += [864000.0 + 30.0 * i for i in range(10)]
+        gridded = resample_to_grid(
+            _ticks(offsets, [1.0] * 20), "channel_1", "ESA-Mission1", 30,
+            gap_preserving=True,
+        )
+        segmented = detect_gaps(gridded, gap_multiplier=3.0)
+        assert segmented["segment_id"].nunique() == 2
+
+    def test_dense_rule_would_erase_that_outage(self) -> None:
+        # The measured failure mode this parameter exists to prevent: the same
+        # input under the ISS rule yields one unbroken segment spanning the
+        # 10-day silence, because every intervening bucket is fabricated.
+        offsets = [30.0 * i for i in range(10)]
+        offsets += [864000.0 + 30.0 * i for i in range(10)]
+        gridded = resample_to_grid(_ticks(offsets, [1.0] * 20), "channel_1", "ESA-Mission1", 30)
+        segmented = detect_gaps(gridded, gap_multiplier=3.0)
+        assert segmented["segment_id"].nunique() == 1
+
+    def test_phase_offset_channels_align_after_bucketing(self) -> None:
+        # The blocker this whole stage exists for (docs/plans/023): two channels
+        # on the same 30s cadence, 16.1s out of phase, share ZERO native
+        # timestamps. A 30s grid puts both into the same buckets.
+        a = _ticks([30.0 * i for i in range(20)], [1.0] * 20)
+        b = _ticks([16.1 + 30.0 * i for i in range(20)], [2.0] * 20)
+        assert (
+            len(
+                pd.DatetimeIndex(a["telemetry_timestamp"]).intersection(
+                    pd.DatetimeIndex(b["telemetry_timestamp"])
+                )
+            )
+            == 0
+        )
+
+        ga = resample_to_grid(a, "channel_70", "ESA-Mission1", 30, gap_preserving=True)
+        gb = resample_to_grid(b, "channel_71", "ESA-Mission1", 30, gap_preserving=True)
+        common = pd.DatetimeIndex(ga["telemetry_timestamp"]).intersection(
+            pd.DatetimeIndex(gb["telemetry_timestamp"])
+        )
+        assert len(common) >= 19
+
+    def test_bucket_value_is_the_mean_of_its_ticks(self) -> None:
+        # Value fidelity: aggregation, not sampling.
+        result = resample_to_grid(
+            _ticks([0, 5, 10], [0.0, 10.0, 20.0]), "channel_1", "ESA-Mission1", 30,
+            gap_preserving=True,
+        )
+        assert len(result) == 1
+        assert float(result["value"].iloc[0]) == pytest.approx(10.0)
+
+    def test_column_contract_unchanged(self) -> None:
+        result = resample_to_grid(
+            _ticks([0, 30], [1.0, 2.0]), "channel_1", "ESA-Mission1", 30, gap_preserving=True
+        )
+        assert list(result.columns) == [
+            "telemetry_timestamp", "value", "channel_id", "mission_id",
+        ]
+        assert result["value"].dtype == "float32"
+        assert str(result["channel_id"].iloc[0]) == "channel_1"
+        assert str(result["mission_id"].iloc[0]) == "ESA-Mission1"
+
+    def test_upsampling_a_slow_channel_invents_nothing(self) -> None:
+        # A 90s-cadence channel on a 30s grid keeps its 90s spacing — the two
+        # empty buckets between ticks are dropped, not filled.
+        result = resample_to_grid(
+            _ticks([90.0 * i for i in range(10)], [1.0] * 10),
+            "channel_1", "ESA-Mission1", 30, gap_preserving=True,
+        )
+        assert len(result) == 10
+        diffs = result["telemetry_timestamp"].diff().iloc[1:].dt.total_seconds()
+        assert (diffs == 90.0).all()
+
+
+# ---------------------------------------------------------------------------
+# resample_to_grid + label_timesteps interaction — docs/reviews/023-review B3/4.1
+#
+# label_timesteps runs on the GRIDDED rows, whose timestamps are bucket
+# floors, not native tick times. A labeled interval that spans several
+# buckets survives; one narrower than a single bucket, and never containing a
+# bucket floor, can vanish even though it genuinely overlaps ticks the
+# channel recorded. Every grid test elsewhere in this suite runs with
+# labels_df=None, so this is the first to exercise both together.
+# ---------------------------------------------------------------------------
+
+
+def _labels(rows: list[tuple[str, str, float, float]]) -> pd.DataFrame:
+    """labels_df fixture: (anomaly_id, channel_id, start_offset_s, end_offset_s)."""
+    base = pd.Timestamp("2000-01-01", tz="UTC")
+    return pd.DataFrame(
+        {
+            "anomaly_id": [r[0] for r in rows],
+            "channel_id": [r[1] for r in rows],
+            "start_time": [base + pd.Timedelta(seconds=r[2]) for r in rows],
+            "end_time": [base + pd.Timedelta(seconds=r[3]) for r in rows],
+        }
+    )
+
+
+class TestGridLabelInteraction:
+    def test_interval_spanning_several_buckets_survives(self) -> None:
+        # One tick per 30s bucket across [0, 90) — the interval exactly
+        # spans three buckets, and all three carry a bucket-floor timestamp
+        # the half-open interval contains.
+        gridded = resample_to_grid(
+            _ticks([0.0, 30.0, 60.0], [1.0, 2.0, 3.0]),
+            "channel_1", "ESA-Mission1", 30, gap_preserving=True,
+        )
+        labeled = label_timesteps(gridded, _labels([("id_1", "channel_1", 0.0, 90.0)]))
+        assert labeled["is_anomaly"].tolist() == [True, True, True]
+
+    def test_sub_grid_interval_can_vanish(self) -> None:
+        # Two native ticks land in the same 30s bucket (floor=0): one at t=0,
+        # one at t=20 — a genuinely recorded anomalous reading. The interval
+        # [15, 25) covers that t=20 tick, but the bucketed row's timestamp is
+        # the bucket FLOOR (0), which the half-open interval does not
+        # contain — the anomaly is lost by the grid, not by label_timesteps.
+        ticks = _ticks([0.0, 20.0], [1.0, 2.0])
+        assert ((ticks["telemetry_timestamp"] - pd.Timestamp("2000-01-01", tz="UTC"))
+                .dt.total_seconds() == 20.0).any()  # the t=20 tick is real
+
+        gridded = resample_to_grid(ticks, "channel_1", "ESA-Mission1", 30, gap_preserving=True)
+        assert len(gridded) == 1  # both ticks landed in the same bucket
+
+        labeled = label_timesteps(gridded, _labels([("id_1", "channel_1", 15.0, 25.0)]))
+        assert labeled["is_anomaly"].tolist() == [False]

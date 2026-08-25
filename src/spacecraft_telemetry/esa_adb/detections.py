@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import load_channel_group_map
 from spacecraft_telemetry.esa_adb.intervals import union as _union
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow, experiment_name
 from spacecraft_telemetry.model.dataset import (
@@ -242,13 +242,22 @@ def _find_multivariate_scoring_run(
     """Locate the scoring Run for a channel scored inside a multivariate group.
 
     A multivariate scoring run deliberately carries no ``channel_id`` tag
-    (model/scoring.py — the run's key is a subsystem, not a real channel), so
+    (model/scoring.py — the run's key is a group, not a real channel), so
     :func:`find_scoring_run` can never match it. This resolves the channel's
-    subsystem, takes the most recent run tagged with it, and — critically —
+    GROUP KEY, takes the most recent run tagged with it, and — critically —
     confirms the channel is actually listed in that run's ``channels`` tag
-    before trusting it: a subsystem name alone does not prove this particular
-    channel was in the scored group, since a narrower channel subset could
-    reuse the same subsystem name.
+    before trusting it: the key alone does not prove this particular channel
+    was in the scored group, since a narrower channel subset could reuse it.
+
+    The lookup uses ``load_channel_group_map`` because the run's ``subsystem``
+    tag holds whatever key the model was scored under — ``channel if
+    is_multivariate`` in model/scoring.py. Since docs/plans/023 stage .4 that
+    is the channel group (``subsystem_6_g09``), not the subsystem
+    (``subsystem_6``). Querying the subsystem matches nothing, every channel
+    resolves to "not scored", and the mission report silently loses its
+    multivariate detections. ``load_channel_group_map`` falls back to the
+    subsystem map for missions with no measured grouping, so the pre-023 path
+    is unchanged.
 
     Mirrors ray_fanout.tune._find_multivariate_scoring_run, which solves the
     identical lookup problem for HPO.
@@ -258,8 +267,8 @@ def _find_multivariate_scoring_run(
     """
     import mlflow
 
-    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    if subsystem is None:
+    group_key = load_channel_group_map(settings, mission).get(channel)
+    if group_key is None:
         return None
     client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
     exp = client.get_experiment_by_name(experiment)
@@ -267,7 +276,7 @@ def _find_multivariate_scoring_run(
         return None
     runs = client.search_runs(
         [exp.experiment_id],
-        filter_string=f"tags.subsystem = '{subsystem}'",
+        filter_string=f"tags.subsystem = '{group_key}'",
         order_by=["attributes.start_time DESC"],
     )
     for run in runs:
@@ -565,6 +574,113 @@ def channel_detection_intervals_from_spec(
         source=f"offline run_id={spec.run_id}",
         metadata=metadata,
     )
+
+
+def load_metadata_matching_runs(
+    settings: Settings,
+    mission: str,
+    channels: list[str],
+    *,
+    tuned: bool,
+    run_map: OfflineRunMap | None = None,
+    group_cache: dict[tuple[str, ...], SeriesMetadata] | None = None,
+) -> dict[str, SeriesMetadata]:
+    """Per-channel test metadata on the index each channel was actually SCORED on.
+
+    A channel scored inside a multivariate group was windowed over the group's
+    JOINT (intersected) timestamp index, and its saved errors.npy has one entry
+    per joint window. Rebuilding its window timestamps from its OWN test
+    partition yields a different count — by exactly the rows the intersection
+    dropped — and ``_intervals_from_arrays`` rejects it with a window-count
+    mismatch that reads like stale data ("Re-run ray score") when nothing is
+    stale at all.
+
+    Grouping is resolved from the channel's ACTUAL scoring run (mirroring
+    :func:`_resolve_scoring_run`'s univariate-then-multivariate lookup and
+    reading the winning run's ``channels`` tag), not from
+    ``load_channel_group_map``. A group map can disagree with a specific run:
+    ``find_scoring_run_and_artifacts`` tries the univariate lookup first, so a
+    tree holding both a univariate and a multivariate arm for the same channel
+    mid-experiment would otherwise get joint metadata against per-channel
+    errors (or vice versa) — the same window-count mismatch this function
+    exists to avoid, just introduced by the metadata side instead of the
+    errors side (docs/reviews/023-channel-time-grid.md finding A1). The run's
+    ``channels`` tag also wins over a WIDER group map entry: a run only ever
+    proves membership for the channels it actually lists.
+
+    ``run_map`` (offline/provenance mode, see esa_adb/offline.py) carries no
+    per-run ``channels`` tag to read — a ``RunSpec`` is deliberately just a
+    pinned artifact path — so that path keeps the ``load_channel_group_map``
+    fallback. An explicit run map is, by construction, pinned to one known
+    configuration, so the tree-holds-both-arms ambiguity this function
+    otherwise resolves does not arise there.
+
+    Call once per untuned/tuned variant — a channel's grouping can legitimately
+    differ between them mid-experiment (that's the mixed state this function
+    must tolerate, not reject) — and share ``group_cache`` across both calls.
+    Groups are looked up by their resolved MEMBER TUPLE (a 1-tuple for an
+    ungrouped channel), so the common case where both variants agree still
+    loads each group's arrays exactly once, preserving the docs/plans/019
+    P2/P3 preload.
+
+    Args:
+        tuned:       Which scoring-run variant to resolve grouping from.
+        run_map:     See above — falls back to the group map when given.
+        group_cache: Shared across the untuned and tuned calls for one report.
+    """
+    from spacecraft_telemetry.model.dataset import (
+        load_multichannel_series_metadata,
+        load_series_metadata,
+    )
+
+    if group_cache is None:
+        group_cache = {}
+
+    members_by_channel: dict[str, list[str]]
+    if run_map is not None:
+        group_of = load_channel_group_map(settings, mission)
+        members_of: dict[str, list[str]] = {}
+        for ch, member_key in sorted(group_of.items()):
+            members_of.setdefault(member_key, []).append(ch)
+        members_by_channel = {
+            channel: members_of.get(group_of.get(channel, ""), [channel])
+            for channel in channels
+        }
+    else:
+        exp = experiment_name(settings.model.model_type, "scoring", mission, settings.variant)
+        members_by_channel = {}
+        for channel in channels:
+            run, is_multivariate = _resolve_scoring_run(
+                settings, mission, exp, channel, tuned=tuned
+            )
+            if not is_multivariate:
+                members_by_channel[channel] = [channel]
+                continue
+            members = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
+            members_by_channel[channel] = members or [channel]
+
+    out: dict[str, SeriesMetadata] = {}
+    for channel in channels:
+        members = members_by_channel[channel]
+        if len(members) <= 1:
+            key: tuple[str, ...] = (channel,)
+            if key not in group_cache:
+                group_cache[key] = load_series_metadata(
+                    settings.preprocess.processed_data_dir, mission, channel, "test",
+                    variant=settings.variant,
+                )
+            out[channel] = group_cache[key]
+            continue
+        key = tuple(members)
+        if key not in group_cache:
+            group_cache[key] = load_multichannel_series_metadata(
+                settings.preprocess.processed_data_dir, mission, members, "test",
+                variant=settings.variant,
+            )
+        seg, is_anom_2d, ts = group_cache[key]
+        out[channel] = (seg, is_anom_2d[:, members.index(channel)], ts)
+    return out
+
 
 
 def per_channel_detection_intervals(

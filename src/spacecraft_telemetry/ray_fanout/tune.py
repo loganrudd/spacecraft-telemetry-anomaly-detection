@@ -70,7 +70,10 @@ from upath import UPath
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import (
+    load_channel_group_map,
+    load_channel_subsystem_map,
+)
 from spacecraft_telemetry.core.paths import output_path
 from spacecraft_telemetry.mlflow_tracking.conventions import (
     common_tags as _common_tags,
@@ -246,22 +249,30 @@ def _find_multivariate_scoring_run(
 
     A multivariate scoring run carries no ``channel_id`` tag (model/scoring.py
     — it isn't a real channel), so ``find_latest_run_for_channel`` can never
-    find it. This resolves the channel's subsystem, finds the latest run
-    tagged with that subsystem, and confirms the channel is actually listed
-    in that run's ``channels`` tag before trusting it — a shared subsystem
-    name alone does not guarantee this exact channel was in the scored
-    group (a different variant, or a narrower channel subset, could reuse
-    the same subsystem name).
+    find it. This resolves the channel's GROUP KEY, finds the latest run
+    tagged with it, and confirms the channel is actually listed in that run's
+    ``channels`` tag before trusting it — a shared key alone does not
+    guarantee this exact channel was in the scored group (a different variant,
+    or a narrower channel subset, could reuse the same key).
+
+    The lookup must use ``load_channel_group_map``, not the subsystem map: the
+    run's ``subsystem`` tag holds whatever key the model was scored under, and
+    since docs/plans/023 stage .4 that is the channel GROUP (e.g.
+    ``subsystem_6_g09``) rather than the subsystem (``subsystem_6``). Asking
+    for the subsystem finds nothing, every channel looks unscored, and the
+    whole HPO sweep is skipped with only a "no errors.npy" note to show for
+    it. ``load_channel_group_map`` falls back to the subsystem map when a
+    mission has no measured grouping, so the pre-023 path is unchanged.
 
     Returns the run, or None if no matching multivariate run exists —
     callers already treat a missing channel as an ordinary "not scored yet"
     case, so this adds no new failure mode.
     """
-    subsystem = load_channel_subsystem_map(settings, mission).get(channel)
-    if subsystem is None:
+    group_key = load_channel_group_map(settings, mission).get(channel)
+    if group_key is None:
         return None
     run = find_latest_run_by_tag(
-        scoring_exp, "subsystem", subsystem, settings.mlflow.tracking_uri, extra_filter
+        scoring_exp, "subsystem", group_key, settings.mlflow.tracking_uri, extra_filter
     )
     if run is None:
         return None
@@ -306,6 +317,58 @@ def _find_channel_errors_run(
     return None
 
 
+def _window_labels_matching_run(
+    settings: Settings,
+    mission: str,
+    channel: str,
+    run: Any,
+    group_cache: dict[tuple[str, ...], Any],
+) -> np.ndarray[Any, np.dtype[np.bool_]]:
+    """Per-window labels built over the SAME index the run's errors were.
+
+    A multivariate scoring run windows over the group's JOINT (intersected)
+    timestamp index, and saves one 1-D error array per member channel on that
+    index. Building this channel's labels from its OWN series instead produces
+    an array of a different length — by exactly however many rows the
+    intersection dropped — and the shape check downstream rejects the channel.
+
+    This stayed invisible until now because the only multivariate group ever
+    tuned (ESA-Mission1 channels 41-46, docs/plans/021) intersects at 100%, so
+    the two indices coincided. Plan 023's groups align at 99.999%, and an
+    18-window difference is enough to fail. scripts/threshold_ceiling.py builds
+    labels the same per-channel way and carries the same latent bug.
+
+    Univariate runs are untouched: no ``channels`` tag means a group of one and
+    the original per-channel call.
+
+    The group's labels are cached because every member of a group would
+    otherwise re-read the whole group's parquet — 7 channels x 2.9M rows, seven
+    times over, for one 7-channel group.
+    """
+    from spacecraft_telemetry.model.dataset import load_window_labels
+
+    group = [c for c in (run.data.tags.get("channels") or "").split(",") if c]
+    if len(group) <= 1:
+        return load_window_labels(settings, mission, channel)
+
+    key = tuple(group)
+    if key not in group_cache:
+        group_settings = settings.model_copy(
+            update={
+                "model": settings.model.model_copy(
+                    update={"input_channels": group, "target_channels": group}
+                )
+            }
+        )
+        # `channel` is ignored when input_channels is set — the group supplies
+        # the members — but pass the run's own key so any log line reads right.
+        group_key = run.data.tags.get("subsystem") or channel
+        group_cache[key] = load_window_labels(group_settings, mission, group_key)
+
+    labels_2d = group_cache[key]
+    return np.asarray(labels_2d[:, group.index(channel)], dtype=bool)
+
+
 def _prepare_channel_data(
     settings: Settings,
     mission: str,
@@ -325,8 +388,7 @@ def _prepare_channel_data(
     labeled anomaly windows across all channels — both cases produce misleading
     F0.5 scores (always 0) that would silently corrupt HPO or final eval.
     """
-    from spacecraft_telemetry.model.dataset import load_window_labels
-
+    _group_label_cache: dict[tuple[str, ...], Any] = {}
     missing_errors: list[str] = []
     shape_mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
     load_failures: list[tuple[str, str]] = []
@@ -356,7 +418,9 @@ def _prepare_channel_data(
 
         errors: np.ndarray[Any, Any] = bytes_to_errors(raw)
         try:
-            labels = load_window_labels(settings, mission, channel)
+            labels = _window_labels_matching_run(
+                settings, mission, channel, _run, _group_label_cache
+            )
         except (FileNotFoundError, OSError, ValueError, RuntimeError) as exc:
             load_failures.append((channel, str(exc)))
             continue

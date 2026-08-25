@@ -612,6 +612,38 @@ def test_align_multi_channel_zero_overlap_raises() -> None:
         _align_multi_channel([ch_a, ch_b], ["a", "b"])
 
 
+def test_align_multi_channel_none_values_returns_none_and_skips_values_array() -> None:
+    """docs/reviews/023-channel-time-grid.md P2: a metadata-only alignment
+    (every element's values is None) must not materialise an (N, C) values
+    array — segment_ids/is_anomaly/timestamps are unaffected."""
+    ts = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ch_a = (None, np.zeros(4, dtype=np.int32), np.zeros(4, dtype=bool), ts)
+    ch_b = (None, np.zeros(4, dtype=np.int32), np.array([False, True, False, False]), ts)
+    values, seg, is_anom, out_ts = _align_multi_channel([ch_a, ch_b], ["a", "b"])
+    assert values is None
+    np.testing.assert_array_equal(is_anom[:, 1], [False, True, False, False])
+    np.testing.assert_array_equal(seg, [0, 0, 0, 0])
+    assert len(out_ts) == 4
+
+
+def test_align_multi_channel_releases_each_channel_as_its_column_is_copied() -> None:
+    """P2: per_channel is consumed — each element is set to None once its
+    column is filled, so peak memory isn't every input channel plus the
+    aligned output arrays held simultaneously."""
+    ts = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ch_a = (
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32), np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool), ts,
+    )
+    ch_b = (
+        np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32), np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool), ts,
+    )
+    per_channel = [ch_a, ch_b]
+    _align_multi_channel(per_channel, ["a", "b"])
+    assert per_channel == [None, None]
+
+
 def test_load_window_labels_from_metadata_matches_the_reading_variant(
     tmp_path: Path,
 ) -> None:
@@ -834,39 +866,60 @@ class TestMultivariateGroupSizeGuard:
     """
 
     @staticmethod
-    def _channels(n: int) -> tuple[list[Any], list[str]]:
-        ts = np.array([0, 60, 120], dtype="datetime64[s]")
+    def _channels(n: int, rows: int = 3) -> tuple[list[Any], list[str]]:
+        ts = (np.arange(rows, dtype="int64") * 60).astype("datetime64[s]")
         one = (
-            np.zeros(3, dtype=np.float32),
-            np.zeros(3, dtype=np.int32),
-            np.zeros(3, dtype=bool),
+            np.zeros(rows, dtype=np.float32),
+            np.zeros(rows, dtype=np.int32),
+            np.zeros(rows, dtype=bool),
             ts,
         )
         return [one] * n, [f"channel_{i}" for i in range(n)]
 
-    def test_group_at_the_limit_is_accepted(self) -> None:
+    @staticmethod
+    def _budget(n: int, rows: int) -> int:
+        from spacecraft_telemetry.model.dataset import _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
+
+        return n * rows * _BYTES_PER_ALIGNED_ROW_PER_CHANNEL
+
+    def test_group_at_the_budget_is_accepted(self) -> None:
         """The boundary is inclusive — a group exactly at the limit must not
         be refused, or the documented maximum is off by one."""
-        from spacecraft_telemetry.model.dataset import _MAX_MULTIVARIATE_CHANNELS
+        per_channel, names = self._channels(4)
+        values, _seg, _is_anom, _ts = _align_multi_channel(
+            per_channel, names, max_bytes=self._budget(4, 3)
+        )
+        assert values.shape == (3, 4)
 
-        per_channel, names = self._channels(_MAX_MULTIVARIATE_CHANNELS)
-        values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
-        assert values.shape == (3, _MAX_MULTIVARIATE_CHANNELS)
-
-    def test_group_above_the_limit_raises_with_the_size_and_the_remedy(self) -> None:
-        from spacecraft_telemetry.model.dataset import _MAX_MULTIVARIATE_CHANNELS
-
-        n = _MAX_MULTIVARIATE_CHANNELS + 1
-        per_channel, names = self._channels(n)
-        with pytest.raises(ValueError, match=rf"{n} channels, above the") as exc:
-            _align_multi_channel(per_channel, names)
+    def test_group_above_the_budget_raises_with_the_estimate_and_the_remedy(self) -> None:
+        per_channel, names = self._channels(4)
+        with pytest.raises(ValueError, match="would materialise") as exc:
+            _align_multi_channel(per_channel, names, max_bytes=self._budget(4, 3) - 1)
         # The message must name the remedy, not just the rule.
-        assert "Group by subsystem" in str(exc.value)
+        assert "Split the group" in str(exc.value)
 
-    def test_limit_is_overridable_for_a_deliberate_large_group(self) -> None:
-        per_channel, names = self._channels(3)
-        with pytest.raises(ValueError, match="above the max_channels=2"):
-            _align_multi_channel(per_channel, names, max_channels=2)
+    def test_budget_follows_row_count_not_just_channel_count(self) -> None:
+        """The reason this guard stopped being a channel count (plan 023 .3).
+
+        Same number of channels, 100x the rows: the first fits and the second
+        does not. A count limit cannot express that, which is how ESA's
+        41-channel subsystem_6 came to be refused at ~0.44 GB gridded while a
+        group nine times heavier was waved through.
+        """
+        budget = self._budget(41, 3)
+        narrow, names = self._channels(41, rows=3)
+        _align_multi_channel(narrow, names, max_bytes=budget)  # fits exactly
+
+        wide, names = self._channels(41, rows=300)
+        with pytest.raises(ValueError, match="would materialise"):
+            _align_multi_channel(wide, names, max_bytes=budget)
+
+    def test_no_count_limit_applies_by_default(self) -> None:
+        """41 channels is ESA-Mission1's real subsystem_6 on the 30 s grid, and
+        it is above the retired 32-channel constant. It must be accepted."""
+        per_channel, names = self._channels(41)
+        values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
+        assert values.shape == (3, 41)
 
     def test_six_channel_path_is_untouched(self) -> None:
         """The size plan 021 actually runs — pinned so tightening the limit
@@ -874,6 +927,33 @@ class TestMultivariateGroupSizeGuard:
         per_channel, names = self._channels(6)
         values, _seg, _is_anom, _ts = _align_multi_channel(per_channel, names)
         assert values.shape == (3, 6)
+
+
+class TestEstimateAlignBytes:
+    """Pins the calibration _MAX_MULTIVARIATE_BYTES's comment claims.
+
+    Every rejection test above passes an explicit max_bytes, so the SHIPPED
+    default constant itself could drift to e.g. 2**60 and the suite would
+    stay green (docs/reviews/023-channel-time-grid.md finding T2). These two
+    assert against the shipped constant directly, using the comment's own
+    ~100-channel native-vs-gridded numbers.
+    """
+
+    def test_a_100_channel_native_mission_is_rejected(self) -> None:
+        from spacecraft_telemetry.model.dataset import (
+            _MAX_MULTIVARIATE_BYTES,
+            _estimate_align_bytes,
+        )
+
+        assert _estimate_align_bytes(100, 7_700_000) > _MAX_MULTIVARIATE_BYTES
+
+    def test_the_same_mission_gridded_is_accepted(self) -> None:
+        from spacecraft_telemetry.model.dataset import (
+            _MAX_MULTIVARIATE_BYTES,
+            _estimate_align_bytes,
+        )
+
+        assert _estimate_align_bytes(100, 680_000) <= _MAX_MULTIVARIATE_BYTES
 
 
 def test_load_multichannel_series_parquet_missing_channel_raises(tmp_path: Path) -> None:

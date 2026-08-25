@@ -20,12 +20,13 @@ score_all_subsystems(settings, mission, channels, *, max_subsystems=None,
                      tuned_configs=None, eval_split="final_portion",
                      data_source="nominal") -> list[dict]
     Multivariate fan-out (docs/plans/021-multivariate-telemanom.md): the same
-    two sweeps, but the Ray task boundary is the SUBSYSTEM, not the channel.
-    Channels are grouped via load_channel_subsystem_map; each task trains/
-    scores one joint model on settings.model.input_channels=<that group>.
+    two sweeps, but the Ray task boundary is the GROUP, not the channel.
+    Channels are grouped via load_channel_group_map — a measured group id where
+    the mission has one (docs/plans/023), else the subsystem name; each task
+    trains/scores one joint model on settings.model.input_channels=<that group>.
     ``channels`` is still the flat input list to group — a channel with no
-    subsystem entry is dropped with a warning, never silently included in
-    the wrong group.
+    entry is dropped with a warning, never silently included in the wrong
+    group.
 
 tuned_configs schema (Phase 5 writes, score_all_channels reads)
 ---------------------------------------------------------------
@@ -52,7 +53,10 @@ from typing import Any
 
 from spacecraft_telemetry.core.config import Settings
 from spacecraft_telemetry.core.logging import get_logger
-from spacecraft_telemetry.core.metadata import load_channel_subsystem_map
+from spacecraft_telemetry.core.metadata import (
+    load_channel_group_map,
+    load_channel_subsystem_map,
+)
 from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 
 log = get_logger(__name__)
@@ -431,32 +435,88 @@ def score_all_channels(
 def _group_channels_by_subsystem(
     settings: Settings, mission: str, channels: list[str]
 ) -> dict[str, list[str]]:
-    """Group ``channels`` by subsystem, preserving each group's order.
+    """Group ``channels`` into multivariate groups, preserving each group's order.
+
+    The grouping key comes from ``load_channel_group_map``: a measured group id
+    when the mission has one (docs/plans/023), otherwise the subsystem name,
+    which is what every mission used before that plan and what ISS still uses.
+    Joint modelling needs members that share a timestamp grid, and that is a
+    property of the data — the natural ESA group crosses subsystem boundaries —
+    so the subsystem name is the fallback, not the definition.
 
     A group's order is the order its members appear in ``channels`` — this
     becomes the model's persisted ``input_channels`` order (model/io.py), so
-    it must be deterministic and caller-controlled, not the subsystem map's
-    (dict) iteration order.
+    it must be deterministic and caller-controlled, not the map's (dict)
+    iteration order.
 
-    Channels with no subsystem entry are dropped with a warning rather than
-    silently grouped under a sentinel key — an unmapped channel in a
-    multivariate group is exactly the "silently reordered/wrong input"
-    failure mode the plan calls out.
+    Channels with no entry are dropped with a warning rather than silently
+    grouped under a sentinel key — an unmapped channel in a multivariate group
+    is exactly the "silently reordered/wrong input" failure mode plan 021 calls
+    out.
     """
-    ch_to_sub = load_channel_subsystem_map(settings, mission)
+    ch_to_group = load_channel_group_map(settings, mission)
     groups: dict[str, list[str]] = {}
     unmapped: list[str] = []
     for ch in channels:
-        subsystem = ch_to_sub.get(ch)
-        if subsystem is None:
+        group = ch_to_group.get(ch)
+        if group is None:
             unmapped.append(ch)
             continue
-        groups.setdefault(subsystem, []).append(ch)
+        groups.setdefault(group, []).append(ch)
     if unmapped:
         log.warning(
             "ray.subsystem_group.unmapped_channels", mission=mission, channels=unmapped
         )
     return groups
+
+
+def _resolve_tuned_entry(
+    tuned_configs: dict[str, dict[str, Any]] | None,
+    group_key: str,
+    group_channels: list[str],
+    ch_to_sub: dict[str, str],
+) -> dict[str, Any] | None:
+    """Find the tuned_configs entry for one multivariate group.
+
+    The model's key and the tuning key are deliberately at different
+    granularities (docs/plans/023 stage .4). Models are keyed by channel GROUP,
+    because ESA normalised values per group specifically to preserve
+    cross-channel dependencies within one. HPO stays keyed by SUBSYSTEM, because
+    the dataset paper states subsystem names are consistent across missions so
+    cross-mission models are possible, while group numbers are mission-local —
+    so a subsystem-tuned config is the reusable artifact.
+
+    Resolution order:
+    1. an entry keyed by the group itself — a deliberate per-group override;
+    2. the entry for the subsystem the group belongs to.
+
+    Without step 2 this lookup silently misses: ``run_all_sweeps`` writes
+    ``{"subsystem_6": {...}}`` while the group key is ``subsystem_6_g03``, so
+    ``.get(group_key)`` returns None, no overrides are applied, and a "tuned"
+    scoring run is byte-identical to the untuned baseline — with no error
+    anywhere to say so. That is the whole reason this function exists.
+
+    The subsystem is resolved from the group's MEMBERS, never by parsing the
+    group key: the key is an arbitrary registry string, and a naming convention
+    is not a data structure. A group spanning multiple subsystems returns None
+    with a warning rather than picking one — silently tuning a group with
+    another subsystem's thresholds is the failure this is guarding against.
+    """
+    if not tuned_configs:
+        return None
+    entry = tuned_configs.get(group_key)
+    if entry is not None:
+        return entry
+    subsystems = {ch_to_sub[c] for c in group_channels if c in ch_to_sub}
+    if len(subsystems) == 1:
+        return tuned_configs.get(subsystems.pop())
+    log.warning(
+        "ray.score.tuned_config_unresolved",
+        group=group_key,
+        subsystems=sorted(subsystems),
+        reason="group spans multiple subsystems (or none); scoring with untuned defaults",
+    )
+    return None
 
 
 def train_all_subsystems(
@@ -586,11 +646,12 @@ def score_all_subsystems(
         num_gpus=settings.ray.num_gpus_per_task,
         max_retries=settings.ray.max_retries,
     )
+    ch_to_sub = load_channel_subsystem_map(abs_settings, mission)
     futures = []
     for subsystem in subsystems:
         group_channels = groups[subsystem]
         overrides: dict[str, Any] = {}
-        entry = (tuned_configs or {}).get(subsystem)
+        entry = _resolve_tuned_entry(tuned_configs, subsystem, group_channels, ch_to_sub)
         if entry:
             overrides = {k: v for k, v in entry.items() if k in _TUNABLE_SCORING_FIELDS}
         # tuned_configs is already subsystem-keyed, so unlike score_all_channels

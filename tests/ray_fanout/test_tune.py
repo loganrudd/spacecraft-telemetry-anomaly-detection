@@ -108,7 +108,7 @@ def test_find_channel_errors_run_falls_back_to_multivariate(
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
         lambda *_a, **_k: {"channel_41": "subsystem_1"},
     )
     monkeypatch.setattr(
@@ -136,7 +136,7 @@ def test_find_multivariate_scoring_run_rejects_non_member_channel(
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
         lambda *_a, **_k: {"channel_99": "subsystem_1"},
     )
     monkeypatch.setattr(
@@ -189,6 +189,11 @@ def test_prepare_channel_data_shape_mismatch_raises(monkeypatch: pytest.MonkeyPa
         class info:
             run_id = "fake-run-id"
 
+        # Real mlflow Runs always carry .data.tags; a univariate run simply has
+        # no `channels` tag, which is what makes it univariate to the loader.
+        class data:
+            tags: typing.ClassVar[dict[str, str]] = {}
+
     monkeypatch.setattr(
         "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: _FakeRun(),
@@ -240,6 +245,11 @@ def test_prepare_channel_data_shape_mismatch_names_multivariate_cause(
     class _FakeRun:
         class info:
             run_id = "fake-run-id"
+
+        # Real mlflow Runs always carry .data.tags; a univariate run simply has
+        # no `channels` tag, which is what makes it univariate to the loader.
+        class data:
+            tags: typing.ClassVar[dict[str, str]] = {}
 
     monkeypatch.setattr(
         "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
@@ -853,6 +863,11 @@ def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
         class info:
             run_id = "fake-run-id"
 
+        # Real mlflow Runs always carry .data.tags; a univariate run simply has
+        # no `channels` tag, which is what makes it univariate to the loader.
+        class data:
+            tags: typing.ClassVar[dict[str, str]] = {}
+
     monkeypatch.setattr(
         "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
         lambda *_args, **_kwargs: _FakeRun(),
@@ -891,6 +906,11 @@ def test_warns_when_held_out_has_no_anomalies(monkeypatch: pytest.MonkeyPatch) -
     class _FakeRun:
         class info:
             run_id = "fake-run-id"
+
+        # Real mlflow Runs always carry .data.tags; a univariate run simply has
+        # no `channels` tag, which is what makes it univariate to the loader.
+        class data:
+            tags: typing.ClassVar[dict[str, str]] = {}
 
     def _fake_labels(*_args, **_kwargs):
         labels = np.zeros(n_total, dtype=np.bool_)
@@ -1082,3 +1102,140 @@ def test_run_hpo_sweep_finds_multivariate_errors(
         "error_smoothing_window", "threshold_window",
         "threshold_z", "threshold_min_anomaly_len", "min_error_value",
     }
+
+
+def test_find_multivariate_scoring_run_looks_up_by_group_key_not_subsystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's `subsystem` tag holds the key the model was SCORED under.
+
+    Since docs/plans/023 stage .4 that is the channel group
+    (``subsystem_6_g09``), not the subsystem (``subsystem_6``). Querying the
+    subsystem finds nothing, every channel looks unscored, and the entire HPO
+    sweep is skipped with only a "no errors.npy" note — a silent no-op that
+    burns the whole tuning budget. This pins the tag actually queried.
+    """
+    from spacecraft_telemetry.ray_fanout.tune import _find_channel_errors_run
+
+    settings = load_settings("test")
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_group_map",
+        lambda *_a, **_k: {"channel_47": "subsystem_6_g09"},
+    )
+    queried: list[str] = []
+
+    def _capture(_exp, _tag, value, *_a, **_k):
+        queried.append(value)
+        return _FakeRun("mv-run", tags={"channels": "channel_47,channel_48,channel_49"})
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_by_tag", _capture
+    )
+
+    found = _find_channel_errors_run(settings, "ESA-Mission1", "channel_47", "exp")
+    assert found is not None
+    assert queried == ["subsystem_6_g09"], (
+        f"looked up {queried!r}; must query the group key the run is tagged with"
+    )
+    assert found[1] == "errors/channel_47.npy"
+
+
+class TestWindowLabelsMatchTheScoringRunsIndex:
+    """A multivariate run's per-channel errors are windowed over the group's
+    JOINT (intersected) index, so labels must be built the same way.
+
+    Building them from the channel's own series yields an array shorter or
+    longer by however many rows the intersection dropped, and _prepare_channel_data
+    rejects the channel on the shape check. Invisible for a group that
+    intersects at 100% (channels 41-46, the only group ever tuned before), which
+    is why it survived until plan 023's 99.999%-aligned groups.
+    """
+
+    class _Run:
+        def __init__(self, tags: dict[str, str]) -> None:
+            self.data = type("D", (), {"tags": tags})()
+            self.info = type("I", (), {"run_id": "r"})()
+
+    def test_multivariate_selects_this_channels_column(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        from spacecraft_telemetry.ray_fanout import tune as _tune
+
+        group = ["channel_a", "channel_b", "channel_c"]
+        # (M, C) joint-index labels; each column distinct so a wrong column shows.
+        joint = np.array([[True, False, False], [False, True, False]], dtype=bool)
+        captured: dict[str, object] = {}
+
+        def _fake_load(settings, _mission, key):
+            captured["input_channels"] = settings.model.input_channels
+            captured["key"] = key
+            return joint
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_window_labels", _fake_load
+        )
+        run = self._Run({"channels": ",".join(group), "subsystem": "grp_01"})
+        got = _tune._window_labels_matching_run(
+            load_settings("test"), "ESA-Mission1", "channel_b", run, {}
+        )
+
+        assert got.tolist() == [False, True], "must take channel_b's column"
+        assert captured["input_channels"] == group, "labels must be built for the GROUP"
+        assert captured["key"] == "grp_01"
+
+    def test_group_labels_are_loaded_once_per_group(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Without the cache every member re-reads the whole group's parquet.
+        import numpy as np
+
+        from spacecraft_telemetry.ray_fanout import tune as _tune
+
+        group = ["channel_a", "channel_b", "channel_c"]
+        calls: list[int] = []
+
+        def _fake_load(_settings, _mission, _key):
+            calls.append(1)
+            return np.zeros((4, 3), dtype=bool)
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_window_labels", _fake_load
+        )
+        run = self._Run({"channels": ",".join(group)})
+        cache: dict = {}
+        for ch in group:
+            _tune._window_labels_matching_run(
+                load_settings("test"), "ESA-Mission1", ch, run, cache
+            )
+        assert len(calls) == 1, f"loaded {len(calls)}x for one group"
+
+    def test_univariate_run_uses_the_per_channel_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        from spacecraft_telemetry.ray_fanout import tune as _tune
+
+        captured: dict[str, object] = {}
+
+        def _fake_load(settings, _mission, key):
+            captured["input_channels"] = settings.model.input_channels
+            captured["key"] = key
+            return np.array([True, False], dtype=bool)
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.model.dataset.load_window_labels", _fake_load
+        )
+        run = self._Run({})  # no `channels` tag -> univariate
+        got = _tune._window_labels_matching_run(
+            load_settings("test"), "ESA-Mission1", "channel_a", run, {}
+        )
+        assert got.tolist() == [True, False]
+        assert captured["input_channels"] is None, "univariate path must stay untouched"
+        assert captured["key"] == "channel_a"

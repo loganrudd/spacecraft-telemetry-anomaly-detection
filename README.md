@@ -212,14 +212,48 @@ are operationally costlier than late detections), deliberately *not* the
 point-adjust convention common in the SMAP/MSL literature, which inflates scores
 by crediting an entire anomaly segment for a single detected point.
 
-**Results (ESA-Mission1, held-out 40%, tuned).** Of 31 channels with labeled
-anomalies in the held-out window, **22 register detection** (segment-F0.5 > 0):
+**Results (ESA-Mission1, held-out 40%, tuned).** This is the **default
+configuration** — native timestamps, one model per channel — i.e. what the Quick
+Start below actually produces. Of 31 channels with labeled anomalies in the
+held-out window, **22 register detection** (segment-F0.5 > 0):
 
 | metric (mean over detected channels) | value |
 |---|---|
 | segment recall | 0.51 |
 | segment precision | 0.46 |
 | segment F0.5 | 0.41 |
+
+**The 30 s-grid arm scores higher, over more channels.** Re-preprocessing onto a
+common time grid and training one model per ESA channel group (see
+[Multivariate forecasting](#multivariate-forecasting-built-measured-no-gain))
+gives, on the same metric and the same held-out 40%:
+
+| metric (mean over detected channels) | default | 30 s grid + grouped |
+|---|---:|---:|
+| channels with labeled anomalies in window | 31 | **45** |
+| registering detection | 22 | **26** |
+| segment recall | 0.51 | **0.539** |
+| segment precision | 0.46 | **0.560** |
+| segment F0.5 | 0.41 | **0.457** |
+| channels at segment-F0.5 ≥ 0.7 | 5 | **7** |
+
+Two caveats keep this a second row rather than a replacement. It **changes two
+things at once** — the common grid *and* joint modeling — so neither is isolated
+here. And it is **opt-in**: `preprocess.grid_interval_seconds` defaults to
+`None`, the grid models are not promoted to `@champion`, and the serving path
+cannot load a grouped model at all, so nothing in the live demo runs this arm.
+Reproduce it with `make cloud-preprocess VARIANT=grid-30s GRID_INTERVAL=30`
+followed by `cloud-train`/`cloud-tune`/`cloud-score` with `MULTIVARIATE=1`.
+
+> **Both columns are Ray Tune-tuned, and both are therefore probably below their
+> achievable ceiling.** Neither has had the exhaustive `(threshold_z,
+> min_error_value)` sweep run against it. That keeps the *comparison* fair — same
+> tuning method on both sides — but it means neither absolute number is a ceiling.
+> On the one arm where the sweep has been run (channels 41–46 on the ESA-ADB
+> split), it moved mission-level F0.5 from 0.212 to 0.798, because Ray Tune had
+> selected a `threshold_z` below the entire swept range. Treat 0.457 as what the
+> pipeline currently produces, not as what this configuration can reach — see the
+> first [Future Work](#future-work) item.
 
 Precision and recall sit close together: the forecaster catches about half the
 labeled segments, and slightly under half of what it flags overlaps a labeled one.
@@ -269,8 +303,10 @@ under ESA-ADB's **corrected event-wise F0.5**. Our implementation of that metric
 |---|---:|---:|---:|
 | ours — protocol-matched (untuned, Hundman defaults) | 0.001 | 0.723 | 0.001 |
 | ours — tuned, 1-in/1-out (per-channel models) | 0.636 | 0.280 | **0.507** |
-| ours — tuned, 6-in/6-out (one joint model per subsystem) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out (one joint model over the channel group) | 0.636 | 0.280 | **0.507** |
+| ours — tuned, 6-in/6-out + **30 s common grid** | 1.000 | 0.440 | **0.797** |
 | ours — tuned, 6-in/6-out + **10-step horizon** | 0.917 | 0.440 | **0.753** |
+| ours — tuned, 6-in/6-out + **grid + horizon together** | 0.571 | 0.480 | **0.550** |
 | paper — Telemanom-ESA (no pruning) | 0.148 | 0.894 | 0.178 |
 | paper — Telemanom-ESA-Pruned | 0.999 | 0.424 | 0.786 |
 
@@ -279,15 +315,84 @@ side using an error floor — and there we are far behind. The tuned rows apply
 per-subsystem threshold selection the paper never ran (an exhaustive grid over
 `(threshold_z, min_error_value)`, selected on the first 60% of the test half — *not*
 a Ray Tune sweep; the report reads that distinction from each run's tags rather than
-asserting it), so even the 0.753, close as it looks to the paper's pruned 0.786, is
-**not** a like-for-like win. It differs on two axes at
+asserting it), so neither the 0.753 nor the **0.797 — which does sit above the paper's
+pruned 0.786 — is a like-for-like win**. Both differ on two axes at
 once: we tuned and they did not, *and* our tuned rows are measured on the held-out
 final 40% (25 events) while theirs covers the full test half (65 events). Reported
 both ways deliberately.
 
+Read the tuned rows as comparisons **against each other**, where split, event set and
+tuning method are all held fixed, and only against the paper with those two differences
+stated. A number crossing 0.786 does not settle the benchmark; it says this configuration
+reaches the paper's operating range under a protocol the paper did not run.
+
 The two tuned rows are not a rounding artifact: the 6-in/6-out model was built and
 measured, and the two architectures land within 2×10⁻⁶ of each other — see
 [Multivariate forecasting: built, measured, no gain](#multivariate-forecasting-built-measured-no-gain).
+
+The joint row says "channel group" rather than "subsystem" for a reason worth keeping
+straight: channels 41–46 are `subsystem_5`, which happens to contain **exactly one** ESA
+`Group`, so the two keys coincide here and only here. Grouping by subsystem is *not* the
+general rule — `subsystem_6`'s 41 channels intersect to a single row — which is why the
+mission-wide topology is keyed on `Group`, not subsystem.
+
+**The 30 s-grid row is the one clean single-variable comparison in this table.** It differs
+from the 6-in/6-out row above it in exactly one respect — the common time grid. Same
+channels, same chronological 50/50 split, same 25 held-out events, same joint architecture,
+same one-step horizon, and — the part that took a second pass to get right — the same
+**tuning method**: both configurations come from the exhaustive `(threshold_z,
+min_error_value)` grid, read from each run's MLflow tags rather than assumed. Under those
+matched conditions the grid moves F0.5 from **0.507 to 0.797**, almost entirely through
+precision (0.636 → 1.000) while recall also rises (0.280 → 0.440); detections stay flat at
+18 → 19, so this is a cleaner operating point rather than simply a quieter one.
+
+Getting that comparison honest required discarding a first attempt. Tuned by `cloud-tune`'s
+50-sample Ray Tune sweep instead, the same arm scored **0.212** — the sweep had selected
+`threshold_z = 1.393`, below the entire range the grid sweeps, firing 113 detections at 0.18
+precision. Reported against the grid-tuned 0.507 above, that would have said the common time
+grid *hurt* detection by a factor of two. It is the same tuning-luck failure this repo
+already documents once, in the opposite direction, and it is why the exhaustive sweep is
+listed first in [Future Work](#future-work) as a correctness gap rather than an optimisation.
+
+**The grid and the horizon do not compose.** Each helps alone — the grid takes 0.507 → 0.797,
+the horizon 0.507 → 0.753 — but applied together they give **0.550**, worse than either. The
+last row is not a weaker version of the other two; it is evidence that the two changes are
+substitutes rather than additive, and that stacking measured wins is itself an assumption
+worth testing. Reported because it was measured, not because it is flattering.
+
+The combined arm also shows a **generalization gap the others do not**. Its exhaustive grid
+peaked at 0.840 on the selection slice and delivered 0.550 on the held-out remainder; the
+grid-only arm went 0.798 → 0.797, essentially flat. A config that loses a third of its score
+between selection and held-out data is fitting the selection slice, which at 25 events is
+easy to do — and is exactly why every tuned row here is selected on `hpo_portion` and
+reported on the untouched remainder rather than on its own selection slice.
+
+#### The same six channels on this repo's default split
+
+The table above is on the paper's split. The 30 s-grid arm was also measured on the
+repo's **default** split (`train_fraction=0.8`, `train_lookback=730D`) against the
+native tree — same channels, same metric, same protocol, same held-out slice — which
+isolates the grid + grouping change from the split:
+
+| channels 41–46, default split | scope | precision | recall | F0.5 | detections |
+|---|---|---:|---:|---:|---:|
+| native | all events, tuned | 0.500 | 0.333 | 0.455 | 10 |
+| **30 s grid + grouped** | all events, tuned | 0.900 | 0.750 | **0.865** | 11 |
+| native | anomalies only, tuned | 0.333 | 0.286 | 0.323 | 10 |
+| **30 s grid + grouped** | anomalies only, tuned | 0.857 | 0.857 | **0.857** | 11 |
+| native | all events, untuned | 0.001 | 0.760 | 0.001 | 20,080 |
+| **30 s grid + grouped** | all events, untuned | 0.002 | 0.920 | 0.002 | 13,013 |
+
+**These are not rows in the benchmark table above and must not be read as beating the
+paper's 0.786.** The split differs, and with it the event population: the paper's 50/50
+split leaves 25 events in the held-out 40%, this one leaves 12. Half as many events makes
+every rate noisier.
+
+The **untuned** pair is the most informative line here, because both sides use Hundman
+defaults — removing HPO-sweep variance, so only the grid and the grouping differ. The
+gridded arm raises recall 0.760 → 0.920 while firing **35% fewer** detections
+(20,080 → 13,013). Two changes still travel together there (common grid, joint model), so
+it is not an isolation of the grid alone.
 
 **What the ESA-ADB authors actually concluded.** They benchmarked ~40 algorithms,
 including a `telemanom_esa` variant adapted to ESA's channel scale, and found that
@@ -349,11 +454,68 @@ supports a general claim.
    That is why a single "best trial" looked pinned at a bound when it wasn't, and why
    bound-proximity alone is not evidence of a truncated search.
 
-The remaining case for the joint model is **operational, not accuracy**: one model per
-subsystem instead of six (~100 → ~4–8 at production scale), ~6× fewer training batches
-per epoch-round, and correspondingly fewer registry entries, promotions, and served
-artifacts. It is not deployed yet — but it is the base the horizon result below builds on,
-and that result is what makes it worth serving.
+The remaining case for the joint model is **operational, not accuracy**: one model per channel
+group instead of one per channel, with ~6× fewer training batches per epoch-round and
+correspondingly fewer registry entries, promotions, and served artifacts.
+
+**How far that scales turned out to be a data question, not a modeling one.** Joint forecasting
+requires the grouped channels to share a timestamp grid, and ESA channels each carry their own
+sampling phase and rate — preprocessing forward-fills but never resamples. The validated group
+works because channels 41–46 happen to sit on a common 30 s grid; two channels in another
+subsystem, same 30 s cadence but a 16 s phase offset, share **no timestamps at all**. Measured
+across the mission *before* the grid work below, only 25 of 62 preprocessed channels grouped
+usefully — into 4 models — and the rest stayed univariate, ~41 models in total. A larger
+29-channel group technically aligned but shattered into 677k joint segments, yielding 12,771
+training windows against 2.06M for a single member.
+
+**Resampling to a common grid removes the obstacle, and that work is now done.** Every channel
+is resampled onto a 30 s grid with gap-preserving semantics — only buckets a native tick landed
+in survive, so a genuine multi-month outage stays an outage instead of being forward-filled into
+one continuous segment. Measured on the real transform, not simulated: the 29-channel family
+goes from 12,771 joint training windows to **673,473**, and eight channels that shared *not one*
+native timestamp become a viable 8-channel group with 737,317. Value fidelity holds to float32
+round-trip noise (2.4×10⁻⁶ σ) with **zero fabricated buckets**.
+
+**The grouping key is ESA's own `Group` column, not the subsystem.** Two grouping rules were
+measured and rejected first. Union-find over timestamp overlap is transitive while intersection
+is not, so it merged all 62 channels into one "family" whose 62-way intersection is a single
+row. Grouping by subsystem fails too — `subsystem_6`'s 41 channels align to 1 row, because a
+common *sampling grid* cannot create a common *calendar range* and the strict intersection needs
+both. `channels.csv` ships a `Group` column that ESA describes as marking *"related channels
+with similar characteristics"*, and the dataset's anonymisation normalised values **per group**
+specifically *"to preserve the same dependencies between similar channels"* — so within-group
+dependencies are the ones the data guarantees survived, which is exactly what a joint forecaster
+should be fitting.
+
+That grouping also generalizes where "one model per subsystem" does not: subsystem sizes swing
+from 6 to 57 channels across the three ESA missions (Mission2's `subsystem_1` alone holds 57 of
+its 100), while `Group` sizes hold a median of 3 — and Mission3 is 12 groups of *exactly 4*.
+
+**The achieved model count: 62 channels → 16 models** (13 joint groups + 3 singletons that stay
+univariate), replacing the retired "~100 → ~4–8" projection. At production scale the same rule
+gives Mission2's 100 channels → **29 models**. That is a smaller headline than the projection it
+replaces, and it is the one the data supports: 16 models whose membership is mission metadata
+and transfers to Missions 2 and 3, rather than a larger reduction resting on one subsystem where
+the grids happened to line up.
+
+Detection quality did not pay for it — and on the benchmark's own split the grid is measurably
+*better*, isolated to a single variable. Holding channels, chronological 50/50 split, the 25
+held-out events, the joint 6-in/6-out architecture, the one-step horizon **and the tuning
+method** all fixed, the common grid moves mission-level corrected event-wise F0.5 from **0.507
+to 0.797** — almost entirely through precision (0.636 → 1.000), with recall also rising (0.280
+→ 0.440) and detections flat at 18 → 19. See the [head-to-head
+table](#head-to-head-with-the-esa-adb-benchmark). Everything except the time grid is matched,
+which is what makes it an attribution rather than an observation.
+
+Across all 54 target channels of the default-split arm the mission-level figure is 0.054. That
+is not a contradiction: the metric ORs detections over every channel, so precision falls as the
+channel count rises — 341 detections across 54 channels versus 19 across 6. Mission-level
+corrected event-wise F0.5 is only comparable at a fixed channel set, which is why the
+attribution above is made on the 6-channel benchmark scope.
+
+The joint model is also not deployed: the serving path has no multivariate support yet. It is
+still the base the horizon result below builds on, and that result is what makes it worth
+serving.
 
 ### The 10-step horizon: a real gain, but not from the horizon
 
@@ -800,6 +962,31 @@ torn down between demos to control the ~$60/mo cost. It is reproducible from
 Terraform and runnable locally against the live feed; the recorded capture is the
 standing demonstration.
 
+**A channel cannot be a model input without also being a prediction target.**  
+`ModelConfig` requires `target_channels == input_channels` (enforced by a
+validator in `core/config.py`), so the multivariate path has no notion of an
+*exogenous covariate* — a signal the model reads but is never scored on.
+
+This matters because ESA's own dataset draws exactly that distinction. Of
+Mission1's 76 channels, 58 are **target** channels (monitored for anomalies) and
+18 are **non-target**, which the dataset paper describes as *"meant to support
+the detection process."* Telecommands sit in the same category. The architecture
+cannot express that role, so every non-target channel faces a lossy either/or:
+
+- **Model it as a target anyway** — it consumes training and serving compute and
+  adds registry entries for something nobody monitors; or
+- **Drop it** — the supporting signal it was published to provide is discarded.
+
+Measured cost on the 30 s-grid retrain: of 16 models, **4 cover only non-target
+channels** (8 channels), and two of those do not learn at all — validation loss
+0.99 and 0.72 on unit-variance data, i.e. no better than predicting the mean.
+That compute buys nothing, and the same channels might have improved the models
+that *are* scored, had they been usable as inputs.
+
+Lifting this is a validator change plus a scoring-time mask rather than a
+rearchitecture — the two fields are already kept separate for exactly this
+reason — but it is untested and not attempted here.
+
 ---
 
 
@@ -850,6 +1037,50 @@ governing invariant.
 The detector roadmap below is sequenced deliberately: each step builds the infrastructure the next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now built and measured — it matched per-channel accuracy rather than beating it ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
+- **Fold the exhaustive threshold grid into the tuning job as a second stage.** This is a
+  **correctness** gap, not a performance one, and it is the highest-priority item here.
+  `scripts/threshold_ceiling.py` is documented above as a required step before any
+  architecture claim — but it is a local script, and the modules it drives
+  (`ray_fanout/threshold_search.py`, `ray_fanout/threshold_grid.py`) are library code that
+  `run_all_sweeps` never calls. So the required step is the one step the pipeline cannot
+  perform, and skipping it is the default rather than a mistake you have to make.
+
+  Measured cost, on the 30 s-grid arm over channels 41–46 (same split, same 25 held-out
+  events, same model): `cloud-tune`'s 50-sample Ray Tune sweep selected
+  `threshold_z = 1.393, min_error_value = 0.251` and scored **0.212** mission-level corrected
+  event-wise F0.5. The exhaustive grid over the same objective found
+  `threshold_z = 3.0, min_error_value = 0.4` at **0.798**, with the optimum interior to the
+  grid. The chosen z sat *below the entire swept range*, so the arm fired 113 detections at
+  0.18 precision — a config 4× worse than one a deterministic sweep finds in the same space.
+  Read as an architecture result rather than a tuning artifact, that number would have said
+  the common time grid *hurt* detection.
+
+  **It is systematic, not one unlucky sweep.** The same thing happened independently on the
+  H=10 arm: Ray Tune chose `threshold_z = 1.481, min_error_value = 0.246` where that arm's
+  exhaustive grid put the optimum at `threshold_z = 7.0, min_error_value = 0.3`. Two separate
+  sweeps, two different horizons, both landing in the same low-`z` region the grid scores an
+  order of magnitude worse. The sampler is not unlucky; it is mis-matched to this response
+  surface.
+
+  The fix is two stages, not a swap: the grid sweeps only `(threshold_z, min_error_value)`,
+  because `error_smoothing_window` is baked into the saved smoothed array and cannot be
+  re-evaluated post-hoc. So Ray Tune keeps the params that require re-scoring, and the
+  exhaustive driver deterministically refines the two that are cheap on cached errors —
+  making a ridge-refined config the automatic output of `cloud-tune` rather than a manual
+  follow-up. The parallelism item below is what makes stage 2 affordable at mission scale.
+
+  **Then re-score the 30 s-grid arm and refresh the Evaluation numbers.** Only that arm is
+  worth the pass — the default arm is a different data representation (native timestamps,
+  one model per channel) that this work supersedes, so tuning it to ceiling would be effort
+  spent on a configuration nothing else builds on. The scope is **45 channels, not 62**:
+  the rest carry no labeled anomaly in the held-out window and cannot move a detection
+  metric. It is also only **two sweeps**, since those 45 fall entirely in two subsystems —
+  `subsystem_6` (39 channels, ~4.4 GB resident) and `subsystem_5` (6, ~0.7 GB). The second
+  runs on a laptop today; the first sits right at CLAUDE.md's ~4–5 GB ceiling, which is the
+  concrete reason stage 2 wants Ray rather than a local script. Re-scoring lifts the
+  Evaluation table's 0.457 toward its ceiling, and the two arms there stop being
+  tuning-comparable at that point — so report the swept arm as its own row rather than
+  swapping the number in.
 - **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
   the table because the response surface is a narrow ridge, and `threshold_z` and
   `min_error_value` are substitutes rather than independent knobs — so sampling them
@@ -866,7 +1097,10 @@ channel-group data path, which is the part the work below actually reuses.
   configured exactly like their multivariate Telemanom — one model over a channel group,
   `input_channels = target_channels`, latent dimensionality scaling with channel count — so
   now that multivariate Telemanom exists, DC-VAE reuses the whole data path and genuinely
-  becomes a model-module swap.
+  becomes a model-module swap. It also inherits that path's constraint: being a grouped model,
+  it needs its channel group to share a timestamp grid, so the resampling work described
+  [above](#multivariate-forecasting-built-measured-no-gain) gates how many channels it can
+  cover — not just how many Telemanom can.
 
   The honest motivation is *not* "DC-VAE is the benchmark's best model" — it isn't. The paper
   reports DC-VAE-ESA performing *"very poorly"* event-wise on Mission1, *"especially
@@ -920,6 +1154,20 @@ channel-group data path, which is the part the work below actually reuses.
   channels that a forecaster cannot help (flatlined sensors, forecaster blind spots),
   decided online from cheap signals rather than after a full train+score pass — see
   [docs/architecture/online-pruning-investigation.md](docs/architecture/online-pruning-investigation.md).
+- **Route grouped and ungrouped channels in one training sweep.** `--multivariate` is a
+  binary switch selecting `train_all_subsystems` over `train_all_channels`, and the joint
+  path drops any channel with no entry in `channel_groups.json` (deliberately — silently
+  guessing a channel's group is the plan-021 failure mode the warning exists to prevent).
+  Channels that land in a group of one are excluded from the map on purpose, since a
+  1-in/1-out "multivariate" model is a univariate model wearing extra machinery, and
+  registering it under a group id would break the convention that univariate models carry
+  their channel's name — which `promote`/`demote` discovery depends on. The consequence is
+  that a mission needs **two submissions** to train fully, and a forgotten second one leaves
+  channels untrained with only a log warning to say so. Worse, `cloud_train.sh`
+  delete-then-creates a fixed-name RayJob, so the second submission destroys the first if it
+  is still running. A single sweep that sends grouped channels to the joint path and
+  ungrouped ones to the univariate path would make "train this variant" one command and make
+  a silently-skipped channel impossible.
 - **Calibrate `feature_drift_threshold` against ESA labeled segments.** The 30%-of-features
   drift trigger is currently a sensible default, not an empirically tuned one. Calibrate
   it against the dataset's labeled anomaly segments so drift alerts correlate with real

@@ -22,6 +22,17 @@
 #                   docs/plans/020-experiment-variant-axis.md). Writes output
 #                   under {processed}/{mission}/{variant}/ instead of
 #                   {processed}/{mission}/, without touching raw input data.
+#   GRID_INTERVAL   Common time grid in seconds for this mission (default:
+#                   unset = native timestamps, today's behaviour). Resamples
+#                   every channel onto that grid with gap-preserving semantics
+#                   so multivariate groups share timestamps — see
+#                   docs/plans/023-channel-time-grid.md stage .3. Pair with a
+#                   VARIANT so the native tree stays intact for comparison.
+#   CHANNEL_GRIDS   JSON object of per-channel overrides of GRID_INTERVAL,
+#                   e.g. '{"channel_12": 90}'. The useful rate is a property of
+#                   a channel GROUP (bounded by its coarsest member), and groups
+#                   are disjoint, so a channel -> rate map expresses per-group
+#                   rates in one preprocessing pass.
 #
 # Example:
 #   export PROJECT_ID=my-gcp-project
@@ -43,6 +54,10 @@ CHANNELS="${CHANNELS:-}"   # optional comma-separated list, e.g. S1000003,P10000
 # because envsubst has no default-value syntax (same reason as CHANNELS_ARG).
 TRAIN_FRACTION="${TRAIN_FRACTION:-0.8}"
 TRAIN_LOOKBACK="${TRAIN_LOOKBACK:-730D}"
+# Empty string is the env-var spelling of None for both (config.py coerces the
+# "" / "null" sentinels), so unset reproduces today's native-timestamp output.
+GRID_INTERVAL="${GRID_INTERVAL:-}"
+CHANNEL_GRIDS="${CHANNEL_GRIDS:-{\}}"
 NO_WAIT=false
 DELETE_AFTER=false
 
@@ -75,9 +90,11 @@ fi
 VARIANT_SEG="${VARIANT:+/${VARIANT}}"
 
 export PROJECT_ID REGION MISSION VARIANT VARIANT_SEG CHANNELS_ARG TRAIN_FRACTION TRAIN_LOOKBACK
+export GRID_INTERVAL CHANNEL_GRIDS
 
 echo "==> Submitting spacecraft-preprocess RayJob (mission=${MISSION}${VARIANT:+, variant=${VARIANT}}${CHANNELS:+, channels=${CHANNELS}})"
 echo "    train_fraction=${TRAIN_FRACTION}  train_lookback=${TRAIN_LOOKBACK}"
+echo "    grid_interval=${GRID_INTERVAL:-native}  channel_grids=${CHANNEL_GRIDS}"
 
 if kubectl get rayjob spacecraft-preprocess -n ray &>/dev/null; then
   echo "==> Deleting existing spacecraft-preprocess RayJob"

@@ -58,9 +58,47 @@ def load_channel_subsystem_map(settings: Settings, mission: str) -> dict[str, st
     )
 
 
+def load_channel_group_map(settings: Settings, mission: str) -> dict[str, str]:
+    """Return a mapping of channel_id → multivariate GROUP id.
+
+    A joint model needs its members to share a timestamp grid, and that is a
+    property of the data rather than of the spacecraft: the natural ESA group
+    crosses subsystem boundaries (docs/plans/023 — family 2 is subsystem_5 plus
+    part of subsystem_6 on one grid), and one subsystem can span several grids.
+    So the multivariate fan-out groups on this map, not on the subsystem map.
+
+    Lookup order:
+    1) {processed_data_dir}/{mission}/[{variant}/]metadata/channel_groups.json,
+       written by scripts/check_channel_group.py --write-groups from a measured
+       family enumeration.
+    2) The subsystem map — today's behaviour, unchanged, for every mission that
+       has no measured grouping (ISS, and ESA trees predating plan 023).
+
+    The group id is only a registry key: it becomes the ``channel`` argument of
+    train_channel/score_channel and hence the MLflow model name, exactly as a
+    subsystem name does today. No schema change is implied.
+    """
+    grouped = _load_cached(
+        str(settings.preprocess.processed_data_dir),
+        str(settings.data.sample_data_dir),
+        str(settings.data.raw_data_dir),
+        mission,
+        settings.variant,
+        "channel_groups.json",
+    )
+    if grouped:
+        return grouped
+    return load_channel_subsystem_map(settings, mission)
+
+
 @lru_cache(maxsize=32)
 def _load_cached(
-    processed_dir: str, sample_dir: str, raw_dir: str, mission: str, variant: str | None
+    processed_dir: str,
+    sample_dir: str,
+    raw_dir: str,
+    mission: str,
+    variant: str | None,
+    filename: str = "channel_subsystems.json",
 ) -> dict[str, str]:
     # When running against an injected test split (_injected subdirectory), the
     # channel_subsystems.json lives in the nominal processed bucket, not under
@@ -75,16 +113,14 @@ def _load_cached(
         candidate_dirs.append(nominal)
 
     for _dir in candidate_dirs:
-        processed_map_path = output_path(
-            _dir, mission, variant, "metadata", "channel_subsystems.json"
-        )
+        processed_map_path = output_path(_dir, mission, variant, "metadata", filename)
         if not processed_map_path.exists():
             continue
         try:
             loaded = json.loads(processed_map_path.read_text())
         except json.JSONDecodeError:
             log.warning(
-                "processed subsystem map is invalid JSON; falling back to channels.csv",
+                "processed channel map is invalid JSON; falling back",
                 path=str(processed_map_path),
             )
             continue
@@ -97,9 +133,16 @@ def _load_cached(
             if processed_mapping:
                 return processed_mapping
             log.warning(
-                "processed subsystem map is empty; falling back to channels.csv",
+                "processed channel map is empty; falling back",
                 path=str(processed_map_path),
             )
+
+    # The CSV fallback below is subsystem-specific. A caller asking for a
+    # different map (channel_groups.json) gets an empty dict and decides its own
+    # fallback — load_channel_group_map falls back to the subsystem map, which
+    # then reaches the CSV through its own call.
+    if filename != "channel_subsystems.json":
+        return {}
 
     # CSV fallback. Try sample dir first (the one that exists in cloud), then
     # raw (local dev). Both via to_upath so gs:// resolves.

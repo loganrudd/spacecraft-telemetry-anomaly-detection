@@ -28,7 +28,7 @@ import pandas as pd
 import ray
 from upath import UPath
 
-from spacecraft_telemetry.core.config import Settings
+from spacecraft_telemetry.core.config import PreprocessingConfig, Settings
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.core.paths import absolutize_if_local, output_path, to_upath
 from spacecraft_telemetry.ingest.iss_channels import ISS_CHANNELS
@@ -60,6 +60,47 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _log_label_coverage(labeled: pd.DataFrame, labels_df: pd.DataFrame, channel: str) -> None:
+    """Log n_anomaly_rows and warn about label intervals that map to zero rows.
+
+    Observability only (docs/reviews/023-channel-time-grid.md, B3/4.2) — does
+    not change label_timesteps' half-open contract. A grid can make a real,
+    sub-grid-interval anomaly vanish: the grid row's timestamp is the bucket
+    FLOOR, not any native tick's timestamp, so a narrow interval that never
+    contains a bucket floor produces zero rows even though it genuinely
+    overlaps ticks the channel recorded.
+
+    Point labels (start == end) are excluded — label_timesteps widens those
+    internally (median-interval half-width), and re-deriving that same
+    widening here would duplicate logic this function has no need to know.
+    """
+    is_anomaly = labeled["is_anomaly"]
+    n_anomaly_rows = int(is_anomaly.sum())
+    log.info("pipeline.channel.n_anomaly_rows", channel_id=channel, n_anomaly_rows=n_anomaly_rows)
+
+    channel_labels = labels_df[labels_df["channel_id"] == channel]
+    if channel_labels.empty:
+        return
+
+    ts = labeled["telemetry_timestamp"]
+    span_start, span_end = ts.min(), ts.max()
+    lost_intervals = 0
+    for _, row in channel_labels.iterrows():
+        start, end = row["start_time"], row["end_time"]
+        if start == end or end <= span_start or start > span_end:
+            continue
+        if not ((ts >= start) & (ts < end) & is_anomaly).any():
+            lost_intervals += 1
+
+    if lost_intervals:
+        log.warning(
+            "pipeline.channel.label_interval_lost",
+            channel_id=channel,
+            n_lost=lost_intervals,
+            n_labels=len(channel_labels),
+        )
+
+
 def _preprocess_channel(
     settings: Settings,
     mission: str,
@@ -83,6 +124,18 @@ def _preprocess_channel(
     rows_in = len(raw_df)
     cleaned = handle_nulls(raw_df)
     del raw_df
+
+    # Optional common time grid (docs/plans/023 stage .3). None = native
+    # timestamps, byte-for-byte today's behaviour. Resampling runs AFTER
+    # handle_nulls so the only NaN buckets left are ones no tick landed in,
+    # which is exactly what gap_preserving=True drops; and BEFORE detect_gaps so
+    # segments are drawn on the grid the model will actually window over.
+    grid_seconds = settings.preprocess.grid_interval_for(channel)
+    if grid_seconds is not None:
+        cleaned = resample_to_grid(
+            cleaned, channel, mission, grid_seconds, gap_preserving=True
+        )
+
     gapped = detect_gaps(cleaned, gap_multiplier=settings.preprocess.gap_multiplier)
     del cleaned
     normalized, params = normalize(gapped, method=settings.preprocess.normalization)
@@ -90,6 +143,7 @@ def _preprocess_channel(
 
     if labels_df is not None:
         labeled = label_timesteps(normalized, labels_df)
+        _log_label_coverage(labeled, labels_df, channel)
     else:
         labeled = normalized.copy()
         labeled["is_anomaly"] = False
@@ -157,6 +211,48 @@ def _preprocess_channel_remote(
         UPath(train_out_str), UPath(test_out_str),
         labels_df,
     )
+
+
+def _warn_on_group_grid_rate_mismatch(
+    settings: Settings, mission: str, channels: list[str]
+) -> None:
+    """Log a warning when a multivariate group's members disagree on grid rate.
+
+    A joint model is bounded by its COARSEST member (docs/plans/023 stage .3),
+    so a one-character typo in CHANNEL_GRIDS silently collapses a group's
+    intersection several stages downstream of the actual cause — the group map
+    (which channels belong together) and the grid rate (settings.preprocess.
+    channel_grid_interval_seconds) are two independently hand-maintained
+    sources for one fact, and nothing else cross-checks them.
+
+    Observability only: this never raises or changes what gets preprocessed,
+    since a member's grid rate is legitimate to set per-channel and the group
+    map may list channels this preprocessing run wasn't asked to touch.
+    """
+    from spacecraft_telemetry.core.metadata import load_channel_group_map
+
+    group_of = load_channel_group_map(settings, mission)
+    if not group_of:
+        return
+
+    requested = set(channels)
+    members_by_group: dict[str, list[str]] = {}
+    for ch, key in group_of.items():
+        members_by_group.setdefault(key, []).append(ch)
+
+    for key, members in members_by_group.items():
+        if not requested.intersection(members):
+            continue
+        rates = {ch: settings.preprocess.grid_interval_for(ch) for ch in members}
+        if len(set(rates.values())) > 1:
+            log.warning(
+                "pipeline.group_grid_rate_mismatch",
+                mission=mission,
+                group=key,
+                rates=rates,
+                reason="a joint model is bounded by its coarsest member — "
+                "mismatched rates within a group silently shrink its intersection",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +346,8 @@ def run_preprocessing(
     if labels_path.exists():
         labels_df = read_labels(labels_path)
 
+    _warn_on_group_grid_rate_mismatch(settings, mission, channel_list)
+
     # Clear output dirs: re-runs must not accumulate duplicates.
     # Use the underlying fsspec fs.rm() so this works for both local and gs://.
     # output_path inserts settings.variant as a path segment between mission
@@ -334,6 +432,22 @@ def _run_sequential(
     return results
 
 
+def small_task_cpus(cfg: PreprocessingConfig, channels: list[str]) -> int:
+    """CPUs to reserve per NON-large channel task — i.e. how many pack per node.
+
+    Ray schedules by CPU, and the worker nodes are 4 vCPU / 6 GiB, so this is
+    really a memory-headroom knob: num_cpus=1 packs 4 tasks per node, 2 packs
+    two. See _run_parallel for the measured peaks behind the numbers.
+
+    Pure and separately testable because the failure mode is silent and
+    expensive — too low and the raylet OOM-kills tasks mid-run (and can take
+    the node with it), which surfaces as missing channels in the output tree
+    rather than as an error from this function.
+    """
+    resampling = any(cfg.grid_interval_for(ch) is not None for ch in channels)
+    return 2 if resampling else 1
+
+
 def _run_parallel(
     settings: Settings,
     mission: str,
@@ -374,8 +488,41 @@ def _run_parallel(
     # task starts (Python's allocator does not release memory to the OS on del).
     # Small channels (~950MB peak) pack 4 per node (4x950MB=3.8GB + 0.3GB Ray
     # daemons = 4.1GB, well within the 5.7GB kill threshold on 6Gi workers).
+    #
+    # Resampling (docs/plans/023 stage .3) roughly DOUBLES that per-task peak:
+    # it adds a full bucketing pass over the native series while the native
+    # frame is still live. Originally measured (resample(rule).mean().dropna(),
+    # before docs/plans/023-review 3.1) on ESA-Mission1 at a 30 s grid, "small"
+    # channels peaked at a uniform ~2.1GB rather than ~950MB, so 4-way packing
+    # became 4x2.1GB = 8.4GB on a 6GiB node and the raylet OOM-killed tasks
+    # (and eventually a whole node) as soon as four heavy channels coincided.
+    #
+    # 3.1 replaced that resample+dropna with floor+groupby, which only ever
+    # materialises buckets a tick actually landed in — re-measured on the same
+    # 62-channel ESA-Mission1 grid-30s run, peak_rss_mb now varies by channel
+    # (~1.3GB for channels with substantial native outages, since the old path
+    # wasted memory materialising since-dropped empty buckets across them, up
+    # to 2.47GB for channel_74, the worst observed) rather than a uniform
+    # ~2.1GB — 3.1 only PARTIALLY removes the doubling, not fully back to
+    # ~950MB, and stays channel-dependent. 2-way packing therefore stays
+    # required: 2x2.47GB + 0.3GB = 5.24GB, still under the 5.7GB threshold but
+    # with less headroom than a full return to ~950MB would give. Fewer
+    # concurrent tasks per node, not a bigger node — the autoscaler adds
+    # replicas (maxReplicas=45) rather than the run costing more per node.
+    #
+    # Large channels have no equivalent lever (docs/plans/023-review, A4):
+    # num_cpus=4 already claims the entire 4-CPU node so no other task can be
+    # co-scheduled beside it, packing-wise, regardless of small_task_cpus. If
+    # resampling doubles a large channel's peak the same way it does small
+    # channels', the node itself (not co-scheduling) is what runs out of
+    # headroom, and the only lever is a bigger node or GRID_INTERVAL-aware
+    # chunking of the large channel's own read — neither implemented here.
+    # The 3.3 re-measurement above did not exercise this path: all 62 channels
+    # in that run fell under _LARGE_THRESHOLD, so it remains unmeasured.
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
+    _small_cpus = small_task_cpus(abs_settings.preprocess, channels)
+    _resampling = _small_cpus > 1
 
     futures = []
     n_large = 0
@@ -386,10 +533,8 @@ def _run_parallel(
             size = _LARGE_THRESHOLD + 1   # unknown → conservative/safe default
         is_large = size > _LARGE_THRESHOLD
         n_large += is_large
-        task = (
-            _preprocess_channel_remote.options(num_cpus=4)
-            if is_large
-            else _preprocess_channel_remote
+        task = _preprocess_channel_remote.options(
+            num_cpus=4 if is_large else _small_cpus
         )
         futures.append(task.remote(
             settings_ref, mission, channel,
@@ -402,6 +547,8 @@ def _run_parallel(
         n_tasks=len(futures),
         n_large=n_large,
         n_small=len(futures) - n_large,
+        resampling=_resampling,
+        small_task_cpus=_small_cpus,
     )
     results: list[dict[str, Any]] = ray.get(futures)
     return results

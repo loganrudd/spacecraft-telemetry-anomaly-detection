@@ -44,6 +44,44 @@ spec:
   shutdownAfterJobFinishes: true
   ttlSecondsAfterFinished: 3600
 
+  # Same submitter-eviction defence cluster_train.yaml carries, and for the same
+  # reason — this manifest was missing it entirely, so it took KubeRay's default
+  # (no annotation), which on Autopilot makes the submitter fair game for
+  # eviction during node consolidation.
+  #
+  # The submitter calls `ray job submit` and then only tails logs, but if it
+  # dies KubeRay retries it, and every retry fails with "Job with submission_id
+  # <id> already exists" because Ray derives the submission ID from the RayJob.
+  # Retries can therefore never succeed: the Job hits BackoffLimitExceeded, the
+  # RayJob goes Failed, and shutdownAfterJobFinishes tears down the RayCluster —
+  # killing a sweep that was running perfectly well — observed twice on
+  # cluster_train.yaml (2026-08-07, ~17-22 min in). Not yet observed on a tune
+  # sweep; this closes the gap before it is, since the two manifests have the
+  # same submitter shape and only train.yaml was protected.
+  #
+  # NOTE: spec.submitterConfig.backoffLimit (which would surface a genuine
+  # submission failure immediately instead of behind a wall of misleading
+  # "already exists" retries) is NOT available in KubeRay 1.1.1 — the API
+  # rejects it as an unknown field. It landed in 1.2+. Until the operator is
+  # upgraded the annotation is the real defence, since a submitter that is
+  # never evicted never retries.
+  submitterPodTemplate:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: ${REGION}-docker.pkg.dev/${PROJECT_ID}/spacecraft-telemetry/ray:latest
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+
   rayClusterSpec:
     rayVersion: "2.31.0"
     enableInTreeAutoscaling: true
@@ -71,6 +109,15 @@ spec:
                 # None (Settings.variant), reproducing today's output layout.
                 - name: SPACECRAFT_VARIANT
                   value: "${VARIANT}"
+                # HPO never builds a forecast head — but it DOES rebuild window
+                # labels (load_window_labels), and window_span() is
+                # window_size + prediction_horizon + forecast_steps - 1. Omitting
+                # this computes labels at H=1's span against errors written at
+                # H=10's, and the sweep aborts on a shape mismatch. That is why
+                # every H=10 tuned config to date came from the post-hoc grid
+                # rather than from Tune: Tune could not run on an H=10 arm.
+                - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                  value: "${FORECAST_STEPS}"
                 - name: MLFLOW_ARTIFACTS_DESTINATION
                   value: gs://${PROJECT_ID}-artifacts/mlflow
                 - name: SPACECRAFT_RAY__ADDRESS
@@ -160,6 +207,8 @@ spec:
                   # splits inside worker tasks (plan 019 B2).
                   - name: SPACECRAFT_VARIANT
                     value: "${VARIANT}"
+                  - name: SPACECRAFT_MODEL__FORECAST_STEPS
+                    value: "${FORECAST_STEPS}"
                   - name: MLFLOW_ARTIFACTS_DESTINATION
                     value: gs://${PROJECT_ID}-artifacts/mlflow
                   - name: SPACECRAFT_RAY__ADDRESS

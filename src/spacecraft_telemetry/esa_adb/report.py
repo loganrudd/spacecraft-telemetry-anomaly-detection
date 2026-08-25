@@ -43,6 +43,7 @@ import pandas as pd
 
 from spacecraft_telemetry.core.logging import get_logger
 from spacecraft_telemetry.esa_adb.detections import (
+    load_metadata_matching_runs,
     mission_intervals_from_per_channel,
     per_channel_detection_intervals,
     tuned_provenance,
@@ -57,7 +58,6 @@ from spacecraft_telemetry.esa_adb.metrics import (
 from spacecraft_telemetry.esa_adb.timeline import mission_timeline
 from spacecraft_telemetry.mlflow_tracking import configure_mlflow
 from spacecraft_telemetry.model.dataset import (
-    load_series_metadata,
     window_target_timestamps,
     window_target_timestamps_from_metadata,
 )
@@ -359,16 +359,21 @@ def build_report(
     # values column this report never uses) would be unusable against
     # CLAUDE.md's local memory ceiling. load_series_metadata() only reads the
     # small columns actually needed. See docs/plans/019 P2/P3.
-    metadata_by_channel: dict[str, SeriesMetadata] = {
-        channel: load_series_metadata(
-            settings.preprocess.processed_data_dir, mission, channel, "test",
-            variant=settings.variant,
-        )
-        for channel in channels
-    }
+    # Built per SCORING RUN's index, not blindly per channel: a channel scored
+    # inside a multivariate group was windowed over the group's joint
+    # (intersected) index, and rebuilding its windows from its own partition
+    # would disagree with its saved errors.npy — see
+    # detections.load_metadata_matching_runs. Called once per untuned/tuned
+    # variant (grouping can legitimately differ between them mid-experiment),
+    # sharing one group_cache so groups both variants agree on are still
+    # loaded once.
+    _group_cache: dict[tuple[str, ...], SeriesMetadata] = {}
+    metadata_untuned: dict[str, SeriesMetadata] = load_metadata_matching_runs(
+        settings, mission, channels, tuned=False, run_map=run_map, group_cache=_group_cache
+    )
 
     timeline_full = mission_timeline(
-        settings, mission, channels, metadata_by_channel=metadata_by_channel
+        settings, mission, channels, metadata_by_channel=metadata_untuned
     )
 
     per_channel_untuned = per_channel_detection_intervals(
@@ -377,7 +382,7 @@ def build_report(
         channels,
         tuned=False,
         run_map=run_map,
-        metadata_by_channel=metadata_by_channel,
+        metadata_by_channel=metadata_untuned,
     )
     detections_untuned = mission_intervals_from_per_channel(per_channel_untuned)
     events_full = group_events(events_df, channels, timeline_full)
@@ -388,8 +393,12 @@ def build_report(
         # esa_adb.detections.tuned_provenance (docs/plans/022, stage 022.2b).
         provenance = tuned_provenance(settings, mission, channels, run_map=run_map)
 
+        metadata_tuned: dict[str, SeriesMetadata] = load_metadata_matching_runs(
+            settings, mission, channels, tuned=True, run_map=run_map, group_cache=_group_cache
+        )
+
         timeline_tuned = tuned_eval_window(
-            settings, mission, channels, timeline_full, metadata_by_channel=metadata_by_channel
+            settings, mission, channels, timeline_full, metadata_by_channel=metadata_tuned
         )
 
         per_channel_tuned_full = per_channel_detection_intervals(
@@ -398,7 +407,7 @@ def build_report(
             channels,
             tuned=True,
             run_map=run_map,
-            metadata_by_channel=metadata_by_channel,
+            metadata_by_channel=metadata_tuned,
         )
         per_channel_tuned = {
             ch: intersect(normalize(ivs), timeline_tuned)

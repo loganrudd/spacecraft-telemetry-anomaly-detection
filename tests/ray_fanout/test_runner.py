@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -313,6 +314,45 @@ def test_group_channels_by_subsystem_drops_unmapped(tmp_path) -> None:
     assert groups == {"subsystem_1": ["channel_41"]}
 
 
+def test_group_channels_prefers_measured_group_map(tmp_path) -> None:
+    """A measured channel_groups.json overrides the subsystem map.
+
+    docs/plans/023: joint modelling needs a shared timestamp grid, and the
+    natural ESA group crosses subsystem boundaries — so the grouping key is a
+    measured group id, with the subsystem name as the fallback.
+    """
+    import json
+
+    from spacecraft_telemetry.core.config import load_settings
+    from spacecraft_telemetry.ray_fanout.runner import _group_channels_by_subsystem
+
+    mission = "ESA-Mission1"
+    processed_dir = tmp_path / "processed"
+    metadata_dir = processed_dir / mission / "metadata"
+    metadata_dir.mkdir(parents=True)
+    (metadata_dir / "channel_subsystems.json").write_text(
+        json.dumps({
+            "channel_41": "subsystem_5", "channel_47": "subsystem_6", "channel_9": "subsystem_2",
+        })
+    )
+    (metadata_dir / "channel_groups.json").write_text(
+        json.dumps({"channel_41": "group_01", "channel_47": "group_01"})
+    )
+    settings = load_settings("test").model_copy(
+        update={"preprocess": load_settings("test").preprocess.model_copy(
+            update={"processed_data_dir": str(processed_dir)}
+        )}
+    )
+
+    groups = _group_channels_by_subsystem(
+        settings, mission, ["channel_41", "channel_9", "channel_47"]
+    )
+
+    # channel_41 and channel_47 join across subsystems; channel_9 is absent from
+    # the group map (a singleton family) and drops out of the multivariate sweep.
+    assert groups == {"group_01": ["channel_41", "channel_47"]}
+
+
 @pytest.mark.slow
 def test_train_all_subsystems_ok(ray_local, ray_series_parquet_multichannel) -> None:
     """train_all_subsystems trains one joint model per subsystem group."""
@@ -485,3 +525,72 @@ class TestTunedMeta:
         from spacecraft_telemetry.ray_fanout.runner import _tuned_meta
 
         assert _tuned_meta({"_meta": {"run_id": 12345}}) == ("12345", None)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_tuned_entry — docs/plans/023 stage .4
+# ---------------------------------------------------------------------------
+
+
+class TestResolveTunedEntry:
+    """Models are keyed by GROUP, HPO by SUBSYSTEM.
+
+    Without the subsystem fallback the lookup misses silently: run_all_sweeps
+    writes {"subsystem_6": {...}} while the group key is "subsystem_6_g03", so
+    no overrides apply and a "tuned" run is identical to the untuned baseline
+    with nothing raised. Every assertion here exists to keep that silent.
+    """
+
+    CH2SUB: ClassVar[dict[str, str]] = {
+        "channel_47": "subsystem_6",
+        "channel_48": "subsystem_6",
+        "channel_41": "subsystem_5",
+    }
+
+    def test_falls_back_to_the_groups_subsystem(self) -> None:
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        cfgs = {"subsystem_6": {"threshold_z": 2.5}}
+        got = _resolve_tuned_entry(
+            cfgs, "subsystem_6_g09", ["channel_47", "channel_48"], self.CH2SUB
+        )
+        assert got == {"threshold_z": 2.5}
+
+    def test_group_keyed_entry_wins_over_subsystem(self) -> None:
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        cfgs = {"subsystem_6": {"threshold_z": 2.5}, "subsystem_6_g09": {"threshold_z": 4.0}}
+        got = _resolve_tuned_entry(
+            cfgs, "subsystem_6_g09", ["channel_47", "channel_48"], self.CH2SUB
+        )
+        assert got == {"threshold_z": 4.0}, "a deliberate per-group override must take precedence"
+
+    def test_group_spanning_two_subsystems_returns_none(self) -> None:
+        # Applying one subsystem's thresholds to a group that straddles two is
+        # precisely the silent mis-tuning this guards against.
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        cfgs = {"subsystem_6": {"threshold_z": 2.5}, "subsystem_5": {"threshold_z": 3.5}}
+        got = _resolve_tuned_entry(cfgs, "mixed_group", ["channel_47", "channel_41"], self.CH2SUB)
+        assert got is None
+
+    def test_unmapped_channels_return_none(self) -> None:
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        cfgs = {"subsystem_6": {"threshold_z": 2.5}}
+        assert _resolve_tuned_entry(cfgs, "g", ["channel_999"], self.CH2SUB) is None
+
+    def test_no_tuned_configs_returns_none(self) -> None:
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        assert _resolve_tuned_entry(None, "g", ["channel_47"], self.CH2SUB) is None
+        assert _resolve_tuned_entry({}, "g", ["channel_47"], self.CH2SUB) is None
+
+    def test_subsystem_keyed_lookup_still_works_for_a_plain_subsystem_group(self) -> None:
+        # Pre-023 behaviour: when the group key IS the subsystem name, step 1
+        # matches and nothing changes.
+        from spacecraft_telemetry.ray_fanout.runner import _resolve_tuned_entry
+
+        cfgs = {"subsystem_6": {"threshold_z": 2.5}}
+        got = _resolve_tuned_entry(cfgs, "subsystem_6", ["channel_47"], self.CH2SUB)
+        assert got == {"threshold_z": 2.5}

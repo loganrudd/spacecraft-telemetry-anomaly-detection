@@ -179,3 +179,509 @@ class TestRunPreprocessingEdgeCases:
         train_df = _read_partition(out_dir, "ESA-Mission1", "train", "channel_1")
         test_df = _read_partition(out_dir, "ESA-Mission1", "test", "channel_1")
         assert not pd.concat([train_df, test_df])["is_anomaly"].any()
+
+
+# ---------------------------------------------------------------------------
+# ESA common time grid — docs/plans/023 stage .3
+# ---------------------------------------------------------------------------
+
+
+def _write_phase_offset_input(base: Path) -> Path:
+    """Two channels on the same 30s cadence, 16.1s out of phase.
+
+    This is the measured ESA blocker in miniature (docs/plans/023: channel_70 /
+    channel_71 share not one timestamp across 2.9M rows each). Returns the input
+    root that run_preprocessing expects.
+    """
+    from spacecraft_telemetry.preprocess.io import read_channel  # noqa: F401  (schema ref)
+
+    mission = "ESA-Mission1"
+    channels_dir = base / "input" / mission / "channels"
+    channels_dir.mkdir(parents=True)
+    start = pd.Timestamp("2000-01-01", tz="UTC")
+    for name, phase_s in (("channel_70", 0.0), ("channel_71", 16.1)):
+        idx = pd.DatetimeIndex(
+            [start + pd.Timedelta(seconds=phase_s + 30.0 * i) for i in range(400)],
+            name="datetime",
+        ).as_unit("us")
+        values = pd.array([float(i % 17) * 0.5 for i in range(400)], dtype="float32")
+        pd.DataFrame({name: values}, index=idx).to_parquet(channels_dir / f"{name}.parquet")
+    return base / "input"
+
+
+def _epoch_seconds(ts: pd.Series) -> pd.Series:
+    """Whole seconds since the epoch — precision-agnostic (us on disk, ns in pandas)."""
+    return (ts - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds()
+
+
+def _settings_with_grid(input_dir: Path, out_dir: Path, **preprocess_kwargs):
+    from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+    return Settings(
+        data=DataConfig(sample_data_dir=input_dir),
+        preprocess=PreprocessingConfig(
+            processed_data_dir=out_dir, train_fraction=0.8, **preprocess_kwargs
+        ),
+    )
+
+
+class TestRunPreprocessingTimeGrid:
+    def test_no_grid_leaves_native_timestamps(self, settings) -> None:
+        # grid_interval_seconds defaults to None — today's behaviour, byte for
+        # byte. The 90s input cadence must survive untouched.
+        run_preprocessing(settings, "ESA-Mission1", parallel=False)
+        out = Path(str(settings.preprocess.processed_data_dir))
+        train = _read_partition(out, "ESA-Mission1", "train", "channel_1")
+        diffs = train["telemetry_timestamp"].diff().iloc[1:].dt.total_seconds()
+        assert (diffs == 90.0).all()
+
+    def test_grid_snaps_timestamps_to_the_grid(
+        self, pipeline_input_dir: Path, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "out_grid"
+        out_dir.mkdir()
+        s = _settings_with_grid(pipeline_input_dir, out_dir, grid_interval_seconds=300)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        train = _read_partition(out_dir, "ESA-Mission1", "train", "channel_1")
+        assert (_epoch_seconds(train["telemetry_timestamp"]) % 300 == 0).all()
+
+    def test_grid_preserves_the_on_disk_column_contract(
+        self, pipeline_input_dir: Path, tmp_path: Path
+    ) -> None:
+        # Stage .3 changes the CONTENTS of the Parquet, never its schema —
+        # .claude/rules/preprocess.md's downstream contract.
+        out_dir = tmp_path / "out_grid_schema"
+        out_dir.mkdir()
+        s = _settings_with_grid(pipeline_input_dir, out_dir, grid_interval_seconds=300)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        train = _read_partition(out_dir, "ESA-Mission1", "train", "channel_1")
+        assert list(train.columns) == [
+            "telemetry_timestamp", "value_normalized", "segment_id", "is_anomaly",
+        ]
+
+    def test_grid_writes_normalization_params(
+        self, pipeline_input_dir: Path, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "out_grid_params"
+        out_dir.mkdir()
+        s = _settings_with_grid(pipeline_input_dir, out_dir, grid_interval_seconds=300)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        params = json.loads((out_dir / "ESA-Mission1" / "normalization_params.json").read_text())
+        assert set(params["channel_1"]) == {"mean", "std"}
+
+    def test_per_channel_override_wins(self, tmp_path: Path) -> None:
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_override"
+        out_dir.mkdir()
+        s = _settings_with_grid(
+            input_dir,
+            out_dir,
+            grid_interval_seconds=30,
+            channel_grid_interval_seconds={"channel_71": 300},
+        )
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        a = _read_partition(out_dir, "ESA-Mission1", "train", "channel_70")
+        b = _read_partition(out_dir, "ESA-Mission1", "train", "channel_71")
+        assert (_epoch_seconds(a["telemetry_timestamp"]) % 30 == 0).all()
+        assert (_epoch_seconds(b["telemetry_timestamp"]) % 300 == 0).all()
+
+    def test_phase_offset_channels_share_no_timestamps_without_a_grid(
+        self, tmp_path: Path
+    ) -> None:
+        # The "before" half of the result: this is what blocks multivariate
+        # grouping today.
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_native"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        a = _read_partition(out_dir, "ESA-Mission1", "train", "channel_70")
+        b = _read_partition(out_dir, "ESA-Mission1", "train", "channel_71")
+        common = pd.DatetimeIndex(a["telemetry_timestamp"]).intersection(
+            pd.DatetimeIndex(b["telemetry_timestamp"])
+        )
+        assert len(common) == 0
+
+    def test_grid_makes_phase_offset_channels_jointly_alignable(
+        self, tmp_path: Path
+    ) -> None:
+        # The "after" half, measured through the real pipeline rather than a
+        # timestamp simulation — stage .3's whole point.
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_gridded"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        a = _read_partition(out_dir, "ESA-Mission1", "train", "channel_70")
+        b = _read_partition(out_dir, "ESA-Mission1", "train", "channel_71")
+        common = pd.DatetimeIndex(a["telemetry_timestamp"]).intersection(
+            pd.DatetimeIndex(b["telemetry_timestamp"])
+        )
+        assert len(common) >= min(len(a), len(b)) - 1
+
+
+# ---------------------------------------------------------------------------
+# Grid + labels — docs/reviews/023-channel-time-grid.md B3/4.1, 4.2
+#
+# Every grid test above runs with labels_df=None; the README's F0.5 numbers
+# all depend on the labeling branch, which has never been exercised together
+# with a grid until here.
+# ---------------------------------------------------------------------------
+
+
+def _write_channel_with_labels(
+    base: Path,
+    channel: str,
+    offsets_s: list[float],
+    values: list[float],
+    label_rows: list[tuple[str, float, float]],
+) -> Path:
+    """{base}/input/ESA-Mission1/channels/{channel}.parquet + labels.csv.
+
+    label_rows: (anomaly_id, start_offset_s, end_offset_s), same channel.
+    """
+    mission = "ESA-Mission1"
+    channels_dir = base / "input" / mission / "channels"
+    channels_dir.mkdir(parents=True, exist_ok=True)
+    start = pd.Timestamp("2000-01-01", tz="UTC")
+    idx = pd.DatetimeIndex(
+        [start + pd.Timedelta(seconds=o) for o in offsets_s], name="datetime"
+    ).as_unit("us")
+    pd.DataFrame(
+        {channel: pd.array(values, dtype="float32")}, index=idx
+    ).to_parquet(channels_dir / f"{channel}.parquet")
+
+    pd.DataFrame(
+        {
+            "ID": [r[0] for r in label_rows],
+            "Channel": [channel] * len(label_rows),
+            "StartTime": [(start + pd.Timedelta(seconds=r[1])).isoformat().replace("+00:00", "Z")
+                          for r in label_rows],
+            "EndTime": [(start + pd.Timedelta(seconds=r[2])).isoformat().replace("+00:00", "Z")
+                        for r in label_rows],
+        }
+    ).to_csv(base / "input" / mission / "labels.csv", index=False)
+    return base / "input"
+
+
+class TestGridLabelIntegrity:
+    def test_interval_spanning_several_buckets_survives_end_to_end(
+        self, tmp_path: Path
+    ) -> None:
+        # Ticks exactly on the 30s grid from t=0 to t=600 (exclusive); a label
+        # interval [300, 600) spans 10 buckets, all of which carry a tick.
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [30.0 * i for i in range(20)], [1.0] * 20,
+            [("id_1", 300.0, 600.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        train = _read_partition(out_dir, "ESA-Mission1", "train", "channel_1")
+        test = _read_partition(out_dir, "ESA-Mission1", "test", "channel_1")
+        combined = pd.concat([train, test])
+        assert int(combined["is_anomaly"].sum()) == 10
+
+    def test_sub_grid_interval_loss_is_logged(self, tmp_path: Path, monkeypatch) -> None:
+        # Two ticks share bucket floor=0 (t=0, t=20); the label interval
+        # [15, 25) covers the real t=20 tick but not the bucket-floor
+        # timestamp, so the grid loses it — 4.2 must warn, not silently
+        # produce a better-looking F0.5.
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def info(self, event: str, **kwargs: object) -> None:
+                pass
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+        monkeypatch.setattr(_pipeline, "log", _RecordingLogger())
+
+        # Padding ticks (t=30..600, one per bucket) give the series enough
+        # rows for a non-empty train/test split — the bucket-0 pair (t=0,
+        # t=20) is what exercises the sub-grid loss, unrelated to the split.
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [0.0, 20.0] + [30.0 * i for i in range(1, 21)],
+            [1.0, 2.0] + [1.0] * 20,
+            [("id_1", 15.0, 25.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        lost = [r for r in recorded if r[0] == "pipeline.channel.label_interval_lost"]
+        assert len(lost) == 1, f"expected exactly one warning, got {recorded}"
+        _, fields = lost[0]
+        assert fields["channel_id"] == "channel_1"
+        assert fields["n_lost"] == 1
+        assert fields["n_labels"] == 1
+
+    def test_no_warning_when_every_interval_survives(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def info(self, event: str, **kwargs: object) -> None:
+                pass
+
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+        monkeypatch.setattr(_pipeline, "log", _RecordingLogger())
+
+        input_dir = _write_channel_with_labels(
+            tmp_path, "channel_1",
+            [30.0 * i for i in range(20)], [1.0] * 20,
+            [("id_1", 300.0, 600.0)],
+        )
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        lost = [r for r in recorded if r[0] == "pipeline.channel.label_interval_lost"]
+        assert lost == []
+
+
+class TestGroupGridRateMismatchWarning:
+    """docs/reviews/023-channel-time-grid.md item A3.
+
+    The group map (which channels belong together) and the grid rate
+    (channel_grid_interval_seconds) are two independently hand-maintained
+    sources for one fact, and nothing else cross-checks them. A joint model
+    is bounded by its coarsest member, so a mismatch silently shrinks a
+    group's intersection several stages downstream of a CHANNEL_GRIDS typo.
+    """
+
+    @staticmethod
+    def _write_group_map(out_dir: Path, mission: str, mapping: dict[str, str]) -> None:
+        from spacecraft_telemetry.core.paths import output_path
+
+        metadata_dir = output_path(out_dir, mission, None, "metadata")
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        (metadata_dir / "channel_groups.json").write_text(json.dumps(mapping))
+
+    @staticmethod
+    def _recording_logger() -> tuple[object, list[tuple[str, dict[str, object]]]]:
+        recorded: list[tuple[str, dict[str, object]]] = []
+
+        class _RecordingLogger:
+            def warning(self, event: str, **kwargs: object) -> None:
+                recorded.append((event, kwargs))
+
+            def info(self, event: str, **kwargs: object) -> None:
+                pass  # run_preprocessing also emits several info events
+
+        return _RecordingLogger(), recorded
+
+    def test_mismatched_rates_within_a_group_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_mismatch"
+        out_dir.mkdir()
+        self._write_group_map(out_dir, "ESA-Mission1", {"channel_70": "grp", "channel_71": "grp"})
+        s = _settings_with_grid(
+            input_dir, out_dir,
+            channel_grid_interval_seconds={"channel_70": 30, "channel_71": 90},
+        )
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        matches = [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+        assert len(matches) == 1
+        _event, fields = matches[0]
+        assert fields["group"] == "grp"
+        assert fields["rates"] == {"channel_70": 30, "channel_71": 90}
+
+    def test_agreeing_rates_do_not_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_agree"
+        out_dir.mkdir()
+        self._write_group_map(out_dir, "ESA-Mission1", {"channel_70": "grp", "channel_71": "grp"})
+        s = _settings_with_grid(input_dir, out_dir, grid_interval_seconds=30)
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        assert not [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+
+    def test_no_group_map_never_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+        from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+        input_dir = _write_phase_offset_input(tmp_path)
+        out_dir = tmp_path / "out_nogroup"
+        out_dir.mkdir()
+        # channel_70/channel_71 are real ESA-Mission1 channel ids with a real
+        # subsystem entry in the repo's committed data/raw channels.csv —
+        # DataConfig.raw_data_dir defaults there, so load_channel_group_map's
+        # CSV fallback would otherwise pick it up. Isolate raw_data_dir too, so
+        # this test exercises "no group map anywhere", not "leaked repo data".
+        s = Settings(
+            data=DataConfig(sample_data_dir=input_dir, raw_data_dir=tmp_path / "empty_raw"),
+            preprocess=PreprocessingConfig(
+                processed_data_dir=out_dir, train_fraction=0.8,
+                channel_grid_interval_seconds={"channel_70": 30, "channel_71": 90},
+            ),
+        )
+
+        logger, recorded = self._recording_logger()
+        monkeypatch.setattr(_pipeline, "log", logger)
+        run_preprocessing(s, "ESA-Mission1", parallel=False)
+
+        assert not [r for r in recorded if r[0] == "pipeline.group_grid_rate_mismatch"]
+
+
+class TestSmallTaskCpus:
+    """Packing headroom for the Ray fan-out — docs/plans/023 stage .3.
+
+    Resampling adds a full bucketing pass while the native frame is still live,
+    which measured at ~2.1GB peak per "small" ESA channel against ~950MB
+    without it. At 4-per-node on 6GiB workers that OOM-killed tasks and
+    eventually a whole node, and the symptom was missing channels in the output
+    tree rather than a raised error — hence a pinned unit test.
+    """
+
+    def test_no_grid_packs_four_per_node(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        assert small_task_cpus(PreprocessingConfig(), ["channel_1", "channel_2"]) == 1
+
+    def test_mission_wide_grid_halves_the_packing(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(grid_interval_seconds=30)
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 2
+
+    def test_a_single_gridded_channel_is_enough_to_halve_it(self) -> None:
+        # The reservation is per-task and uniform, so one resampled channel in
+        # the batch is enough to need the headroom.
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_2": 30})
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 2
+
+    def test_overrides_for_other_channels_do_not_apply(self) -> None:
+        from spacecraft_telemetry.core.config import PreprocessingConfig
+        from spacecraft_telemetry.preprocess.pipeline import small_task_cpus
+
+        cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_99": 30})
+        assert small_task_cpus(cfg, ["channel_1", "channel_2"]) == 1
+
+
+class TestPackingWiring:
+    """docs/reviews/023-channel-time-grid.md T1: small_task_cpus is pure and
+    tested above, but nothing asserted it actually reaches
+    _preprocess_channel_remote.options(num_cpus=...) — the grid path never
+    ran through Ray at all in this suite. Monkeypatches .options/ray.put/
+    ray.get so this runs with no Ray cluster, per the plan's own framing.
+    """
+
+    def _run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        *, grid_interval_seconds: int | None, large_channels: set[str],
+    ) -> dict[str, int]:
+        import spacecraft_telemetry.preprocess.pipeline as _pipeline
+        from spacecraft_telemetry.core.config import DataConfig, PreprocessingConfig, Settings
+
+        data_dir = tmp_path / "data"
+        channels_dir = data_dir / "ESA-Mission1" / "channels"
+        channels_dir.mkdir(parents=True)
+        channel_names = ["channel_small_a", "channel_small_b", "channel_large"]
+        for name in channel_names:
+            # A "large" channel's stat() lookup deliberately fails (no file
+            # written) — _run_parallel's except-fallback treats an unknown
+            # size as large ("unknown -> conservative/safe default"), which
+            # exercises is_large=True without writing a real 150MB fixture.
+            if name not in large_channels:
+                (channels_dir / f"{name}.parquet").write_bytes(b"x")
+
+        recorded: dict[str, int] = {}
+
+        class _FakeTaskRecorder:
+            # .options() itself doesn't know which channel it's for — the
+            # channel arrives as a positional arg at the .remote(...) call
+            # site, so recording happens there instead.
+            def __init__(self, num_cpus: int) -> None:
+                self._num_cpus = num_cpus
+
+            def remote(
+                self, settings_ref: object, mission: str, channel: str, *args: object,
+            ) -> str:
+                recorded[channel] = self._num_cpus
+                return channel
+
+        def fake_options(*, num_cpus: int) -> _FakeTaskRecorder:
+            return _FakeTaskRecorder(num_cpus)
+
+        monkeypatch.setattr(_pipeline.ray, "put", lambda x: x)
+        monkeypatch.setattr(_pipeline.ray, "get", lambda futures: [
+            {"channel_id": f, "rows_in": 0, "train_rows": 0, "test_rows": 0, "params": {}}
+            for f in futures
+        ])
+        monkeypatch.setattr(_pipeline._preprocess_channel_remote, "options", fake_options)
+
+        s = Settings(
+            data=DataConfig(sample_data_dir=data_dir),
+            preprocess=PreprocessingConfig(
+                processed_data_dir=tmp_path / "out",
+                grid_interval_seconds=grid_interval_seconds,
+            ),
+        )
+        _pipeline._run_parallel(
+            s, "ESA-Mission1", channel_names,
+            tmp_path / "out" / "train", tmp_path / "out" / "test", None,
+        )
+        return recorded
+
+    def test_native_large_gets_four_small_gets_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded = self._run(
+            tmp_path, monkeypatch,
+            grid_interval_seconds=None, large_channels={"channel_large"},
+        )
+        assert recorded == {"channel_small_a": 1, "channel_small_b": 1, "channel_large": 4}
+
+    def test_gridded_large_still_gets_four_small_gets_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A4: large channels have num_cpus=4 regardless of small_task_cpus —
+        # resampling does not change their packing, only small channels'.
+        recorded = self._run(
+            tmp_path, monkeypatch,
+            grid_interval_seconds=30, large_channels={"channel_large"},
+        )
+        assert recorded == {"channel_small_a": 2, "channel_small_b": 2, "channel_large": 4}

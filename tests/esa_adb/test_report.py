@@ -407,9 +407,14 @@ class TestBuildReport:
                 "called when build_report has preloaded metadata_by_channel"
             )
 
+        # build_report now preloads via detections.load_metadata_matching_runs,
+        # which imports load_series_metadata locally (so it must be patched at
+        # its source, model.dataset, not on a module that bound it earlier).
+        import spacecraft_telemetry.model.dataset as dataset_module
+
         monkeypatch.setattr(
-            report_module, "load_series_metadata",
-            _counting_metadata_call(report_module.load_series_metadata),
+            dataset_module, "load_series_metadata",
+            _counting_metadata_call(dataset_module.load_series_metadata),
         )
         monkeypatch.setattr(
             timeline_module, "load_series_metadata",

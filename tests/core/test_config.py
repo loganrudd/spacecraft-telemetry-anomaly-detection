@@ -172,6 +172,65 @@ class TestPreprocessingConfig:
         assert PreprocessingConfig(train_lookback=sentinel).train_lookback is None
 
 
+class TestPreprocessingGridInterval:
+    """ESA common-time-grid config — docs/plans/023 stage .3."""
+
+    def test_grid_interval_default_is_none(self) -> None:
+        # None = native timestamps, i.e. today's behaviour unchanged.
+        assert PreprocessingConfig().grid_interval_seconds is None
+
+    def test_grid_interval_for_returns_none_by_default(self) -> None:
+        assert PreprocessingConfig().grid_interval_for("channel_41") is None
+
+    def test_grid_interval_for_returns_mission_default(self) -> None:
+        cfg = PreprocessingConfig(grid_interval_seconds=30)
+        assert cfg.grid_interval_for("channel_41") == 30
+
+    def test_channel_override_wins_over_mission_default(self) -> None:
+        # A joint model is bounded by its coarsest member, so the rate is a
+        # property of a channel GROUP, expressed as a per-channel override.
+        cfg = PreprocessingConfig(
+            grid_interval_seconds=30, channel_grid_interval_seconds={"channel_12": 90}
+        )
+        assert cfg.grid_interval_for("channel_12") == 90
+        assert cfg.grid_interval_for("channel_41") == 30
+
+    def test_channel_override_applies_without_mission_default(self) -> None:
+        cfg = PreprocessingConfig(channel_grid_interval_seconds={"channel_12": 90})
+        assert cfg.grid_interval_for("channel_12") == 90
+        assert cfg.grid_interval_for("channel_41") is None
+
+    @pytest.mark.parametrize("sentinel", ["", "null", "none", "None"])
+    def test_grid_interval_none_sentinels_coerce_to_none(self, sentinel: str) -> None:
+        # Same env-var problem as train_lookback: there is no way to spell None
+        # for an int | None field without this validator.
+        assert PreprocessingConfig(grid_interval_seconds=sentinel).grid_interval_seconds is None
+
+    def test_grid_interval_zero_invalid(self) -> None:
+        with pytest.raises(ValueError, match="grid_interval_seconds"):
+            PreprocessingConfig(grid_interval_seconds=0)
+
+    def test_channel_grid_interval_zero_invalid(self) -> None:
+        with pytest.raises(ValueError, match="channel_grid_interval_seconds"):
+            PreprocessingConfig(channel_grid_interval_seconds={"channel_12": 0})
+
+    @pytest.mark.parametrize("rate", [30, 90, 300, 60, 1, 86400])
+    def test_grid_interval_accepts_rates_dividing_a_day(self, rate: int) -> None:
+        assert PreprocessingConfig(grid_interval_seconds=rate).grid_interval_seconds == rate
+
+    @pytest.mark.parametrize("rate", [7, 11, 13, 25000])
+    def test_grid_interval_rejects_rates_not_dividing_a_day(self, rate: int) -> None:
+        # See docs/reviews/023-channel-time-grid.md stage 0.2: resample()'s
+        # start_day origin and the rewritten floor()'s epoch origin only
+        # coincide, for every dataset, when the rate divides 86400.
+        with pytest.raises(ValueError, match="must divide 86400"):
+            PreprocessingConfig(grid_interval_seconds=rate)
+
+    def test_channel_grid_interval_rejects_rate_not_dividing_a_day(self) -> None:
+        with pytest.raises(ValueError, match="must all divide 86400"):
+            PreprocessingConfig(channel_grid_interval_seconds={"channel_12": 11})
+
+
 # ---------------------------------------------------------------------------
 # load_settings / Settings
 # ---------------------------------------------------------------------------
