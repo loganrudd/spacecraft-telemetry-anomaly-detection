@@ -304,7 +304,7 @@ def _joint_segment_ids(
 def _align_multi_channel(
     per_channel: list[
         tuple[
-            np.ndarray[Any, np.dtype[np.float32]],
+            np.ndarray[Any, np.dtype[np.float32]] | None,
             np.ndarray[Any, np.dtype[np.int32]],
             np.ndarray[Any, np.dtype[np.bool_]],
             np.ndarray[Any, Any],
@@ -314,7 +314,7 @@ def _align_multi_channel(
     max_channels: int | None = None,
     max_bytes: int = _MAX_MULTIVARIATE_BYTES,
 ) -> tuple[
-    np.ndarray[Any, np.dtype[np.float32]],
+    np.ndarray[Any, np.dtype[np.float32]] | None,
     np.ndarray[Any, np.dtype[np.int32]],
     np.ndarray[Any, np.dtype[np.bool_]],
     np.ndarray[Any, Any],
@@ -323,13 +323,24 @@ def _align_multi_channel(
 
     Each element of ``per_channel`` is one channel's
     ``(values, segment_ids, is_anomaly, timestamps)`` as returned by
-    ``load_series_parquet``, already sorted by timestamp. The intersection of
-    all channels' timestamps is the defensible default alignment (Design,
+    ``load_series_parquet``, already sorted by timestamp. ``values`` may be
+    ``None`` for every element — the metadata-only callers (docs/reviews/023
+    -channel-time-grid.md P2) have no values column to align and skip
+    materialising one, rather than synthesising a dummy array this function
+    would otherwise copy for nothing. The intersection of all channels'
+    timestamps is the defensible default alignment (Design,
     docs/plans/021-multivariate-telemanom.md) — a row that any channel is
     missing cannot be forecast jointly.
 
+    ``per_channel`` is consumed: each element is released (set to ``None`` in
+    the caller's list) as soon as its column is copied into the aligned
+    output, so peak memory is the aligned arrays plus at most one still-live
+    input channel, not every input channel plus the aligned arrays at once.
+    Callers must not reuse ``per_channel`` after this call.
+
     Returns:
-        values:      (N, C) float32 — column i is channels[i]'s normalized value.
+        values:      (N, C) float32, or None iff every input's values was
+                     None — column i is channels[i]'s normalized value.
         segment_ids: (N,) int32     — joint segment id, see _joint_segment_ids.
         is_anomaly:  (N, C) bool    — per-channel flag, preserved (not OR'd)
                                        so callers can report per-channel recall.
@@ -356,6 +367,7 @@ def _align_multi_channel(
         )
 
     indices = [pd.DatetimeIndex(ts) for (_, _, _, ts) in per_channel]
+    has_values = per_channel[0][0] is not None
 
     # The intersection cannot exceed the shortest member, so this is an upper
     # bound on the join's cost and is computed before anything is materialised.
@@ -386,18 +398,21 @@ def _align_multi_channel(
         )
 
     n, c = n_aligned, len(channels)
-    values = np.empty((n, c), dtype=np.float32)
+    values = np.empty((n, c), dtype=np.float32) if has_values else None
     segment_ids_2d = np.empty((n, c), dtype=np.int32)
     is_anomaly = np.empty((n, c), dtype=bool)
-    zipped = zip(per_channel, indices, strict=True)
-    for i, ((vals, seg_ids, is_anom, _ts), idx) in enumerate(zipped):
+    for i, idx in enumerate(indices):
+        vals, seg_ids, is_anom, _ts = per_channel[i]
+        per_channel[i] = None  # type: ignore[call-overload]  # release once copied
         pos = idx.get_indexer(common)
         if (pos < 0).any():
             raise AssertionError(
                 f"common index is not a subset of channel {channels[i]!r}'s "
                 "timestamps — intersection() invariant violated"
             )
-        values[:, i] = vals[pos]
+        if values is not None:
+            assert vals is not None
+            values[:, i] = vals[pos]
         segment_ids_2d[:, i] = seg_ids[pos]
         is_anomaly[:, i] = is_anom[pos]
 
@@ -503,7 +518,9 @@ def load_multichannel_series_parquet(
         lambda ch: load_series_parquet(processed_dir, mission, ch, split, variant=variant),
         channels,
     )
-    return _align_multi_channel(per_channel, channels)
+    values, segment_ids, is_anomaly, timestamps = _align_multi_channel(per_channel, channels)
+    assert values is not None  # every element here carries real values, never None
+    return values, segment_ids, is_anomaly, timestamps
 
 
 def load_multichannel_series_metadata(
@@ -531,13 +548,19 @@ def load_multichannel_series_metadata(
         lambda ch: load_series_metadata(processed_dir, mission, ch, split, variant=variant),
         channels,
     )
-    # _align_multi_channel expects a values column; synthesize a dummy one so
-    # the exact same alignment code path (and its logging) is reused rather
-    # than duplicated for the metadata-only case.
-    per_channel = [
-        (np.empty(len(seg_ids), dtype=np.float32), seg_ids, is_anom, ts)
-        for seg_ids, is_anom, ts in per_channel_meta
-    ]
+    # _align_multi_channel accepts values=None for a metadata-only alignment
+    # (docs/reviews/023-channel-time-grid.md P2) — no dummy array to allocate
+    # or copy, unlike the np.empty(...) this used to synthesize per channel
+    # (~110MB for a 41-channel gridded group, ~480MB native) purely so every
+    # element had a values column _align_multi_channel would never read.
+    per_channel: list[
+        tuple[
+            np.ndarray[Any, np.dtype[np.float32]] | None,
+            np.ndarray[Any, np.dtype[np.int32]],
+            np.ndarray[Any, np.dtype[np.bool_]],
+            np.ndarray[Any, Any],
+        ]
+    ] = [(None, seg_ids, is_anom, ts) for seg_ids, is_anom, ts in per_channel_meta]
     _values, segment_ids, is_anomaly, timestamps = _align_multi_channel(per_channel, channels)
     return segment_ids, is_anomaly, timestamps
 

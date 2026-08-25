@@ -612,6 +612,38 @@ def test_align_multi_channel_zero_overlap_raises() -> None:
         _align_multi_channel([ch_a, ch_b], ["a", "b"])
 
 
+def test_align_multi_channel_none_values_returns_none_and_skips_values_array() -> None:
+    """docs/reviews/023-channel-time-grid.md P2: a metadata-only alignment
+    (every element's values is None) must not materialise an (N, C) values
+    array — segment_ids/is_anomaly/timestamps are unaffected."""
+    ts = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ch_a = (None, np.zeros(4, dtype=np.int32), np.zeros(4, dtype=bool), ts)
+    ch_b = (None, np.zeros(4, dtype=np.int32), np.array([False, True, False, False]), ts)
+    values, seg, is_anom, out_ts = _align_multi_channel([ch_a, ch_b], ["a", "b"])
+    assert values is None
+    np.testing.assert_array_equal(is_anom[:, 1], [False, True, False, False])
+    np.testing.assert_array_equal(seg, [0, 0, 0, 0])
+    assert len(out_ts) == 4
+
+
+def test_align_multi_channel_releases_each_channel_as_its_column_is_copied() -> None:
+    """P2: per_channel is consumed — each element is set to None once its
+    column is filled, so peak memory isn't every input channel plus the
+    aligned output arrays held simultaneously."""
+    ts = np.array([0, 60, 120, 180], dtype="datetime64[s]")
+    ch_a = (
+        np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32), np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool), ts,
+    )
+    ch_b = (
+        np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32), np.zeros(4, dtype=np.int32),
+        np.zeros(4, dtype=bool), ts,
+    )
+    per_channel = [ch_a, ch_b]
+    _align_multi_channel(per_channel, ["a", "b"])
+    assert per_channel == [None, None]
+
+
 def test_load_window_labels_from_metadata_matches_the_reading_variant(
     tmp_path: Path,
 ) -> None:
