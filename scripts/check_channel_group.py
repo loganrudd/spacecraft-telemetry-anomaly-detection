@@ -303,6 +303,26 @@ def _load_named_groups(path: Path) -> dict[str, list[str]]:
     return {str(k): [str(c) for c in v] for k, v in raw.items()}
 
 
+def _group_id(family: list[str]) -> str:
+    """Stable default group id, derived from MEMBERSHIP rather than position.
+
+    docs/reviews/023-channel-time-grid.md B4: a positional ``group_NN`` gets
+    silently reassigned to a different set of channels whenever the family
+    enumeration's ORDER shifts — e.g. re-running --enumerate-families after
+    preprocessing one more channel changes family sizes and thus sort order,
+    even though the channels already grouped correctly haven't changed. These
+    ids become MLflow registry names and the ``subsystem`` tag both
+    run-lookup implementations (tune/detections, per Stage 1) query, so a
+    silent reassignment renames a model out from under its own history.
+
+    The lexicographically smallest member anchors the id: families are
+    disjoint, so it is automatically unique across families, and it depends
+    only on this family's own membership — unaffected by any other family's
+    enumeration position.
+    """
+    return f"group_{min(family)}"
+
+
 def write_group_map(
     settings: Settings,
     mission: str,
@@ -320,10 +340,12 @@ def write_group_map(
     path — a 1-in/1-out multivariate model — for no benefit. Those channels
     fall out of the multivariate sweep and stay on train_all_channels.
 
-    Group ids default to ``group_NN`` ordered by the family ordering the caller
-    passes (largest first from enumerate_families), zero-padded so the registry
-    sorts them in that same order. ``names`` overrides them positionally, for a
-    grouping that already carries meaningful names (--groups-file).
+    Group ids default to ``group_{min(family)}`` — see ``_group_id`` — derived
+    from each family's own membership rather than its position in the list the
+    caller passes, so re-enumerating after preprocessing one more channel
+    cannot reassign an unchanged family's id. ``names`` overrides them
+    positionally, for a grouping that already carries meaningful names
+    (--groups-file).
 
     Returns the path written, for the caller's report.
 
@@ -360,7 +382,7 @@ def write_group_map(
     keep = [
         (name, family)
         for name, family in zip(
-            names or [f"group_{i:02d}" for i in range(1, len(families) + 1)],
+            names or [_group_id(family) for family in families],
             families,
             strict=True,
         )

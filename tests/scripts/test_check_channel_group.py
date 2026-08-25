@@ -340,7 +340,7 @@ def test_write_group_map_omits_singletons(
     import json
 
     mapping = json.loads(Path(path).read_text())
-    assert mapping == {"channel_a": "group_01", "channel_b": "group_01"}
+    assert mapping == {"channel_a": "group_channel_a", "channel_b": "group_channel_a"}
 
 
 def test_write_group_map_raises_when_group_members_disagree_on_grid_rate(
@@ -369,7 +369,7 @@ def test_write_group_map_allows_agreeing_grid_rates(
     assert Path(path).exists()
 
 
-def test_write_group_map_numbers_groups_in_family_order(
+def test_write_group_map_ids_derive_from_membership_not_position(
     tmp_path: Path, script_module: types.ModuleType
 ) -> None:
     processed_dir = tmp_path / "processed"
@@ -383,8 +383,36 @@ def test_write_group_map_numbers_groups_in_family_order(
     import json
 
     mapping = json.loads(Path(path).read_text())
-    assert mapping["channel_a"] == "group_01"
-    assert mapping["channel_d"] == "group_02"
+    assert mapping["channel_a"] == "group_channel_a"
+    assert mapping["channel_d"] == "group_channel_d"
+
+
+def test_write_group_map_ids_are_stable_across_enumeration_order(
+    tmp_path: Path, script_module: types.ModuleType
+) -> None:
+    # docs/reviews/023-channel-time-grid.md B4: re-enumerating after
+    # preprocessing one more channel can change family ORDER (e.g. sizes
+    # shift) without changing an unrelated family's own membership — its id
+    # must not move just because it now appears earlier or later in the list.
+    processed_dir = tmp_path / "processed"
+    settings = _settings(processed_dir)
+    family_a = ["channel_a", "channel_b", "channel_c"]
+    family_d = ["channel_d", "channel_e"]
+
+    path_first = script_module.write_group_map(
+        settings, _MISSION, [family_a, family_d]
+    )
+    path_second = script_module.write_group_map(
+        settings, _MISSION, [family_d, family_a]  # order flipped
+    )
+
+    import json
+
+    mapping_first = json.loads(Path(path_first).read_text())
+    mapping_second = json.loads(Path(path_second).read_text())
+    assert mapping_first == mapping_second
+    assert mapping_first["channel_a"] == "group_channel_a"
+    assert mapping_first["channel_d"] == "group_channel_d"
 
 
 def test_write_group_map_lands_where_the_group_loader_reads(
@@ -399,8 +427,8 @@ def test_write_group_map_lands_where_the_group_loader_reads(
     script_module.write_group_map(settings, _MISSION, [["channel_a", "channel_b"]])
 
     assert load_channel_group_map(settings, _MISSION) == {
-        "channel_a": "group_01",
-        "channel_b": "group_01",
+        "channel_a": "group_channel_a",
+        "channel_b": "group_channel_a",
     }
 
 
@@ -426,8 +454,8 @@ def test_write_group_map_is_variant_scoped(
     script_module.write_group_map(variant_settings, _MISSION, [["channel_a", "channel_b"]])
 
     assert load_channel_group_map(variant_settings, _MISSION) == {
-        "channel_a": "group_01",
-        "channel_b": "group_01",
+        "channel_a": "group_channel_a",
+        "channel_b": "group_channel_a",
     }
     # The native tree must not inherit the grid variant's grouping.
     assert load_channel_group_map(isolated, _MISSION) == {}
