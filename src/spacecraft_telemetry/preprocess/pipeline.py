@@ -449,14 +449,34 @@ def _run_parallel(
     #
     # Resampling (docs/plans/023 stage .3) roughly DOUBLES that per-task peak:
     # it adds a full bucketing pass over the native series while the native
-    # frame is still live. Measured on ESA-Mission1 at a 30 s grid, "small"
-    # channels peaked at 2.1GB rather than ~950MB, so 4-way packing became
-    # 4x2.1GB = 8.4GB on a 6GiB node and the raylet OOM-killed tasks (and
-    # eventually a whole node) as soon as four heavy channels coincided.
-    # Halving the packing restores the headroom the original sizing assumed:
-    # 2x2.1GB + 0.3GB = 4.5GB, still under the 5.7GB threshold. Fewer
+    # frame is still live. Originally measured (resample(rule).mean().dropna(),
+    # before docs/plans/023-review 3.1) on ESA-Mission1 at a 30 s grid, "small"
+    # channels peaked at a uniform ~2.1GB rather than ~950MB, so 4-way packing
+    # became 4x2.1GB = 8.4GB on a 6GiB node and the raylet OOM-killed tasks
+    # (and eventually a whole node) as soon as four heavy channels coincided.
+    #
+    # 3.1 replaced that resample+dropna with floor+groupby, which only ever
+    # materialises buckets a tick actually landed in — re-measured on the same
+    # 62-channel ESA-Mission1 grid-30s run, peak_rss_mb now varies by channel
+    # (~1.3GB for channels with substantial native outages, since the old path
+    # wasted memory materialising since-dropped empty buckets across them, up
+    # to 2.47GB for channel_74, the worst observed) rather than a uniform
+    # ~2.1GB — 3.1 only PARTIALLY removes the doubling, not fully back to
+    # ~950MB, and stays channel-dependent. 2-way packing therefore stays
+    # required: 2x2.47GB + 0.3GB = 5.24GB, still under the 5.7GB threshold but
+    # with less headroom than a full return to ~950MB would give. Fewer
     # concurrent tasks per node, not a bigger node — the autoscaler adds
     # replicas (maxReplicas=45) rather than the run costing more per node.
+    #
+    # Large channels have no equivalent lever (docs/plans/023-review, A4):
+    # num_cpus=4 already claims the entire 4-CPU node so no other task can be
+    # co-scheduled beside it, packing-wise, regardless of small_task_cpus. If
+    # resampling doubles a large channel's peak the same way it does small
+    # channels', the node itself (not co-scheduling) is what runs out of
+    # headroom, and the only lever is a bigger node or GRID_INTERVAL-aware
+    # chunking of the large channel's own read — neither implemented here.
+    # The 3.3 re-measurement above did not exercise this path: all 62 channels
+    # in that run fell under _LARGE_THRESHOLD, so it remains unmeasured.
     channel_dir = to_upath(abs_settings.data.sample_data_dir) / mission / "channels"
     _LARGE_THRESHOLD = 150 * 1024 * 1024  # 150MB
     _small_cpus = small_task_cpus(abs_settings.preprocess, channels)
