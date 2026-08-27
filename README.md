@@ -632,12 +632,12 @@ claim* was the one step the pipeline could not perform, and skipping it was the 
 than a mistake you had to make. That gap is closed: the grid now runs **inside** the tuning
 job, as an automatic second stage.
 
-**Two stages, not a swap**, because the four scoring parameters do not all have the same cost.
-`error_smoothing_window` and `threshold_window` change the array the threshold is computed
-over and can only be evaluated by re-scoring, so they stay with Ray Tune. `threshold_z` and
-`min_error_value` are pointwise and stateless — evaluable post-hoc on the cached error
-arrays — so a deterministic sweep refines them afterwards. Ray Tune picks the operating
-*regime*; the grid finds the operating *point* inside it.
+**Two stages, not a swap**, because the scoring parameters do not all have the same cost.
+`threshold_window` changes what the rolling threshold is computed over and can only be
+evaluated by re-scoring, so it stays with Ray Tune. `threshold_z` and `min_error_value` are
+pointwise and stateless — evaluable post-hoc on the cached error arrays — so a deterministic
+sweep refines them afterwards. Ray Tune picks the operating *regime*; the grid finds the
+operating *point* inside it.
 
 Why it was needed at all: on the 30 s-grid arm, Ray Tune's 50-sample sweep chose
 `threshold_z = 1.393` — *below the entire range the grid sweeps* — scoring **0.212** mission
@@ -646,22 +646,32 @@ draw: the H=10 arm did the same thing independently (`z = 1.481` against a grid 
 `z = 7.0`). Read as an architecture result rather than a tuning artifact, that number would
 have said the common time grid *hurt* detection by a factor of two.
 
-**But re-running that arm end-to-end showed the original diagnosis was wrong**, and the
-correction is more interesting than the fix. The gap was attributed to the sampler being
-mis-matched to a ridged response surface. Splitting the two changes apart:
+**Re-running that arm end-to-end showed the original diagnosis was wrong**, and the correction
+is more interesting than the fix. The gap had been attributed to the sampler being mis-matched
+to a ridged response surface. Taking the three changes apart, on the same arm at the same
+50-sample budget:
 
-| | `threshold_z` | `min_error_value` | mission F0.5 |
-|---|---:|---:|---:|
-| Ray Tune, per-channel objective (the original 0.212) | 1.393 | 0.251 | 0.212 |
-| Ray Tune, now selecting on the mission metric | 3.756 | 0.389 | **0.756** |
-| **+ deterministic grid refinement** | 8.0 | 0.257 | **0.813** |
-| hand-run reference grid | 3.0 | 0.4 | 0.798 |
+| | `threshold_z` | `min_error_value` | Ray Tune alone | + grid |
+|---|---:|---:|---:|---:|
+| per-channel objective, double-smoothed inputs *(the original 0.212)* | 1.393 | 0.251 | **0.212** | — |
+| selecting on the mission metric | 3.756 | 0.389 | 0.756 | 0.813 |
+| **+ un-double-smoothed inputs** | 3.0 | 0.343 | **0.798** | **0.813** |
+| hand-run reference grid | 3.0 | 0.4 | — | 0.798 |
 
-Most of the gap — 0.212 → 0.756 — was **objective mis-specification, not sampler weakness**.
-The optimiser was answering the question it was asked; the question was the wrong one. The
-grid then adds 0.756 → 0.813 on top, and beats the hand-run reference because the widening
-driver pushed `threshold_z` past the ceiling the human's grid stopped at. Both changes are
-worth keeping, but "HyperOpt can't find this ridge" was the wrong story about why.
+Most of the original gap — 0.212 → 0.756 — was **objective mis-specification, not sampler
+weakness**. The optimiser was answering the question it was asked; the question was the wrong
+one. Fixing the double-smoothing then carries Ray Tune *on its own* to 0.798, exactly the
+hand-run reference's ceiling. "HyperOpt can't find this ridge" was simply the wrong story:
+given the right objective and the right inputs, it finds it.
+
+The second stage still earns its place, but for a different reason than first claimed. It is
+worth **+0.015** here rather than the +0.6 the original framing implied — and, more usefully,
+it is what makes the result *insensitive* to stage 1 being wrong. Note what it did in the
+middle row: with stage 1 optimising a fictional surface, the grid still reached 0.813, but only
+by pushing `threshold_z` out to 8.0 (the search space's ceiling, needing a widening round) to
+compensate. With stage 1 fixed, it converges at `z = 3.0` with **zero widening** and nothing
+pegged. Same score, but the pipeline now agrees with itself instead of one stage silently
+correcting another.
 
 Two correctness details the stage is careful about, both learned the hard way:
 
@@ -677,7 +687,9 @@ Two correctness details the stage is careful about, both learned the hard way:
 - **It pins the smoothing that produced the array it swept.** `errors.npy` is already
   smoothed, so a `(z, floor)` chosen against it is only valid for a re-score that reproduces
   exactly that smoothing — the stage therefore pins the scoring run's own
-  `error_smoothing_window` into the emitted config.
+  `error_smoothing_window` into the emitted config. Finding this is also what surfaced the
+  double-smoothing bug in stage 1 (the row above), since the two stages disagreed about what
+  array they were looking at.
 
 A refined config carries **both** provenances: `_meta.run_id` still points at stage 1's Ray
 Tune trial so scoring-run lineage resolves, while `_meta.source` names both stages and the
@@ -1155,33 +1167,23 @@ channel-group data path, which is the part the work below actually reuses.
   `--mission ESA-Mission1`, which also prefix-matches the `ESA-Mission1-ADB*` pseudo-missions),
   and only then does the live Cloud Run demo serve them.
 
-- **Stop the HPO trial function double-smoothing its inputs.** Found while building the second
-  stage, and recorded rather than silently fixed because it moves published numbers.
-  `errors.npy` holds the **already-smoothed** array (`scoring.py`'s `_score_series` logs
-  `smooth_errors(errors, error_smoothing_window)`), but the HPO trial function smooths it
-  *again* with the trial's own `error_smoothing_window`. So that parameter tunes a second
-  smoothing pass, and every trial is scored against an array `score_channel` never reproduces
-  at re-score time — a train/serve skew on the smoothing axis.
+- **Carry the double-smoothing fix over to ISS.** `errors.npy` holds the **already-smoothed**
+  array (`scoring.py`'s `_score_series` logs `smooth_errors(errors, error_smoothing_window)`),
+  and the HPO trial function used to smooth it *again* with the trial's own window — so that
+  parameter tuned a second smoothing pass, and every trial was scored against an array
+  `score_channel` never reproduces at re-score time. Measured on the H=1 subsystem_5 arm, the
+  two surfaces put their optima in completely different places (`z=3.0, floor=0.4` → 0.798 vs
+  `z=8.0, floor=0.0` → 0.631) and the doubly-smoothed winner scores just **0.397** on the real
+  array — ~0.40 mission F0.5 lost to optimising a fiction.
 
-  Measured on the H=1 subsystem_5 arm, sweeping the same `(z, floor)` grid over both arrays:
-
-  | surface | optimum | score there | that config's score on the array scoring reproduces |
-  |---|---|---:|---:|
-  | singly smoothed (what a re-score reproduces) | `z=3.0, floor=0.4` | **0.798** | 0.798 |
-  | doubly smoothed (what the trial function sees) | `z=8.0, floor=0.0` | 0.631 | **0.397** |
-
-  So the two surfaces put their optima in completely different places, and picking the winner
-  on the wrong one costs **~0.40 mission F0.5**. (The singly-smoothed optimum reproduces the
-  hand-run reference sweep exactly, which is a useful independent check on the second stage's
-  grid path.)
-
-  **The second stage already neutralises the main consequence** — it sweeps the correct array,
-  so `threshold_z` and `min_error_value` are chosen on the true surface regardless of what
-  stage 1 saw. Residual exposure is limited to `threshold_window`, `min_run_length`, and
-  `error_smoothing_window` itself, which Ray Tune still selects on the degraded surface. Fixing
-  that properly means either logging raw errors alongside the smoothed ones, or dropping
-  `error_smoothing_window` from the search space and having the trial function sweep the saved
-  array as-is — both change tuned configs, so both need a before/after pass, not a quiet edit.
+  **Fixed for ESA-Mission1** (see [Two-stage threshold tuning](#two-stage-threshold-tuning)):
+  `error_smoothing_window` is no longer sampled there, the trial function sweeps the saved
+  array untouched, and the emitted config pins the scoring run's own window — the same
+  discipline the exhaustive grid already applied. **Not yet carried over to ISS**, which
+  inherits the base search space and still double-smooths. The bug is identical and the fix
+  would be the same one-line scoping change, but ISS is the always-on live demo: re-tuning it
+  changes what the public endpoint serves, so it wants its own before/after pass rather than
+  riding along with an ESA change.
 - **Reparameterize the HPO search space onto the ridge — investigated, cut.** Measured this
   directly rather than designing it from the keyboard: swept a third subsystem (`subsystem_6`,
   39–41 channels) through the same exhaustive grid used for the two arms above. All three
