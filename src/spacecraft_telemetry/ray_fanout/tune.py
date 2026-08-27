@@ -241,6 +241,7 @@ def _flag_pegged_params(
     config: dict[str, Any],
     search_space: dict[str, Any],
     epsilon: float = 0.10,
+    explored_axes: dict[str, list[float]] | None = None,
 ) -> dict[str, dict[str, float | str]]:
     """Flag continuous ``config`` params sitting within ``epsilon`` (relative
     to the domain's span) of a search-space bound.
@@ -258,6 +259,16 @@ def _flag_pegged_params(
     plan 023's fresh ``subsystem_1`` sighting (``threshold_z=8.000`` exactly
     on today's widened 8.0 ceiling). Both must fire this guard — replayed in
     ``tests/ray_fanout/test_tune.py``.
+
+    ``explored_axes``: values a *second stage* actually swept per param
+    (docs/plans/024 stage .6). What this guard is really asking is "was this
+    value wall-limited by the search space?" — and for a grid-refined param
+    whose swept axis runs PAST the bound, the answer is demonstrably no: the
+    driver widened beyond it and still chose this point. Measured on the H=1
+    subsystem_5 arm, where the grid swept ``threshold_z`` out to 11.0, found
+    9-11 worse, and settled on exactly 8.0. Flagging that would advertise a
+    widening the grid has already proven useless. Params outside
+    ``explored_axes`` are checked normally.
 
     Returns a dict keyed by param name, empty if nothing is pegged. Each
     value records ``value``, ``bound``, and ``bound_type`` ("lower"/"upper")
@@ -277,9 +288,14 @@ def _flag_pegged_params(
         span = upper - lower
         if span <= 0:
             continue
+        swept = (explored_axes or {}).get(name)
         if abs(value - lower) <= epsilon * span:
+            if swept and min(swept) < lower:
+                continue
             flagged[name] = {"value": value, "bound": lower, "bound_type": "lower"}
         elif abs(value - upper) <= epsilon * span:
+            if swept and max(swept) > upper:
+                continue
             flagged[name] = {"value": value, "bound": upper, "bound_type": "upper"}
     return flagged
 
@@ -1646,7 +1662,11 @@ def run_all_sweeps(
         config; see the plan's "truncation, three times over").
         """
         config = sweep_result.get("config", {})
-        pegged = _flag_pegged_params(config, _space)
+        # Axes a second stage actually swept, so a param the grid widened PAST
+        # the search-space bound isn't reported as wall-limited — see
+        # _flag_pegged_params' explored_axes note.
+        _grid_axes = (sweep_result.get("grid_meta") or {}).get("axes")
+        pegged = _flag_pegged_params(config, _space, explored_axes=_grid_axes)
         if pegged:
             for _param, _info in pegged.items():
                 log.warning(

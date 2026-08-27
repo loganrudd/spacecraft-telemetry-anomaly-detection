@@ -1424,6 +1424,44 @@ class TestFlagPeggedParams:
 
         assert _flag_pegged_params({"min_error_value": 0.0}, ISS_SEARCH_SPACE) == {}
 
+    def test_not_flagged_when_a_second_stage_swept_past_the_bound(self) -> None:
+        """The real question is "was this value wall-limited?" — and if a grid
+        widened PAST the bound and still chose this point, it was not.
+
+        Measured case (docs/plans/024 stage .6 gate, H=1 subsystem_5): the grid
+        swept threshold_z out to 11.0, found 9-11 worse, and settled on exactly
+        8.0 — the search space's upper bound. Flagging that would advertise a
+        widening the grid has already proven useless.
+        """
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        config = {"threshold_z": 8.0, "min_error_value": 0.257143}
+        # Without the grid context it IS flagged...
+        assert "threshold_z" in _flag_pegged_params(config, ESA_M1_SEARCH_SPACE)
+        # ...and with it, it is not.
+        assert _flag_pegged_params(
+            config, ESA_M1_SEARCH_SPACE,
+            explored_axes={"threshold_z": [1.0, 4.0, 8.0, 9.0, 10.0, 11.0]},
+        ) == {}
+
+    def test_still_flagged_when_the_second_stage_stopped_at_the_bound(self) -> None:
+        """A grid that never swept past the bound proves nothing about what
+        lies beyond it, so the flag must survive — otherwise supplying any
+        axes at all would silently disable the guard."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        flagged = _flag_pegged_params(
+            {"threshold_z": 8.0}, ESA_M1_SEARCH_SPACE,
+            explored_axes={"threshold_z": [1.0, 4.0, 8.0]},
+        )
+        assert flagged["threshold_z"]["bound_type"] == "upper"
+
 
 class TestRunAllSweepsPeggedParamGuard:
     """Integration coverage: the guard must actually reach tuned_configs.json
