@@ -889,7 +889,21 @@ def run_hpo_sweep(
           selected trial's config flags as anomalous (0.0 if no channel in this
           subsystem has a nominal-tagged baseline run yet).
         - ``"objective"``        — ``seg_f0_5 - fp_penalty_weight * nominal_fp_rate``,
-          the actual quantity the sweep optimizes.
+          the per-channel quantity computed for every trial regardless of what
+          the sweep selects on (see ``"selection_metric"``).
+        - ``"mission_f0_5"``     — mission-level corrected event-wise F0.5 of the
+          selected trial, or ``None`` when ESA-ADB ground truth is unavailable
+          for ``mission`` (ISS, by design; see _scoring_trial).
+        - ``"selection_metric"`` — ``"mission_f0_5"`` or ``"objective"``: which
+          metric this sweep actually selected on (docs/plans/024 stage .2).
+          ``"mission_f0_5"`` whenever ESA-ADB ground truth loaded successfully
+          — archived-trial analysis found the per-channel objective and the
+          published mission metric diverge hard (rho~0.64-0.66, 0.36-0.66
+          regret) — else ``"objective"``, the only thing ISS (or any mission
+          without ground truth) can compute. No fp-penalty term is applied on
+          top of ``mission_f0_5``: ``corrected_event_wise`` already prices
+          false positives through its precision term, so subtracting
+          ``fp_penalty_weight * nominal_fp_rate`` again would double-count.
         - ``"run_id"``           — MLflow run ID of the best trial. None if
           unavailable, or if the baseline guard kept the untuned
           Settings.model defaults instead of the sweep's best trial (see
@@ -897,11 +911,10 @@ def run_hpo_sweep(
           and no MLflow trial backs them.
 
         Every trial (021.4b) also logs mission_precision/mission_recall/
-        mission_f0_5 to MLflow when ESA-ADB ground truth is available for
-        ``mission`` — see _scoring_trial. Not present in this function's own
-        return dict (the baseline/sweep selection stays seg_f0_5-based);
-        read them from the per-trial MLflow runs this sweep's
-        _resilient_mlflow_callback logs.
+        mission_f0_5 to MLflow — see _scoring_trial. Read mission_precision/
+        mission_recall from the per-trial MLflow runs this sweep's
+        _resilient_mlflow_callback logs; mission_f0_5 for the SELECTED trial
+        is surfaced directly above.
     """
     from ray.tune.schedulers import FIFOScheduler
     from ray.tune.search.hyperopt import HyperOptSearch
@@ -971,6 +984,15 @@ def run_hpo_sweep(
         mission_events = _events_hpo
         mission_timeline_hpo = _timeline_hpo
 
+    # docs/plans/024 stage .2: select on the metric the README actually
+    # reports, not a per-channel proxy for it, whenever that metric is
+    # computable. Archived-trial analysis (024.md, .2) found the two diverge
+    # hard — rho~0.64-0.66 but 0.36-0.66 regret in mission_f0_5, 3-5x plan 021's
+    # regret range — so this is a measured decision, not the default. Missions
+    # without ESA-ADB ground truth (ISS, by design) keep the per-channel
+    # "objective" — the only thing they can compute.
+    selection_metric = "mission_f0_5" if mission_events is not None else "objective"
+
     trial_fn = tune.with_parameters(
         _scoring_trial,
         channel_data=channel_data,
@@ -991,11 +1013,11 @@ def run_hpo_sweep(
         trial_fn,
         param_space=_search_space,
         tune_config=tune.TuneConfig(
-            metric="objective",
+            metric=selection_metric,
             mode="max",
             num_samples=settings.tune.num_samples,
             max_concurrent_trials=settings.tune.max_concurrent_trials,
-            search_alg=HyperOptSearch(metric="objective", mode="max"),
+            search_alg=HyperOptSearch(metric=selection_metric, mode="max"),
             scheduler=FIFOScheduler(),  # type: ignore[no-untyped-call]
         ),
         run_config=tune.RunConfig(
@@ -1020,13 +1042,15 @@ def run_hpo_sweep(
     )
 
     results = tuner.fit()
-    best = results.get_best_result(metric="objective", mode="max")
+    best = results.get_best_result(metric=selection_metric, mode="max")
 
     best_config: dict[str, Any] = best.config or {}
     best_metrics = best.metrics or {}
     best_seg_f0_5: float = best_metrics.get("seg_f0_5", 0.0)
     best_nominal_fp_rate: float = best_metrics.get("nominal_fp_rate", 0.0)
     best_objective: float = best_metrics.get("objective", best_seg_f0_5)
+    best_mission_f0_5: float | None = best_metrics.get("mission_f0_5")
+    best_selection_value: float = best_metrics.get(selection_metric, best_objective)
 
     # Baseline guard (see module docstring): the sweep optimizes hpo_portion,
     # but a winning trial there can still score worse than the untuned
@@ -1051,22 +1075,36 @@ def run_hpo_sweep(
         channel_data=channel_data,
         nominal_errors=nominal_errors,
         fp_penalty_weight=settings.tune.fp_penalty_weight,
+        # Passed through so the baseline is scored on the SAME metric the
+        # sweep selected on (docs/plans/024 stage .2) — comparing a baseline's
+        # per-channel objective against a sweep's mission_f0_5 would compare
+        # different units and make the guard meaningless whenever the mission
+        # metric is in play.
+        channel_timestamps=channel_timestamps,
+        mission_events=mission_events,
+        mission_timeline_hpo=mission_timeline_hpo,
     )
-    used_baseline = baseline_metrics["objective"] >= best_objective
+    baseline_selection_value = baseline_metrics.get(
+        selection_metric, baseline_metrics["objective"]
+    )
+    used_baseline = baseline_selection_value >= best_selection_value
     if used_baseline:
         log.info(
             "tune.sweep.baseline_kept",
             subsystem=subsystem,
-            baseline_objective=round(baseline_metrics["objective"], 4),
-            tuned_objective=round(best_objective, 4),
+            selection_metric=selection_metric,
+            baseline_value=round(baseline_selection_value, 4),
+            tuned_value=round(best_selection_value, 4),
             note="untuned defaults matched or beat the HPO sweep on the held-out "
-            "objective — keeping defaults for this subsystem instead of the "
-            "sweep's best trial.",
+            "selection metric — keeping defaults for this subsystem instead of "
+            "the sweep's best trial.",
         )
         best_config = baseline_config
         best_seg_f0_5 = baseline_metrics["seg_f0_5"]
         best_nominal_fp_rate = baseline_metrics["nominal_fp_rate"]
         best_objective = baseline_metrics["objective"]
+        best_mission_f0_5 = baseline_metrics.get("mission_f0_5")
+        best_selection_value = baseline_selection_value
 
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).
@@ -1088,7 +1126,11 @@ def run_hpo_sweep(
                         f"tags.subsystem = '{subsystem}'"
                         f" and attributes.start_time >= {_sweep_start_ms}"
                     ),
-                    order_by=["metrics.objective DESC"],
+                    # Order by whichever metric Tuner actually selected on
+                    # (docs/plans/024 stage .2) — ordering by "objective" here
+                    # while selection_metric is "mission_f0_5" would look up a
+                    # DIFFERENT trial's run than the one get_best_result chose.
+                    order_by=[f"metrics.{selection_metric} DESC"],
                     max_results=1,
                 )
                 if _runs:
@@ -1140,9 +1182,13 @@ def run_hpo_sweep(
     log.info(
         "tune.sweep.end",
         subsystem=subsystem,
+        selection_metric=selection_metric,
         best_objective=round(best_objective, 4),
         best_seg_f0_5=round(best_seg_f0_5, 4),
         best_nominal_fp_rate=round(best_nominal_fp_rate, 4),
+        best_mission_f0_5=(
+            round(best_mission_f0_5, 4) if best_mission_f0_5 is not None else None
+        ),
         best_config=best_config,
         best_run_id=best_run_id,
         used_baseline=used_baseline,
@@ -1152,6 +1198,8 @@ def run_hpo_sweep(
         "seg_f0_5": best_seg_f0_5,
         "nominal_fp_rate": best_nominal_fp_rate,
         "objective": best_objective,
+        "mission_f0_5": best_mission_f0_5,
+        "selection_metric": selection_metric,
         "run_id": best_run_id,
     }
 
@@ -1296,20 +1344,31 @@ def run_all_sweeps(
                     note="winning config sits on a search-space bound — "
                     "not a converged optimum. See docs/plans/024 stage .0.",
                 )
+        # docs/plans/024 stage .2: name/value follow whichever metric this
+        # sweep actually selected on — a config chosen for its mission_f0_5
+        # must not be mislabeled with the per-channel objective's name, the
+        # same "objective_name must match reality" lesson 022.2b enforced for
+        # the grid writer. "objective" (no selection_metric key — an older
+        # caller, or a test double) keeps the pre-024.2 label unchanged.
+        _selection_metric = sweep_result.get("selection_metric", "objective")
+        if _selection_metric == "mission_f0_5":
+            _objective_name = "mission_corrected_event_wise_f0_5"
+            _objective_value = sweep_result.get(
+                "mission_f0_5", sweep_result.get("seg_f0_5", 0.0)
+            )
+        else:
+            _objective_name = "mean_per_channel_seg_f0_5_minus_fp_penalty"
+            _objective_value = sweep_result.get(
+                "objective", sweep_result.get("seg_f0_5", 0.0)
+            )
         return {
             **config,
             "_meta": {
                 "provenance": "ray_tune",
                 "source": "per-subsystem Ray Tune HPO sweep",
                 "run_id": sweep_result.get("run_id"),
-                # Ray Tune's objective subtracts an FP penalty from mean
-                # per-channel seg_f0_5 (see _scoring_trial) — a different
-                # quantity from the grid's plain "mean_per_channel_seg_f0_5",
-                # so it gets its own name rather than overloading that one.
-                "objective_name": "mean_per_channel_seg_f0_5_minus_fp_penalty",
-                "objective_value": sweep_result.get(
-                    "objective", sweep_result.get("seg_f0_5", 0.0)
-                ),
+                "objective_name": _objective_name,
+                "objective_value": _objective_value,
                 "seg_f0_5": sweep_result.get("seg_f0_5", 0.0),
                 "nominal_fp_rate": sweep_result.get("nominal_fp_rate", 0.0),
                 # Ray Tune always selects the winning trial on the HPO portion

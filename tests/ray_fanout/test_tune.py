@@ -641,6 +641,63 @@ def test_run_all_sweeps_filters_and_runs(
     assert "objective" not in meta
 
 
+def test_run_all_sweeps_labels_mission_metric_meta_correctly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """docs/plans/024 stage .2: when a sweep selected on mission_f0_5, the
+    written _meta must say so — not carry over the pre-024.2
+    per-channel-objective label, which would mis-describe what was actually
+    optimized (the same "objective_name must match reality" lesson 022.2b
+    enforced for the grid writer)."""
+    import ray
+
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+        }
+    )
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
+        lambda subsystem, channels, *_args, **_kwargs: {
+            "config": {
+                "error_smoothing_window": 10,
+                "threshold_window": 100,
+                "threshold_z": 2.5,
+                "threshold_min_anomaly_len": 2,
+            },
+            "seg_f0_5": 0.30,
+            "objective": 0.25,
+            "mission_f0_5": 0.62,
+            "selection_metric": "mission_f0_5",
+            "run_id": "fake-run-id-abc",
+        },
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
+    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+
+    assert meta["objective_name"] == "mission_corrected_event_wise_f0_5"
+    assert meta["objective_value"] == pytest.approx(0.62)
+
+
 @pytest.mark.parametrize(
     ("mission", "variant", "expected_space_name", "threshold_z_bounds"),
     [
@@ -1127,8 +1184,15 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
 
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
     assert set(best.keys()) == {
-        "config", "seg_f0_5", "nominal_fp_rate", "objective", "run_id",
+        "config", "seg_f0_5", "nominal_fp_rate", "objective", "mission_f0_5",
+        "selection_metric", "run_id",
     }
+    # No sample_data_dir labels/anomaly_types.csv wired up for this mission in
+    # this test, so the 021.4b mission-metric prep can't load ESA-ADB ground
+    # truth — docs/plans/024 stage .2's fallback branch: select on the
+    # per-channel objective, the only thing computable here (mirrors ISS).
+    assert best["selection_metric"] == "objective"
+    assert best["mission_f0_5"] is None
     config = best["config"]
     # Mirrors SEARCH_SPACE exactly — min_error_value joined it in 583a850
     # (the ESA-ADB absolute error floor). Keep this set and the bounds below
@@ -1203,7 +1267,13 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
 
     train_all_subsystems(settings, mission, channels)
     score_all_subsystems(settings, mission, channels)
-    run_hpo_sweep("subsystem_1", channels, settings, mission)
+    result = run_hpo_sweep("subsystem_1", channels, settings, mission)
+
+    # docs/plans/024 stage .2: ESA-ADB ground truth is available here (labels
+    # + anomaly_types wired up above), so the sweep must select on
+    # mission_f0_5, not the per-channel objective.
+    assert result["selection_metric"] == "mission_f0_5"
+    assert result["mission_f0_5"] is not None
 
     # Search across every experiment rather than assuming the HPO one by
     # name: this test's Ray/MLflow test harness routes trial runs by ambient
@@ -1225,6 +1295,15 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
     assert 0.0 <= m["mission_precision"] <= 1.0
     assert 0.0 <= m["mission_recall"] <= 1.0
     assert 0.0 <= m["mission_f0_5"] <= 1.0
+    assert 0.0 <= result["mission_f0_5"] <= 1.0
+
+    # The selected trial's mission_f0_5 must be >= every trial actually
+    # logged in this sweep — get_best_result(metric="mission_f0_5") can only
+    # have picked something at least that good (it may exceed all of them if
+    # the baseline guard kept the untuned defaults instead, which aren't
+    # logged as a Tune trial — see run_hpo_sweep's module docstring).
+    best_logged_mission_f0_5 = max(r.data.metrics["mission_f0_5"] for r in with_mission_metric)
+    assert result["mission_f0_5"] >= best_logged_mission_f0_5 - 1e-9
 
 
 @pytest.mark.slow
