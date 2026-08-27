@@ -641,6 +641,80 @@ def test_run_all_sweeps_filters_and_runs(
     assert "objective" not in meta
 
 
+@pytest.mark.parametrize("parallel_subsystems", [False, True], ids=["serial", "parallel"])
+def test_run_all_sweeps_survives_one_subsystem_failing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, parallel_subsystems: bool
+) -> None:
+    """Q1 (docs/reviews/024): one subsystem's sweep raising must not discard
+    every OTHER subsystem's completed sweep — that is real GPU/cloud time
+    thrown away by a single unhandled exception before write_tuned_configs
+    ever runs. A deliberately-broken subsystem gets a `_meta`-only "failed"
+    entry (read downstream as untuned, not corrupt — see _TUNABLE_SCORING_FIELDS
+    in runner.py) while its sibling's real result survives, in both the
+    serial and ThreadPoolExecutor-parallel paths."""
+    import ray
+
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(
+                update={"parallel_subsystems": parallel_subsystems, "max_parallel_subsystems": 2}
+            ),
+        }
+    )
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1", "channel_2": "subsystem_6"},
+    )
+
+    def _fake_run_hpo_sweep(subsystem: str, channels: list[str], *_args, **_kwargs):
+        if subsystem == "subsystem_6":
+            raise RuntimeError("MLflow tracking server unreachable")
+        return {
+            "config": {
+                "error_smoothing_window": 10,
+                "threshold_window": 100,
+                "threshold_z": 2.5,
+                "threshold_min_anomaly_len": 2,
+            },
+            "seg_f0_5": 0.75,
+            "run_id": "fake-run-id-abc",
+        }
+
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
+        _fake_run_hpo_sweep,
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1", "channel_2"])
+    assert out.exists()
+    loaded = json.loads(out.read_text())
+
+    assert set(loaded) == {"subsystem_1", "subsystem_6"}
+    assert loaded["subsystem_1"]["_meta"]["run_id"] == "fake-run-id-abc"
+    failed_meta = loaded["subsystem_6"]["_meta"]
+    assert failed_meta["provenance"] == "failed"
+    assert "MLflow tracking server unreachable" in failed_meta["error"]
+    # No tunable keys on the failed entry — score_all_channels'
+    # _TUNABLE_SCORING_FIELDS filter must have nothing to apply here.
+    from spacecraft_telemetry.ray_fanout.runner import _TUNABLE_SCORING_FIELDS
+
+    assert not (set(loaded["subsystem_6"]) & _TUNABLE_SCORING_FIELDS)
+
+
 class TestGridAxis:
     """docs/plans/024 stage .6 — the second stage's initial grid is derived
     FROM the search space rather than hardcoded, so the two stages always
@@ -762,8 +836,11 @@ class TestRefineWithGrid:
         assert isinstance(meta["expansions"], int)
 
     def test_refinement_beats_the_tune_pick_on_the_selection_metric(self) -> None:
-        """The whole point: the refined point must score >= the config Tune
-        would have shipped, on the metric the sweep selects on."""
+        """The whole point: the refined point must score STRICTLY BETTER than
+        the config Tune would have shipped, on the metric the sweep selects
+        on — a no-op refinement (T3, docs/reviews/024) would satisfy `>=`
+        while doing nothing, so this must fail loudly if a future change
+        makes the grid start returning Tune's own point back unchanged."""
         from spacecraft_telemetry.ray_fanout.tune import (
             ESA_M1_SEARCH_SPACE,
             _scoring_trial,
@@ -788,8 +865,9 @@ class TestRefineWithGrid:
 
         result = self._call(config, ESA_M1_SEARCH_SPACE)
         assert result is not None
-        _refined, meta = result
-        assert meta["objective_value"] >= tune_metrics["mission_f0_5"]
+        refined, meta = result
+        assert meta["objective_value"] > tune_metrics["mission_f0_5"]
+        assert refined["threshold_z"] != config["threshold_z"]
 
     def test_pins_the_scoring_runs_smoothing_window_not_the_trials(self) -> None:
         """errors.npy holds the ALREADY-SMOOTHED array (model/scoring.py's
@@ -934,11 +1012,12 @@ class TestRefineWithGrid:
         assert self._call(config, ESA_M1_SEARCH_SPACE, mission_events=[]) is None
 
     def test_non_convergence_keeps_the_tune_config(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A non-convergent grid's optimum is a grid-edge LOWER bound, not an
         optimum. Returning it would silently downgrade the sweep, so the stage
-        declines and the Ray Tune config stands."""
+        declines and the Ray Tune config stands — and says why, not just that
+        it did (docs/reviews/024 stage 2.1's assertion-strength half of T3)."""
         from spacecraft_telemetry.ray_fanout import tune as tune_module
         from spacecraft_telemetry.ray_fanout.threshold_search import NonConvergenceError
 
@@ -955,6 +1034,43 @@ class TestRefineWithGrid:
             "min_error_value": 0.1,
         }
         assert self._call(config, tune_module.ESA_M1_SEARCH_SPACE) is None
+
+        # capsys, not caplog: this module's logger is realized (and cached,
+        # per core/logging.py's cache_logger_on_first_use=True) before this
+        # test runs inside the full suite — see test_threshold_search.py's
+        # identical precedent.
+        stdout = capsys.readouterr().out
+        assert "tune.grid_refine.non_convergent" in stdout
+
+    def test_grid_refine_declines_on_an_unexpected_failure(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Q1 (docs/reviews/024): today only NonConvergenceError is caught —
+        any OTHER exception from widen_to_convergence (a bad MLflow lookup, a
+        malformed array, anything _refine_with_grid's four-module call chain
+        can raise) propagates and aborts the whole subsystem sweep. The
+        fallback here is already correct and tested for NonConvergenceError
+        ("keep Tune's config"); stage 2.2 widens the except clause so every
+        unexpected failure gets the same safe fallback instead of losing the
+        sweep."""
+        from spacecraft_telemetry.ray_fanout import tune as tune_module
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("scoring run lookup timed out")
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.ray_fanout.threshold_search.widen_to_convergence",
+            _raise,
+        )
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 3.0, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.1,
+        }
+        assert self._call(config, tune_module.ESA_M1_SEARCH_SPACE) is None
+
+        stdout = capsys.readouterr().out
+        assert "tune.grid_refine.failed" in stdout
 
 
 def test_run_all_sweeps_emits_two_stage_provenance(

@@ -112,11 +112,10 @@ def test_all_none_or_empty_returns_none(
     assert result is None
 
 
-@pytest.mark.xfail(strict=True, reason="Q1 (docs/reviews/024 stage 2.2) has not landed yet")
 def test_a_raising_client_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The function's docstring promises None on lookup failure, but today it
-    lets the MlflowClient exception propagate. Stage 2.2 wraps the MLflow loop
-    in ``suppress(Exception)``, at which point this flips to passing."""
+    """The function's docstring promises None on lookup failure — stage 2.2
+    (docs/reviews/024, Q1) wraps the MLflow loop in ``suppress(Exception)``
+    to make that true."""
     _install_fake_client(
         monkeypatch, {"run-1": _FakeRun({"error_smoothing_window": "31"})}, raises=True
     )

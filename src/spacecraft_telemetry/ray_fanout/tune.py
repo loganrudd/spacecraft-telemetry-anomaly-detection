@@ -914,20 +914,26 @@ def _scoring_run_smoothing_window(
     Returns ``None`` when the runs disagree or the lookup fails: averaging a
     grid across differently-smoothed arrays would not describe any single
     achievable operating point, which is a reason to skip refinement, not to
-    guess a value.
+    guess a value. A lookup FAILURE (docs/reviews/024, Q1) — an MLflow
+    ``get_run`` raising rather than disagreeing — gets the identical
+    treatment: this function's only two legitimate outcomes are "the window"
+    or "no window", and the caller's fallback (keep Tune's config) is the
+    same either way.
     """
     import mlflow as _mlflow
 
-    client = _mlflow.MlflowClient(tracking_uri=tracking_uri)
-    windows: set[int] = set()
-    for run_id in {rid for rid in scoring_run_ids.values() if rid}:
-        params = client.get_run(run_id).data.params
-        if "error_smoothing_window" not in params:
+    with suppress(Exception):
+        client = _mlflow.MlflowClient(tracking_uri=tracking_uri)
+        windows: set[int] = set()
+        for run_id in {rid for rid in scoring_run_ids.values() if rid}:
+            params = client.get_run(run_id).data.params
+            if "error_smoothing_window" not in params:
+                return None
+            windows.add(int(params["error_smoothing_window"]))
+        if len(windows) != 1:
             return None
-        windows.add(int(params["error_smoothing_window"]))
-    if len(windows) != 1:
-        return None
-    return windows.pop()
+        return windows.pop()
+    return None
 
 
 def _nominal_fp_rate_at(
@@ -1082,6 +1088,22 @@ def _refine_with_grid(
             subsystem=subsystem, error=str(exc),
             note="keeping the Ray Tune config; the grid's optimum is a lower "
             "bound, not an optimum.",
+        )
+        return None
+    except Exception as exc:
+        # docs/reviews/024, Q1: this call chain crosses four modules
+        # (threshold_grid, threshold_search, and their MLflow/numpy
+        # dependencies); the failure set is open. The fallback is provably
+        # safe either way — "keep Tune's config" is exactly what running
+        # without this stage at all would produce — so a broad except that
+        # logs and falls back costs only diagnosability, which the log line
+        # preserves. A hard failure here would otherwise abort every
+        # subsystem still queued behind this one in run_all_sweeps.
+        log.warning(
+            "tune.grid_refine.failed",
+            subsystem=subsystem, error=str(exc),
+            note="unexpected failure during grid refinement; keeping the Ray "
+            "Tune config.",
         )
         return None
 
@@ -1916,6 +1938,25 @@ def run_all_sweeps(
             },
         }
 
+    def _failed_entry(subsystem: str, exc: Exception) -> dict[str, Any]:
+        # docs/reviews/024, Q1: one subsystem's failure (a transient MLflow
+        # blip, a bad scoring run) must not discard every OTHER subsystem's
+        # completed sweep — that is real GPU/cloud time, and today it is
+        # thrown away by a single unhandled exception before
+        # write_tuned_configs ever runs. `_meta`-only, no tunable keys: the
+        # existing _TUNABLE_SCORING_FIELDS filter in score_all_channels /
+        # score_all_subsystems (ray_fanout/runner.py) already treats an entry
+        # with no recognised scoring keys as "nothing to override", so this
+        # reads downstream as an untuned subsystem, not a corrupt one.
+        log.warning(
+            "tune.all_sweeps.subsystem_failed",
+            subsystem=subsystem,
+            error=str(exc),
+            note="this subsystem's sweep failed; keeping the untuned baseline "
+            "for it and continuing with the rest.",
+        )
+        return {"_meta": {"provenance": "failed", "error": str(exc)}}
+
     sweep_results: dict[str, dict[str, Any]] = {}
     # Keep the GCP ID token fresh for the whole sweep. MLflowLoggerCallback logs
     # every trial from inside the blocking tuner.fit() calls below, with no
@@ -1937,13 +1978,19 @@ def run_all_sweeps(
                 }
                 for future in concurrent.futures.as_completed(futures):
                     subsystem = futures[future]
-                    sweep_results[subsystem] = _to_entry(future.result(), subsystem)
+                    try:
+                        sweep_results[subsystem] = _to_entry(future.result(), subsystem)
+                    except Exception as exc:
+                        sweep_results[subsystem] = _failed_entry(subsystem, exc)
         else:
             for sub, sub_channels in eligible.items():
-                sweep_results[sub] = _to_entry(
-                    run_hpo_sweep(sub, sub_channels, settings, mission, search_space=_space),
-                    sub,
-                )
+                try:
+                    sweep_results[sub] = _to_entry(
+                        run_hpo_sweep(sub, sub_channels, settings, mission, search_space=_space),
+                        sub,
+                    )
+                except Exception as exc:
+                    sweep_results[sub] = _failed_entry(sub, exc)
 
     write_tuned_configs(sweep_results, output)
 
