@@ -1022,6 +1022,15 @@ def _refine_with_grid(
         # min_error_value) — there is no axis to refine along.
         return None
 
+    if not mission_events:
+        # docs/reviews/024 A1: an empty ground-truth event list ties every
+        # grid point at f_beta=0.0 — the widening driver then tie-breaks to
+        # the lowest z and walks to the natural bound, returning a
+        # detector-disabling config as if it were a converged optimum.
+        # Callers (run_hpo_sweep) already gate on this, but this function
+        # must refuse it directly too, since it is exercised on its own.
+        return None
+
     threshold_window = int(best_config["threshold_window"])
     min_run_length = int(best_config["threshold_min_anomaly_len"])
 
@@ -1318,7 +1327,24 @@ def run_hpo_sweep(
     # regret range — so this is a measured decision, not the default. Missions
     # without ESA-ADB ground truth (ISS, by design) keep the per-channel
     # "objective" — the only thing they can compute.
-    selection_metric = "mission_f0_5" if mission_events is not None else "objective"
+    #
+    # docs/reviews/024 A1: plain truthiness, not `is not None`. group_events()
+    # can load real ground truth and still scope it down to an EMPTY list for
+    # this sweep's channels — truthy-distinct from "no ground truth at all"
+    # but carrying the identical "nothing to select on" consequence. Selecting
+    # mission_f0_5 on an empty event list ties every trial at f_beta=0.0, and
+    # the grid then tie-breaks to the lowest z and widens to the natural
+    # bound — a detector-disabling config recorded as a converged optimum.
+    # `[]` and `None` mean the same thing here; the distinction was accidental.
+    selection_metric = "mission_f0_5" if mission_events else "objective"
+    if mission_events is not None and not mission_events:
+        log.warning(
+            "tune.sweep.no_mission_events",
+            subsystem=subsystem,
+            note="ESA-ADB ground truth loaded but scoped to zero events for "
+            "this sweep's channels — selecting on the per-channel objective "
+            "instead of mission_f0_5.",
+        )
 
     trial_fn = tune.with_parameters(
         _scoring_trial,
@@ -1534,10 +1560,43 @@ def run_hpo_sweep(
     # grid can reproduce, and refining against a different one would reopen
     # the selection mismatch stage .2 closed. ISS therefore never refines: its
     # objective carries an fp-penalty term with no grid equivalent.
-    grid_meta: dict[str, Any] | None = None
-    if (
+    #
+    # docs/reviews/024 A1: `mission_events` (plain truthiness, matching the
+    # selection_metric expression above) rather than `is not None` — an empty
+    # event list must not reach the grid either, for the identical reason.
+    #
+    # docs/reviews/024 A2: `"error_smoothing_window" not in _search_space` —
+    # the grid sweeps the saved (already-smoothed) errors array as-is and
+    # pins the scoring runs' own smoothing window into the refined config
+    # (see _scoring_run_smoothing_window). A space that still SAMPLES
+    # error_smoothing_window (base SEARCH_SPACE, and any non-ESA-Mission1
+    # mission with ground truth that gets it — see run_all_sweeps' space
+    # selector) means stage 1 scored a doubly-smoothed array, so refining
+    # against the untouched one — then overwriting error_smoothing_window
+    # with a value stage 1 never used — would emit a config whose (z, floor)
+    # was never actually evaluated together. ESA-Mission1's own space already
+    # omits the key, so this is a guard for other missions, not a behaviour
+    # change here.
+    _grid_refine_eligible = (
         settings.tune.grid_refine
         and selection_metric == "mission_f0_5"
+        and channel_timestamps is not None
+        and mission_events
+        and mission_timeline_hpo is not None
+    )
+    grid_meta: dict[str, Any] | None = None
+    if _grid_refine_eligible and "error_smoothing_window" in _search_space:
+        log.info(
+            "tune.grid_refine.skipped",
+            subsystem=subsystem,
+            reason="space still samples error_smoothing_window",
+            note="stage 1 may have scored a doubly-smoothed array; refining "
+            "(threshold_z, min_error_value) against the untouched saved "
+            "array would not match what stage 1 evaluated. Keeping the Ray "
+            "Tune config.",
+        )
+    elif (
+        _grid_refine_eligible
         and channel_timestamps is not None
         and mission_events is not None
         and mission_timeline_hpo is not None

@@ -916,6 +916,23 @@ class TestRefineWithGrid:
         }
         assert self._call(config, ISS_SEARCH_SPACE) is None
 
+    def test_declines_when_there_are_no_ground_truth_events(self) -> None:
+        """A1 (docs/reviews/024): an empty ``mission_events`` list is
+        truthy-distinct from ``None`` but carries no ground truth — every
+        trial ties at ``f_beta = 0.0``, and today the grid tie-breaks to the
+        lowest z and widens to the natural bound, emitting a near-zero
+        ``threshold_z`` recorded as ``interior: true``. That is a
+        detector-disabling config, not a converged optimum: refinement must
+        decline instead of returning it."""
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 1.05, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.02,
+        }
+        assert self._call(config, ESA_M1_SEARCH_SPACE, mission_events=[]) is None
+
     def test_non_convergence_keeps_the_tune_config(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1818,6 +1835,63 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert best["run_id"] is None or isinstance(best["run_id"], str)
 
 
+def test_run_hpo_sweep_selects_objective_when_ground_truth_events_are_empty(
+    ray_local, ray_series_parquet, tmp_path: Path
+) -> None:
+    """A1 (docs/reviews/024): ESA-ADB ground truth can load successfully yet
+    produce an EMPTY event list once scoped to this sweep's channels —
+    group_events() drops fragments outside `channels` (see its docstring).
+    That is truthy-distinct from "ground truth unavailable" (None), so before
+    the fix `mission_events is not None` selected "mission_f0_5" anyway,
+    tying every trial at f_beta=0.0 and letting the grid tie-break to a
+    degenerate low-z config (see TestRefineWithGrid's sibling test). The
+    fix must fall back to "objective" — the same thing a mission with no
+    ground truth at all (ISS) already does."""
+    pytest.importorskip("ray")
+
+    from spacecraft_telemetry.model.scoring import score_channel
+    from spacecraft_telemetry.model.training import train_channel
+    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+
+    mission = "ESA-Mission1"
+    channel = "channel_1"
+
+    sample_dir = tmp_path / "sample" / mission
+    sample_dir.mkdir(parents=True)
+    # The only labeled event is on a channel OUTSIDE this sweep's scope —
+    # load_events() succeeds, group_events() scopes it away, and
+    # mission_events ends up [] rather than None.
+    (sample_dir / "labels.csv").write_text(
+        "ID,Channel,StartTime,EndTime\n"
+        "E1,channel_99,2000-01-01T00:03:00Z,2000-01-01T00:06:00Z\n"
+    )
+    (sample_dir / "anomaly_types.csv").write_text(
+        "ID,Category,Class,Subclass,Dimensionality\nE1,Anomaly,Rare,Rare,Univariate\n"
+    )
+
+    settings = ray_series_parquet.model_copy(
+        update={
+            "data": ray_series_parquet.data.model_copy(
+                update={"sample_data_dir": str(tmp_path / "sample")}
+            ),
+            "tune": ray_series_parquet.tune.model_copy(
+                update={"num_samples": 2, "max_concurrent_trials": 1}
+            ),
+            "mlflow": ray_series_parquet.mlflow.model_copy(
+                update={"tracking_uri": f"sqlite:///{tmp_path}/mlflow.db"}
+            ),
+        }
+    )
+
+    train_channel(settings, mission, channel)
+    score_channel(settings, mission, channel)
+
+    best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
+
+    assert best["selection_metric"] == "objective"
+    assert best["grid_meta"] is None
+
+
 @pytest.mark.parametrize(
     "search_space",
     [None, "ESA_M1_SEARCH_SPACE"],
@@ -1855,9 +1929,19 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
 
     sample_dir = tmp_path / "sample" / mission
     sample_dir.mkdir(parents=True)
+    # This fixture's synthetic test-split rows are 1s apart starting at
+    # 2000-01-01T00:00:00Z (tests/ray_fanout/conftest.py's _write_series_split),
+    # so window target timestamps land in the first ~15s, not minutes out — an
+    # event timestamped in minutes (the original value here) falls entirely
+    # outside mission_timeline_hpo and group_events() drops it, silently
+    # leaving mission_events == [] regardless of what this test intended to
+    # exercise. That went unnoticed before docs/reviews/024 A1's fix because
+    # `mission_events is not None` treated the resulting empty list as "ground
+    # truth available" anyway — the exact bug this fixture is now pinned to
+    # not repeat. Keep this inside the actual data window.
     (sample_dir / "labels.csv").write_text(
         "ID,Channel,StartTime,EndTime\n"
-        "E1,channel_41,2000-01-01T00:03:00Z,2000-01-01T00:06:00Z\n"
+        "E1,channel_41,2000-01-01T00:00:10Z,2000-01-01T00:00:13Z\n"
     )
     (sample_dir / "anomaly_types.csv").write_text(
         "ID,Category,Class,Subclass,Dimensionality\nE1,Anomaly,Rare,Rare,Univariate\n"
@@ -1891,10 +1975,22 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
     assert result["selection_metric"] == "mission_f0_5"
     assert result["mission_f0_5"] is not None
 
-    # docs/plans/024 stage .6: with the mission metric available, the
-    # deterministic second stage must have run — this is the end-to-end wiring
-    # the fast _refine_with_grid unit tests cannot cover (that run_hpo_sweep
-    # actually reaches it, with the right channel_data/timestamps/events).
+    if _search_space is None:
+        # A2 (docs/reviews/024 stage 1.3): the base SEARCH_SPACE still
+        # samples error_smoothing_window, so a re-score would never
+        # reproduce the array stage 2's grid swept — refinement must
+        # decline rather than refine against, then overwrite, a value it
+        # never controlled. This is the same case
+        # TestRefineWithGrid.test_declines_when_there_are_no_ground_truth_events
+        # covers for A1, at the run_hpo_sweep level instead of the unit level.
+        assert result["grid_meta"] is None
+        return
+
+    # docs/plans/024 stage .6: with the mission metric available AND a space
+    # that omits error_smoothing_window, the deterministic second stage must
+    # have run — this is the end-to-end wiring the fast _refine_with_grid
+    # unit tests cannot cover (that run_hpo_sweep actually reaches it, with
+    # the right channel_data/timestamps/events).
     assert result["grid_meta"] is not None
     grid_meta = result["grid_meta"]
     assert grid_meta["objective_name"] == "mission_corrected_event_wise_f0_5"
