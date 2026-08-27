@@ -1147,10 +1147,52 @@ swapped in silently.
 The detector roadmap below is sequenced deliberately: each step builds the infrastructure the next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now built and measured — it matched per-channel accuracy rather than beating it ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
-- **Re-score the 30 s-grid arm, refresh the Evaluation numbers, and promote to production.**
-  The tuning-correctness work this depended on has now shipped (see
-  [Two-stage threshold tuning](#two-stage-threshold-tuning) below); what remains is running it
-  against production and republishing whatever moves.
+### Sequencing: detectors first, then one coordinated re-tune
+
+Phase 24 changed what the tuner selects, so every published number is now below what the
+pipeline would produce today. The obvious response — re-tune and republish immediately — is
+**deliberately deferred**, because two things are about to change the comparison set again:
+a second detector (DC-VAE) and an ensemble over both.
+
+The governing constraint is tuning parity: *a comparison set must be re-tuned together or not
+at all.* Re-tuning Telemanom now, then DC-VAE later, then the ensemble later still, would
+produce a table whose rows were tuned by three different versions of the tuner — which is
+precisely the failure that inflated an architecture claim threefold in phase 21 and nearly
+published an inverted grid result in phase 23.
+
+So the order is:
+
+1. **Build DC-VAE** and get it scoring.
+2. **Measure per-anomaly overlap** between detectors — this gates the ensemble's fusion rule.
+3. **Build the ensemble** if the overlap supports it.
+4. **One coordinated pass at the end**: re-tune every compared arm together, re-score, refresh
+   every Evaluation and head-to-head number, promote to `@champion`, deploy.
+
+Two honest costs of deferring, recorded so they are not surprises:
+
+- **The published numbers stay stale until step 4**, which is why the Evaluation section
+  carries an explicit caveat saying so. That caveat is what makes the deferral honest rather
+  than merely convenient — it must not be trimmed while the numbers remain.
+- **The final batch grows.** It is already the default arm, the 30 s-grid arm, and five
+  head-to-head rows; DC-VAE and the fusion variants add more. A large coordinated re-tune is
+  exactly where one arm quietly gets swept and another does not, so step 4 is real planned
+  work, not a formality.
+
+**Cloud Run deploys are paused meanwhile.** The `api` / `api-iss` deploy jobs in
+`.github/workflows/deploy.yml` are gated behind a `DEPLOY_API` repo variable (unset = off), so
+`main` is not permanently red for a deploy nobody wants yet, and `api-iss` does not bill for
+`min-instances=1` while unused. Two things need fixing before re-enabling, and neither is
+caused by the pause: the services are Terraform-owned but no longer exist (recreate with
+`terraform apply`, not by letting CI create them), and the `gcloud run deploy` commands pass
+no `--service-account`, so a *create* defaults the runtime identity to the project compute SA
+that the deployer has no `actAs` on. Both are documented inline in the workflow.
+
+### Detector work
+
+- **Re-score, refresh the Evaluation numbers, and promote — step 4 above, not before.**
+  The tuning-correctness work this depended on has shipped (see
+  [Two-stage threshold tuning](#two-stage-threshold-tuning)); what remains is running it
+  against production once the comparison set is final.
 
   Only the 30 s-grid arm is worth the pass — the default arm is a different data
   representation (native timestamps, one model per channel) that this work supersedes, so
@@ -1162,10 +1204,13 @@ channel-group data path, which is the part the work below actually reuses.
   table's 0.457 toward its ceiling, and the two arms there stop being tuning-comparable at
   that point — so report the swept arm as its own row rather than swapping the number in.
 
-  Then the new configs need to actually reach production: re-tune ESA-Mission1, re-score,
-  promote to MLflow's `@champion` alias (deliberately — never with a bare
-  `--mission ESA-Mission1`, which also prefix-matches the `ESA-Mission1-ADB*` pseudo-missions),
-  and only then does the live Cloud Run demo serve them.
+  Note the two halves differ in cost by orders of magnitude: the **re-tune** is an HPO sweep
+  over cached `errors.npy` (no GPU, minutes), while the **re-score** is a full forward pass per
+  channel. Only the re-score genuinely wants the cloud.
+
+  Then the configs reach production: promote to MLflow's `@champion` alias (deliberately —
+  never with a bare `--mission ESA-Mission1`, which also prefix-matches the
+  `ESA-Mission1-ADB*` pseudo-missions), and re-enable the deploys above.
 
 - **Carry the double-smoothing fix over to ISS.** `errors.npy` holds the **already-smoothed**
   array (`scoring.py`'s `_score_series` logs `smooth_errors(errors, error_smoothing_window)`),
@@ -1184,6 +1229,11 @@ channel-group data path, which is the part the work below actually reuses.
   would be the same one-line scoping change, but ISS is the always-on live demo: re-tuning it
   changes what the public endpoint serves, so it wants its own before/after pass rather than
   riding along with an ESA change.
+
+  **This one is not blocked by the sequencing above.** ISS never enters the ESA comparison
+  set — it has no labeled anomalies and is evaluated by fault injection — so it carries no
+  tuning-parity obligation to the DC-VAE work and can be done whenever ISS is next touched.
+  Until then the live detector keeps tuning against an array its own scorer never reproduces.
 - **Reparameterize the HPO search space onto the ridge — investigated, cut.** Measured this
   directly rather than designing it from the keyboard: swept a third subsystem (`subsystem_6`,
   39–41 channels) through the same exhaustive grid used for the two arms above. All three
