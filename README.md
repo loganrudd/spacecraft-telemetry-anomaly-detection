@@ -1155,22 +1155,33 @@ channel-group data path, which is the part the work below actually reuses.
   `--mission ESA-Mission1`, which also prefix-matches the `ESA-Mission1-ADB*` pseudo-missions),
   and only then does the live Cloud Run demo serve them.
 
-- **Re-check what Ray Tune's `error_smoothing_window` actually means.** Found while building
-  the second stage, and recorded rather than silently fixed because it moves published numbers.
+- **Stop the HPO trial function double-smoothing its inputs.** Found while building the second
+  stage, and recorded rather than silently fixed because it moves published numbers.
   `errors.npy` holds the **already-smoothed** array (`scoring.py`'s `_score_series` logs
   `smooth_errors(errors, error_smoothing_window)`), but the HPO trial function smooths it
-  *again* with the trial's own `error_smoothing_window`. So that parameter is tuning a second
-  smoothing pass over an already-smoothed array, and the value it selects does not correspond
-  to what `score_channel` would apply at re-score time (one pass, over raw errors) — a
-  train/serve skew on the smoothing axis specifically.
+  *again* with the trial's own `error_smoothing_window`. So that parameter tunes a second
+  smoothing pass, and every trial is scored against an array `score_channel` never reproduces
+  at re-score time — a train/serve skew on the smoothing axis.
 
-  The second stage sidesteps it for the configs it produces, by sweeping the saved array
-  untouched and pinning the scoring run's own smoothing window — the same discipline
-  `scripts/threshold_ceiling.py` already applied for the same reason. But the skew remains on
-  any path that stage doesn't cover (ISS, and any sweep where refinement is skipped). Fixing it
-  properly means either logging raw errors alongside the smoothed ones, or dropping
-  `error_smoothing_window` from the search space and pinning it — both change tuned configs,
-  so both need a before/after pass rather than a quiet edit.
+  Measured on the H=1 subsystem_5 arm, sweeping the same `(z, floor)` grid over both arrays:
+
+  | surface | optimum | score there | that config's score on the array scoring reproduces |
+  |---|---|---:|---:|
+  | singly smoothed (what a re-score reproduces) | `z=3.0, floor=0.4` | **0.798** | 0.798 |
+  | doubly smoothed (what the trial function sees) | `z=8.0, floor=0.0` | 0.631 | **0.397** |
+
+  So the two surfaces put their optima in completely different places, and picking the winner
+  on the wrong one costs **~0.40 mission F0.5**. (The singly-smoothed optimum reproduces the
+  hand-run reference sweep exactly, which is a useful independent check on the second stage's
+  grid path.)
+
+  **The second stage already neutralises the main consequence** — it sweeps the correct array,
+  so `threshold_z` and `min_error_value` are chosen on the true surface regardless of what
+  stage 1 saw. Residual exposure is limited to `threshold_window`, `min_run_length`, and
+  `error_smoothing_window` itself, which Ray Tune still selects on the degraded surface. Fixing
+  that properly means either logging raw errors alongside the smoothed ones, or dropping
+  `error_smoothing_window` from the search space and having the trial function sweep the saved
+  array as-is — both change tuned configs, so both need a before/after pass, not a quiet edit.
 - **Reparameterize the HPO search space onto the ridge — investigated, cut.** Measured this
   directly rather than designing it from the keyboard: swept a third subsystem (`subsystem_6`,
   39–41 channels) through the same exhaustive grid used for the two arms above. All three
