@@ -1043,7 +1043,8 @@ channel-group data path, which is the part the work below actually reuses.
   architecture claim — but it is a local script, and the modules it drives
   (`ray_fanout/threshold_search.py`, `ray_fanout/threshold_grid.py`) are library code that
   `run_all_sweeps` never calls. So the required step is the one step the pipeline cannot
-  perform, and skipping it is the default rather than a mistake you have to make.
+  perform, and skipping it is the default rather than a mistake you have to make. **Still
+  outstanding** — investigated (see below) but not yet built.
 
   Measured cost, on the 30 s-grid arm over channels 41–46 (same split, same 25 held-out
   events, same model): `cloud-tune`'s 50-sample Ray Tune sweep selected
@@ -1059,37 +1060,55 @@ channel-group data path, which is the part the work below actually reuses.
   H=10 arm: Ray Tune chose `threshold_z = 1.481, min_error_value = 0.246` where that arm's
   exhaustive grid put the optimum at `threshold_z = 7.0, min_error_value = 0.3`. Two separate
   sweeps, two different horizons, both landing in the same low-`z` region the grid scores an
-  order of magnitude worse. The sampler is not unlucky; it is mis-matched to this response
-  surface.
+  order of magnitude worse. **A third, independent sweep confirms it's not a small-subsystem
+  artifact either:** `subsystem_6` (39–41 channels, 6.5× subsystem_5's count) also converged
+  to an interior optimum (`threshold_z = 6.0, min_error_value = 0.05`, score 0.233) — a
+  materially different operating point from subsystem_5's, not a shared ridge a single
+  reparameterization could fit (see the next bullet).
 
-  The fix is two stages, not a swap: the grid sweeps only `(threshold_z, min_error_value)`,
-  because `error_smoothing_window` is baked into the saved smoothed array and cannot be
-  re-evaluated post-hoc. So Ray Tune keeps the params that require re-scoring, and the
-  exhaustive driver deterministically refines the two that are cheap on cached errors —
-  making a ridge-refined config the automatic output of `cloud-tune` rather than a manual
-  follow-up. The parallelism item below is what makes stage 2 affordable at mission scale.
+  One root cause is now fixed: a tuning-search-space review found Ray Tune was selecting
+  trials on a per-channel proxy objective (ρ≈0.64–0.66 correlated with, but 0.36–0.66 regret
+  against, the mission-level metric actually reported) and changed `run_hpo_sweep` to select
+  on the mission metric directly whenever ESA-ADB ground truth is available. That should
+  narrow the gap this bullet measures, but **the deterministic second-stage plumbing itself is
+  still not built** — the fix is two stages, not a swap: the
+  grid sweeps only `(threshold_z, min_error_value)`, because `error_smoothing_window` is baked
+  into the saved smoothed array and cannot be re-evaluated post-hoc. So Ray Tune keeps the
+  params that require re-scoring, and an exhaustive driver would deterministically refine the
+  two that are cheap on cached errors — making a ridge-refined config the automatic output of
+  `cloud-tune` rather than a manual follow-up. The parallelism item below is what would make
+  that affordable at mission scale.
 
-  **Then re-score the 30 s-grid arm and refresh the Evaluation numbers.** Only that arm is
-  worth the pass — the default arm is a different data representation (native timestamps,
-  one model per channel) that this work supersedes, so tuning it to ceiling would be effort
-  spent on a configuration nothing else builds on. The scope is **45 channels, not 62**:
-  the rest carry no labeled anomaly in the held-out window and cannot move a detection
-  metric. It is also only **two sweeps**, since those 45 fall entirely in two subsystems —
-  `subsystem_6` (39 channels, ~4.4 GB resident) and `subsystem_5` (6, ~0.7 GB). The second
-  runs on a laptop today; the first sits right at CLAUDE.md's ~4–5 GB ceiling, which is the
-  concrete reason stage 2 wants Ray rather than a local script. Re-scoring lifts the
-  Evaluation table's 0.457 toward its ceiling, and the two arms there stop being
-  tuning-comparable at that point — so report the swept arm as its own row rather than
-  swapping the number in.
-- **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
-  the table because the response surface is a narrow ridge, and `threshold_z` and
-  `min_error_value` are substitutes rather than independent knobs — so sampling them
-  independently spends most of the budget off-ridge. One configuration reported above
-  (`first`'s `threshold_z = 15.0`) sits outside the search space HPO can reach at all. The
-  mechanical driver is what makes this decidable: it produces the ridge geometry across arms
-  that the choice depends on. Deliberately not designed in advance — the baseline any
-  cleverer sampler must beat is simply raising `num_samples`, and picking a
-  reparameterization from the keyboard would repeat the mistake the driver exists to remove.
+  **Then re-score the 30 s-grid arm and refresh the Evaluation numbers, and promote +
+  re-serve production.** Only that arm is worth the pass — the default arm is a different data
+  representation (native timestamps, one model per channel) that this work supersedes, so
+  tuning it to ceiling would be effort spent on a configuration nothing else builds on. The
+  scope is **45 channels, not 62**: the rest carry no labeled anomaly in the held-out window
+  and cannot move a detection metric. It is also only **two sweeps**, since those 45 fall
+  entirely in two subsystems — `subsystem_6` (39–41 channels, ~4.4 GB resident) and
+  `subsystem_5` (6, ~0.7 GB). The second runs on a laptop today; the first sits right at
+  CLAUDE.md's ~4–5 GB ceiling, which is the concrete reason the second stage wants Ray rather
+  than a local script. Re-scoring lifts the Evaluation table's 0.457 toward its ceiling, and
+  the two arms there stop being tuning-comparable at that point — so report the swept arm as
+  its own row rather than swapping the number in. This is also the point where the
+  mission_f0_5-selected configs need to actually reach production: re-tune ESA-Mission1,
+  re-score, promote the new configs to MLflow's `@champion` alias (deliberately — never with a
+  bare `--mission ESA-Mission1`, which also prefix-matches the `ESA-Mission1-ADB*` pseudo-
+  missions), and only then does the live Cloud Run demo serve them.
+- **Reparameterize the HPO search space onto the ridge — investigated, cut.** Measured this
+  directly rather than designing it from the keyboard: swept a third subsystem (`subsystem_6`,
+  39–41 channels) through the same exhaustive grid used for the two arms above. All three
+  grids converge to an **interior** optimum (no widening needed) — so the search space's
+  bounds are not truncating anything at today's width, and the earlier truncation incidents
+  that motivated widening the bounds (`threshold_z` 2.5→1.0, `min_error_value` 0.3→0.6) were
+  real but have already been fixed. (A bound-truncation guard also now flags a config landing
+  on a search-space bound automatically, rather than needing a human to notice by hand — how
+  all three prior incidents were caught.) What the third sweep actually found is
+  **heterogeneity, not a shared ridge**: `subsystem_6` wants `min_error_value ≈ 0.05`, an order
+  of magnitude below `subsystem_5`'s `0.3–0.4`. A single reparameterization fit to one
+  subsystem's geometry would overfit to it and mis-tune the others — the opposite of the
+  intended fix. A per-subsystem search space would address the heterogeneity, but that is a
+  bigger change than this investigation scoped, so it is recorded here rather than built.
 - **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
   Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
