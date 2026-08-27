@@ -1690,11 +1690,25 @@ def run_all_sweeps(
         # 2 rather than being null as they are on a Tune-only config.
         grid = sweep_result.get("grid_meta")
         if grid:
+            # A None run_id means the baseline guard kept the untuned
+            # Settings.model defaults instead of the sweep's best trial (see
+            # run_hpo_sweep's docstring) — no Tune trial contributed, so
+            # naming one as stage 1 would be false. The refinement still ran
+            # and is still worth recording; only the stage-1 half differs.
+            _stage_one = (
+                "per-subsystem Ray Tune HPO sweep"
+                if sweep_result.get("run_id")
+                else "untuned Settings.model defaults (baseline guard kept them)"
+            )
             _source = (
-                "per-subsystem Ray Tune HPO sweep, then exhaustive "
+                f"{_stage_one}, then exhaustive "
                 "(threshold_z, min_error_value) grid refinement"
             )
-            _provenance = "ray_tune+exhaustive_grid"
+            _provenance = (
+                "ray_tune+exhaustive_grid"
+                if sweep_result.get("run_id")
+                else "baseline+exhaustive_grid"
+            )
             # The grid selected the config, so ITS objective is the one the
             # config was chosen on — stage 1's is superseded, not co-equal.
             _objective_name = grid["objective_name"]

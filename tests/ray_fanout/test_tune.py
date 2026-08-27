@@ -1006,6 +1006,7 @@ def test_run_all_sweeps_emits_two_stage_provenance(
 
     assert meta["provenance"] == "ray_tune+exhaustive_grid"
     assert "Ray Tune" in meta["source"] and "grid refinement" in meta["source"]
+    assert "baseline guard" not in meta["source"]
     # Stage 1's lineage survives — a real trial backs it.
     assert meta["run_id"] == "stage-1-tune-trial"
     # ...while the swept-grid fields describe stage 2, which actually selected.
@@ -1013,6 +1014,69 @@ def test_run_all_sweeps_emits_two_stage_provenance(
     assert meta["expansions"] == 1
     assert meta["interior"] is True
     assert meta["objective_value"] == pytest.approx(0.797)
+
+
+def test_run_all_sweeps_does_not_credit_tune_when_baseline_was_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A refined config whose stage 1 was the BASELINE GUARD (untuned defaults
+    kept, so run_id is None) must not name a Ray Tune sweep as its first
+    stage. No Tune trial contributed, and claiming one is the same class of
+    misstatement 022.2b fixed — just in the other direction."""
+    import ray
+
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+        }
+    )
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
+        lambda subsystem, channels, *_args, **_kwargs: {
+            "config": {
+                "error_smoothing_window": 30, "threshold_window": 250,
+                "threshold_z": 3.0, "min_error_value": 0.4,
+                "threshold_min_anomaly_len": 3,
+            },
+            "seg_f0_5": 0.30, "objective": 0.25, "mission_f0_5": 0.60,
+            "selection_metric": "mission_f0_5",
+            "run_id": None,          # <- baseline guard kept the defaults
+            "grid_meta": {
+                "objective_name": "mission_corrected_event_wise_f0_5",
+                "objective_value": 0.60,
+                "seg_f0_5": 0.30, "nominal_fp_rate": 0.0, "objective": 0.30,
+                "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
+                "expansions": 0, "interior": True,
+            },
+        },
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
+    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+
+    assert meta["provenance"] == "baseline+exhaustive_grid"
+    assert "Ray Tune" not in meta["source"]
+    assert "baseline guard" in meta["source"]
+    assert "grid refinement" in meta["source"]
+    assert meta["run_id"] is None
 
 
 def test_run_all_sweeps_labels_mission_metric_meta_correctly(
