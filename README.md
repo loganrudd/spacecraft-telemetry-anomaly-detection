@@ -262,6 +262,14 @@ followed by `cloud-train`/`cloud-tune`/`cloud-score` with `MULTIVARIATE=1`.
 > selected a `threshold_z` below the entire swept range. Treat 0.457 as what the
 > pipeline currently produces, not as what this configuration can reach — see the
 > first [Future Work](#future-work) item.
+>
+> **Both numbers predate the tuning changes described in
+> [Two-stage threshold tuning](#two-stage-threshold-tuning)** — mission-metric
+> selection and automatic grid refinement. On the arm where both have been
+> measured those were worth 0.212 → 0.813, so these two columns are very likely
+> further below their ceiling than the paragraph above implies. They have not been
+> re-tuned yet because the two arms must be re-tuned *together* to stay
+> comparable; that is the first [Future Work](#future-work) item.
 
 Precision and recall sit close together: the forecaster catches about half the
 labeled segments, and slightly under half of what it flags overlaps a labeled one.
@@ -359,8 +367,15 @@ Getting that comparison honest required discarding a first attempt. Tuned by `cl
 `threshold_z = 1.393`, below the entire range the grid sweeps, firing 113 detections at 0.18
 precision. Reported against the grid-tuned 0.507 above, that would have said the common time
 grid *hurt* detection by a factor of two. It is the same tuning-luck failure this repo
-already documents once, in the opposite direction, and it is why the exhaustive sweep is
-listed first in [Future Work](#future-work) as a correctness gap rather than an optimisation.
+already documents once, in the opposite direction, and it is what motivated moving the
+exhaustive sweep inside the tuning job.
+
+**That 0.212 has since been diagnosed, and it was not tuning luck.** Ray Tune was selecting
+trials on a per-channel proxy objective rather than the mission-level metric reported here;
+asking it the right question moves the same sweep to 0.756 without changing the sampler at
+all. See [Two-stage threshold tuning](#two-stage-threshold-tuning) for the split. The
+grid-tuned numbers in this section are unaffected — they never came from Tune — but the
+*reason* they had to be grid-tuned is now better understood than "the sampler got unlucky."
 
 **The grid and the horizon do not compose.** Each helps alone — the grid takes 0.507 → 0.797,
 the horizon 0.507 → 0.753 — but applied together they give **0.550**, worse than either. The
@@ -621,17 +636,32 @@ job, as an automatic second stage.
 `error_smoothing_window` and `threshold_window` change the array the threshold is computed
 over and can only be evaluated by re-scoring, so they stay with Ray Tune. `threshold_z` and
 `min_error_value` are pointwise and stateless — evaluable post-hoc on the cached error
-arrays — so a deterministic sweep refines them afterwards, at ~1.2 s per grid point against a
-job that already spends minutes loading data. Ray Tune picks the operating *regime*; the grid
-finds the operating *point* inside it.
+arrays — so a deterministic sweep refines them afterwards. Ray Tune picks the operating
+*regime*; the grid finds the operating *point* inside it.
 
-Why it was needed at all: Ray Tune's sampler is mis-matched to this response surface. On the
-30 s-grid arm its 50-sample sweep chose `threshold_z = 1.393` — *below the entire range the
-grid sweeps* — scoring **0.212** mission F0.5 where the grid found `z = 3.0, floor = 0.4` at
-**0.798**. It was not one unlucky draw: the H=10 arm did the same thing independently
-(`z = 1.481` against a grid optimum of `z = 7.0`). Read as an architecture result rather than
-a tuning artifact, that number would have said the common time grid *hurt* detection by a
-factor of two.
+Why it was needed at all: on the 30 s-grid arm, Ray Tune's 50-sample sweep chose
+`threshold_z = 1.393` — *below the entire range the grid sweeps* — scoring **0.212** mission
+F0.5 where a hand-run grid found `z = 3.0, floor = 0.4` at **0.798**. It was not one unlucky
+draw: the H=10 arm did the same thing independently (`z = 1.481` against a grid optimum of
+`z = 7.0`). Read as an architecture result rather than a tuning artifact, that number would
+have said the common time grid *hurt* detection by a factor of two.
+
+**But re-running that arm end-to-end showed the original diagnosis was wrong**, and the
+correction is more interesting than the fix. The gap was attributed to the sampler being
+mis-matched to a ridged response surface. Splitting the two changes apart:
+
+| | `threshold_z` | `min_error_value` | mission F0.5 |
+|---|---:|---:|---:|
+| Ray Tune, per-channel objective (the original 0.212) | 1.393 | 0.251 | 0.212 |
+| Ray Tune, now selecting on the mission metric | 3.756 | 0.389 | **0.756** |
+| **+ deterministic grid refinement** | 8.0 | 0.257 | **0.813** |
+| hand-run reference grid | 3.0 | 0.4 | 0.798 |
+
+Most of the gap — 0.212 → 0.756 — was **objective mis-specification, not sampler weakness**.
+The optimiser was answering the question it was asked; the question was the wrong one. The
+grid then adds 0.756 → 0.813 on top, and beats the hand-run reference because the widening
+driver pushed `threshold_z` past the ceiling the human's grid stopped at. Both changes are
+worth keeping, but "HyperOpt can't find this ridge" was the wrong story about why.
 
 Two correctness details the stage is careful about, both learned the hard way:
 
