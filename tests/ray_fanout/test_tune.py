@@ -846,6 +846,171 @@ class TestIssKeepsItsThresholdZFloor:
         assert ISS_SEARCH_SPACE["min_error_value"] == 0.0
 
 
+class TestFlagPeggedParams:
+    """docs/plans/024 stage .0 — the bound-truncation guard.
+
+    A sweep can land a winning config exactly on (or within an epsilon of) a
+    search-space bound; that is not a converged optimum. Until now nothing
+    noticed automatically — three prior recurrences, each caught by a human
+    reading a config (see docs/plans/024's "truncation, three times over").
+    ``_flag_pegged_params`` is the automatic version.
+    """
+
+    def test_interior_config_flags_nothing(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        config = {"threshold_z": 4.0, "min_error_value": 0.3}
+        assert _flag_pegged_params(config, ESA_M1_SEARCH_SPACE) == {}
+
+    def test_replays_plan_019_arm_a(self) -> None:
+        """arm A: threshold_z=4.783 against the then-(2.5, 5.0) ceiling.
+
+        Predates ESA_M1_SEARCH_SPACE's existence — that widening event IS
+        this finding. Replayed against a literal (2.5, 5.0) domain, matching
+        the base SEARCH_SPACE's current threshold_z bounds (unchanged since
+        the ESA-Mission1 widening branched off it as ESA_M1_SEARCH_SPACE).
+        """
+        from ray import tune
+
+        from spacecraft_telemetry.ray_fanout.tune import _flag_pegged_params
+
+        space = {"threshold_z": tune.uniform(2.5, 5.0)}
+        flagged = _flag_pegged_params({"threshold_z": 4.783}, space)
+        assert "threshold_z" in flagged
+        assert flagged["threshold_z"]["bound_type"] == "upper"
+
+    def test_replays_plan_023_subsystem_1_sighting(self) -> None:
+        """Fresh, post-widening sighting: subsystem_1 pegged threshold_z at
+        exactly 8.000 against today's ESA_M1_SEARCH_SPACE 8.0 ceiling.
+
+        This matters more than the arm A replay: it proves the guard is
+        needed at TODAY's bounds, not only in hindsight.
+        """
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        flagged = _flag_pegged_params({"threshold_z": 8.000}, ESA_M1_SEARCH_SPACE)
+        assert "threshold_z" in flagged
+        assert flagged["threshold_z"]["bound_type"] == "upper"
+        assert flagged["threshold_z"]["bound"] == pytest.approx(8.0)
+
+    def test_lower_bound_is_flagged(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        flagged = _flag_pegged_params({"threshold_z": 1.05}, ESA_M1_SEARCH_SPACE)
+        assert flagged["threshold_z"]["bound_type"] == "lower"
+
+    def test_randint_param_at_bound_is_not_flagged(self) -> None:
+        """Discrete (tune.randint) params are out of scope — pegging at a
+        discrete bound is common and usually meaningful."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        config = {"threshold_window": 500, "threshold_min_anomaly_len": 10}
+        assert _flag_pegged_params(config, ESA_M1_SEARCH_SPACE) == {}
+
+    def test_fixed_iss_min_error_value_is_not_flagged(self) -> None:
+        """ISS_SEARCH_SPACE pins min_error_value=0.0 as a plain float, not a
+        Ray Tune domain — no bound to pin against."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ISS_SEARCH_SPACE,
+            _flag_pegged_params,
+        )
+
+        assert _flag_pegged_params({"min_error_value": 0.0}, ISS_SEARCH_SPACE) == {}
+
+
+class TestRunAllSweepsPeggedParamGuard:
+    """Integration coverage: the guard must actually reach tuned_configs.json
+    and the logs from run_all_sweeps, not just work in isolation."""
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        *,
+        winning_threshold_z: float,
+    ) -> dict:
+        import ray
+
+        from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+
+        base_settings = load_settings("test")
+        settings = base_settings.model_copy(
+            update={
+                "model": base_settings.model.model_copy(
+                    update={"artifacts_dir": tmp_path / "models"}
+                ),
+                "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+            }
+        )
+
+        class _FakeRun:
+            class info:
+                run_id = "fake-scored-run-id"
+
+        monkeypatch.setattr(ray, "is_initialized", lambda: True)
+        monkeypatch.setattr(
+            "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+            lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+        )
+        monkeypatch.setattr(
+            "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+            lambda *_args, **_kwargs: _FakeRun(),
+        )
+
+        def _fake_run_hpo_sweep(subsystem, channels, *_args, **_kwargs):
+            return {
+                "config": {
+                    "error_smoothing_window": 10,
+                    "threshold_window": 100,
+                    "threshold_z": winning_threshold_z,
+                    "min_error_value": 0.3,
+                    "threshold_min_anomaly_len": 2,
+                },
+                "seg_f0_5": 0.75,
+                "run_id": "fake-run-id-abc",
+            }
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
+            _fake_run_hpo_sweep,
+        )
+
+        out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
+        return json.loads(out.read_text())["subsystem_1"]["_meta"]
+
+    def test_pegged_config_recorded_in_meta_and_logged(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        meta = self._run(monkeypatch, tmp_path, winning_threshold_z=8.000)
+
+        assert meta["pegged_params"] is not None
+        assert meta["pegged_params"]["threshold_z"]["bound_type"] == "upper"
+        assert meta["pegged_params"]["threshold_z"]["value"] == pytest.approx(8.000)
+
+        stdout = capsys.readouterr().out
+        assert "tune.sweep.param_pegged" in stdout
+        assert "subsystem_1" in stdout
+
+    def test_interior_config_records_no_pegged_params(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        meta = self._run(monkeypatch, tmp_path, winning_threshold_z=4.0)
+        assert meta["pegged_params"] is None
+
+
 def test_hpo_portion_slicing(monkeypatch: pytest.MonkeyPatch) -> None:
     """_prepare_channel_data returns slices of length floor(N * hpo_eval_fraction)."""
     from spacecraft_telemetry.ray_fanout.tune import _prepare_channel_data

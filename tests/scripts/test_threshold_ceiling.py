@@ -186,7 +186,14 @@ class TestMetaKeySetParity:
     # outside docs/reviews/022 stage 2.1's declared one-line scope (the
     # "source" string only). Documented and permitted here rather than
     # silently narrowed to a passing-by-luck equality check.
-    _TUNE_ONLY_DIAGNOSTIC_KEYS = frozenset({"seg_f0_5", "nominal_fp_rate"})
+    #
+    # "pegged_params" (docs/plans/024 stage .0) is a deliberate, documented
+    # tune-only key: it's tune.py's bound-truncation guard, which only makes
+    # sense for Ray Tune's continuous search — the grid writer's
+    # widen_to_convergence never returns a non-interior result (already
+    # covered by the shared "interior" key), so it has no comparable failure
+    # mode to report. See write_tuned_configs' docstring.
+    _TUNE_ONLY_DIAGNOSTIC_KEYS = frozenset({"seg_f0_5", "nominal_fp_rate", "pegged_params"})
 
     def test_grid_and_tune_writers_emit_the_same_meta_key_set(
         self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

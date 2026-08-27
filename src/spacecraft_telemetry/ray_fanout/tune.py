@@ -237,6 +237,53 @@ ESA_M1_SEARCH_SPACE: dict[str, Any] = {
 }
 
 
+def _flag_pegged_params(
+    config: dict[str, Any],
+    search_space: dict[str, Any],
+    epsilon: float = 0.10,
+) -> dict[str, dict[str, float | str]]:
+    """Flag continuous ``config`` params sitting within ``epsilon`` (relative
+    to the domain's span) of a search-space bound.
+
+    Only ``tune.uniform`` (``Float``) domains are checked. ``tune.randint``
+    (``Integer``) params are out of scope — pegging at a discrete bound is
+    common and usually meaningful (docs/plans/024 stage .0). A search-space
+    entry that is a plain fixed value rather than a Ray Tune domain (ISS pins
+    ``min_error_value`` to 0.0) has no bound to pin against and is skipped the
+    same way ``_clamp_to_search_space`` skips it.
+
+    ``epsilon=0.10`` is calibrated against two archived pegged configs, not
+    picked in the abstract: plan 019's arm A (``threshold_z=4.783`` against
+    the then-``(2.5, 5.0)`` ceiling — 8.7% of that span from the bound) and
+    plan 023's fresh ``subsystem_1`` sighting (``threshold_z=8.000`` exactly
+    on today's widened 8.0 ceiling). Both must fire this guard — replayed in
+    ``tests/ray_fanout/test_tune.py``.
+
+    Returns a dict keyed by param name, empty if nothing is pegged. Each
+    value records ``value``, ``bound``, and ``bound_type`` ("lower"/"upper")
+    for the ``_meta`` block and the log line — this is a warn-and-record
+    guard (see ``run_all_sweeps``), never a raise: a hard failure at the end
+    of an expensive cloud sweep helps nobody, and the historical failure was
+    that nobody *noticed*, not that nobody was stopped.
+    """
+    from ray.tune.search.sample import Float
+
+    flagged: dict[str, dict[str, float | str]] = {}
+    for name, value in config.items():
+        domain = search_space.get(name)
+        if not isinstance(domain, Float):
+            continue
+        lower, upper = domain.lower, domain.upper
+        span = upper - lower
+        if span <= 0:
+            continue
+        if abs(value - lower) <= epsilon * span:
+            flagged[name] = {"value": value, "bound": lower, "bound_type": "lower"}
+        elif abs(value - upper) <= epsilon * span:
+            flagged[name] = {"value": value, "bound": upper, "bound_type": "upper"}
+    return flagged
+
+
 def _find_multivariate_scoring_run(
     settings: Settings,
     mission: str,
@@ -1220,14 +1267,35 @@ def run_all_sweeps(
             min_error_value_max=0.6,
         )
 
-    def _to_entry(sweep_result: dict[str, Any]) -> dict[str, Any]:
+    def _to_entry(sweep_result: dict[str, Any], subsystem: str) -> dict[str, Any]:
         """Convert run_hpo_sweep result to the on-disk tuned_configs entry.
 
         ``_meta`` schema is shared with the exhaustive-grid writer
         (scripts/threshold_ceiling.py) — see write_tuned_configs' docstring
         for the full spec (docs/plans/022, stage 022.2).
+
+        docs/plans/024 stage .0: also checks the winning config against the
+        search space actually used for this sweep (``_space``, the enclosing
+        closure) and records any pegged continuous param in
+        ``_meta.pegged_params`` — a config sitting on a search-space bound is
+        not a converged optimum, and nothing short of this recorded it until
+        now (three prior recurrences, each caught by a human reading a
+        config; see the plan's "truncation, three times over").
         """
         config = sweep_result.get("config", {})
+        pegged = _flag_pegged_params(config, _space)
+        if pegged:
+            for _param, _info in pegged.items():
+                log.warning(
+                    "tune.sweep.param_pegged",
+                    subsystem=subsystem,
+                    param=_param,
+                    value=_info["value"],
+                    bound=_info["bound"],
+                    bound_type=_info["bound_type"],
+                    note="winning config sits on a search-space bound — "
+                    "not a converged optimum. See docs/plans/024 stage .0.",
+                )
         return {
             **config,
             "_meta": {
@@ -1257,6 +1325,7 @@ def run_all_sweeps(
                 "axes": None,
                 "expansions": None,
                 "interior": None,
+                "pegged_params": pegged or None,
             },
         }
 
@@ -1281,11 +1350,12 @@ def run_all_sweeps(
                 }
                 for future in concurrent.futures.as_completed(futures):
                     subsystem = futures[future]
-                    sweep_results[subsystem] = _to_entry(future.result())
+                    sweep_results[subsystem] = _to_entry(future.result(), subsystem)
         else:
             for sub, sub_channels in eligible.items():
                 sweep_results[sub] = _to_entry(
-                    run_hpo_sweep(sub, sub_channels, settings, mission, search_space=_space)
+                    run_hpo_sweep(sub, sub_channels, settings, mission, search_space=_space),
+                    sub,
                 )
 
     write_tuned_configs(sweep_results, output)
@@ -1343,7 +1413,9 @@ def write_tuned_configs(
                     "min_run_length":    3,
                     "axes":              {"threshold_z": [...], "min_error_value": [...]} | null,
                     "expansions":        2 | null,
-                    "interior":          true | null
+                    "interior":          true | null,
+                    "pegged_params":     {"threshold_z": {"value": 8.0, "bound": 8.0,
+                                                           "bound_type": "upper"}} | null
                 }
             }
         }
@@ -1357,6 +1429,15 @@ def write_tuned_configs(
     / ``objective_value`` replace an earlier single ``objective`` key that
     collided across writers (a float on this path, a string on the grid's) —
     nothing reads the old key, so this is a clean break (docs/plans/022).
+
+    ``pegged_params`` (docs/plans/024 stage .0) is this module's own
+    bound-truncation guard — see ``_flag_pegged_params``. Only
+    ``run_all_sweeps`` populates it: Ray Tune's continuous search can land a
+    winning config on a bound, which is exactly what this guards against. The
+    grid writer (scripts/threshold_ceiling.py) has no comparable failure mode
+    — ``widen_to_convergence`` never returns a non-interior result, already
+    checked via ``interior`` above — so it omits this key rather than
+    emitting a meaningless ``null``.
 
     ``_meta`` is filtered out by score_all_channels before applying overrides
     (not in _TUNABLE_SCORING_FIELDS). score_channel reads ``_meta.run_id`` to
