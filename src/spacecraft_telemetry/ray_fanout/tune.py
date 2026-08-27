@@ -812,13 +812,72 @@ def _grid_axis(domain: Any, n_points: int) -> list[float]:
     return [round(lower + i * step, 6) for i in range(n_points)]
 
 
+def _scoring_run_smoothing_window(
+    scoring_run_ids: dict[str, str | None], tracking_uri: str
+) -> int | None:
+    """The ``error_smoothing_window`` the scoring runs behind a sweep used.
+
+    ``errors.npy`` holds the **already-smoothed** array (model/scoring.py's
+    ``_score_series`` returns ``smooth_errors(errors, cfg.error_smoothing_window)``
+    and that is what gets logged), so the grid's ``(z, floor)`` is only valid
+    for a re-score that reproduces exactly that smoothing. Pinning it is the
+    same discipline ``scripts/threshold_ceiling.py`` applies for the same
+    reason — see its ``_build_tuned_config``.
+
+    Returns ``None`` when the runs disagree or the lookup fails: averaging a
+    grid across differently-smoothed arrays would not describe any single
+    achievable operating point, which is a reason to skip refinement, not to
+    guess a value.
+    """
+    import mlflow as _mlflow
+
+    client = _mlflow.MlflowClient(tracking_uri=tracking_uri)
+    windows: set[int] = set()
+    for run_id in {rid for rid in scoring_run_ids.values() if rid}:
+        params = client.get_run(run_id).data.params
+        if "error_smoothing_window" not in params:
+            return None
+        windows.add(int(params["error_smoothing_window"]))
+    if len(windows) != 1:
+        return None
+    return windows.pop()
+
+
+def _nominal_fp_rate_at(
+    nominal_errors: dict[str, np.ndarray[Any, Any]],
+    *,
+    threshold_window: int,
+    min_run_length: int,
+    threshold_z: float,
+    min_error_value: float,
+) -> float:
+    """Mean nominal false-positive rate at one (z, floor) point.
+
+    Mirrors ``_scoring_trial``'s nominal branch EXCEPT that it does not
+    re-smooth: like ``errors.npy``, a nominal run's saved array is already
+    smoothed, and the grid this backstops sweeps its arrays untouched for the
+    same reason (see :func:`_refine_with_grid`). Smoothing here would price the
+    refined config's false positives against an array it was never evaluated on.
+    """
+    from spacecraft_telemetry.model.scoring import dynamic_threshold, flag_anomalies
+
+    rates: list[float] = []
+    for errors in nominal_errors.values():
+        threshold = dynamic_threshold(errors, threshold_window, threshold_z)
+        flags = flag_anomalies(errors, threshold, min_run_length, min_error_value)
+        rates.append(float(flags.mean()) if len(flags) else 0.0)
+    return float(np.mean(rates)) if rates else 0.0
+
+
 def _refine_with_grid(
     best_config: dict[str, Any],
     *,
     channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
+    nominal_errors: dict[str, np.ndarray[Any, Any]],
     search_space: dict[str, Any],
     settings: Settings,
     subsystem: str,
+    smoothing_window: int,
     channel_timestamps: dict[str, np.ndarray[Any, Any]],
     mission_events: list[Any],
     mission_timeline_hpo: list[Any],
@@ -827,11 +886,12 @@ def _refine_with_grid(
     Ray Tune winner, using the 022.1 mechanical widening driver.
 
     **Why a second stage rather than a better sampler** (docs/plans/024 stage
-    .6): ``error_smoothing_window`` and ``threshold_window`` change the saved
-    smoothed array and can only be evaluated by re-scoring, so they must stay
-    with Tune. ``threshold_z`` and ``min_error_value`` are pointwise and are
-    evaluable post-hoc on the cached errors, so they can be swept exhaustively
-    for seconds of compute. Two stages, not a swap.
+    .6): ``threshold_window`` changes what the rolling threshold is computed
+    over and ``error_smoothing_window`` changes the array itself, so neither
+    can be re-evaluated without re-scoring. ``threshold_z`` and
+    ``min_error_value`` are pointwise and stateless, so they CAN be swept
+    exhaustively on the cached errors for seconds of compute. Two stages, not
+    a swap.
 
     The grid is scored with :func:`threshold_grid.sweep_group_mission_level`
     — the SAME mission-level metric ``run_hpo_sweep`` selects on since stage
@@ -839,11 +899,14 @@ def _refine_with_grid(
     the refinement on a different objective than the selection would reintroduce
     exactly the mismatch .2 removed.
 
-    Fixed at the winner's values (never re-swept here): the smoothing window,
-    the threshold window, and the minimum run length. Each channel's errors are
-    re-smoothed with the winner's ``error_smoothing_window`` first, because the
-    grid operates on a *smoothed* array and the winning config's smoothing is
-    what the refined ``(z, floor)`` must be valid for.
+    **``smoothing_window`` is the SCORING RUN's, not the Tune trial's, and the
+    refined config pins it.** ``errors.npy`` is already smoothed (see
+    :func:`_scoring_run_smoothing_window`), so this function sweeps it as-is
+    — exactly as ``scripts/threshold_ceiling.py`` does, which is what makes
+    the two agree on the same run (docs/plans/024 stage .6's gate). Carrying
+    the Tune trial's ``error_smoothing_window`` through instead would emit a
+    config whose ``(z, floor)`` was chosen against an array that a re-score
+    would never reproduce.
 
     Returns ``(refined_config, grid_meta)``, or ``None`` when refinement did
     not produce a usable result — a non-convergent widening (the optimum is
@@ -852,10 +915,10 @@ def _refine_with_grid(
     which is strictly no worse than not having run this stage at all: a
     refinement that cannot converge must not silently downgrade a sweep.
     """
-    from spacecraft_telemetry.model.scoring import smooth_errors
     from spacecraft_telemetry.ray_fanout.threshold_grid import (
         NATURAL_BOUNDS,
         precompute_threshold_terms,
+        sweep_group,
         sweep_group_mission_level,
         threshold_grid_sweep_fn,
     )
@@ -872,14 +935,12 @@ def _refine_with_grid(
         # min_error_value) — there is no axis to refine along.
         return None
 
-    smoothing = int(best_config["error_smoothing_window"])
     threshold_window = int(best_config["threshold_window"])
     min_run_length = int(best_config["threshold_min_anomaly_len"])
 
-    smoothed_data = {
-        channel: (smooth_errors(errors, smoothing), labels)
-        for channel, (errors, labels) in channel_data.items()
-    }
+    # Swept AS-IS: errors.npy is already smoothed. Re-smoothing here would
+    # sweep a doubly-smoothed array that no re-score reproduces.
+    smoothed_data = channel_data
     # Precomputed once and reused across every widening round: the rolling
     # mean/std pass is z-independent and is the expensive part of a grid point.
     prepared = {
@@ -933,10 +994,38 @@ def _refine_with_grid(
         **best_config,
         "threshold_z": float(best_z),
         "min_error_value": float(best_floor),
+        # Pinned to the array the grid actually swept — see this function's
+        # docstring and scripts/threshold_ceiling.py's identical pin.
+        "error_smoothing_window": smoothing_window,
     }
+    # seg_f0_5 at the refined point, computed on the SAME array the grid swept.
+    # Recomputing it through _scoring_trial instead would re-smooth (that path
+    # smooths whatever it is handed), scoring a doubly-smoothed array and
+    # reporting a diagnostic that describes neither the emitted config nor the
+    # grid's own result — the "row misdescribes itself" failure again.
+    refined_seg_f0_5 = sweep_group(
+        smoothed_data,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+        z_values=[float(best_z)],
+        floor_values=[float(best_floor)],
+    )[(float(best_z), float(best_floor))]
+
+    refined_fp_rate = _nominal_fp_rate_at(
+        nominal_errors,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+        threshold_z=float(best_z),
+        min_error_value=float(best_floor),
+    )
+
     grid_meta = {
         "objective_name": "mission_corrected_event_wise_f0_5",
         "objective_value": widening.best_score,
+        "seg_f0_5": refined_seg_f0_5,
+        "nominal_fp_rate": refined_fp_rate,
+        "objective": refined_seg_f0_5
+        - settings.tune.fp_penalty_weight * refined_fp_rate,
         "axes": {
             "threshold_z": widening.axes["threshold_z"],
             "min_error_value": widening.axes["min_error_value"],
@@ -1344,16 +1433,38 @@ def run_hpo_sweep(
         and mission_events is not None
         and mission_timeline_hpo is not None
     ):
-        _refined = _refine_with_grid(
-            best_config,
-            channel_data=channel_data,
-            search_space=_search_space,
-            settings=settings,
-            subsystem=subsystem,
-            channel_timestamps=channel_timestamps,
-            mission_events=mission_events,
-            mission_timeline_hpo=mission_timeline_hpo,
+        # The grid sweeps the SAVED (already-smoothed) errors, so the refined
+        # (z, floor) is only valid alongside the smoothing that produced them.
+        # None => the scoring runs disagree (or the lookup failed), in which
+        # case there is no single array the grid would describe: skip rather
+        # than guess.
+        _smoothing = _scoring_run_smoothing_window(
+            scoring_run_ids, settings.mlflow.tracking_uri
         )
+        _refined = (
+            _refine_with_grid(
+                best_config,
+                channel_data=channel_data,
+                nominal_errors=nominal_errors,
+                search_space=_search_space,
+                settings=settings,
+                subsystem=subsystem,
+                smoothing_window=_smoothing,
+                channel_timestamps=channel_timestamps,
+                mission_events=mission_events,
+                mission_timeline_hpo=mission_timeline_hpo,
+            )
+            if _smoothing is not None
+            else None
+        )
+        if _smoothing is None:
+            log.warning(
+                "tune.grid_refine.skipped",
+                subsystem=subsystem,
+                note="could not resolve a single error_smoothing_window across "
+                "this subsystem's scoring runs — the grid would be averaging "
+                "over differently-smoothed arrays. Keeping the Ray Tune config.",
+            )
         if _refined is not None:
             refined_config, grid_meta = _refined
             log.info(
@@ -1372,18 +1483,14 @@ def run_hpo_sweep(
             best_config = refined_config
             best_mission_f0_5 = grid_meta["objective_value"]
             best_selection_value = grid_meta["objective_value"]
-            # seg_f0_5/nominal_fp_rate/objective still describe the TUNE
-            # trial, not the refined point — recompute them so every reported
-            # metric describes the config actually being returned.
-            _refined_metrics = _scoring_trial(
-                best_config,
-                channel_data=channel_data,
-                nominal_errors=nominal_errors,
-                fp_penalty_weight=settings.tune.fp_penalty_weight,
-            )
-            best_seg_f0_5 = _refined_metrics["seg_f0_5"]
-            best_nominal_fp_rate = _refined_metrics["nominal_fp_rate"]
-            best_objective = _refined_metrics["objective"]
+            # Every reported metric is recomputed at the refined point, on the
+            # same arrays the grid swept — so the _meta block describes the
+            # config actually emitted rather than the stage-1 trial it
+            # replaced. Reusing Tune's numbers here would attribute one
+            # config's scores to a different config.
+            best_seg_f0_5 = grid_meta["seg_f0_5"]
+            best_nominal_fp_rate = grid_meta["nominal_fp_rate"]
+            best_objective = grid_meta["objective"]
 
     log.info(
         "tune.sweep.end",

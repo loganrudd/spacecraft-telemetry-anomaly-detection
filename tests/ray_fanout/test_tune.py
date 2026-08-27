@@ -727,6 +727,8 @@ class TestRefineWithGrid:
 
         settings = load_settings("test")
         kwargs = {**self._fixture(), **overrides}
+        kwargs.setdefault("smoothing_window", 30)
+        kwargs.setdefault("nominal_errors", {})
         return _refine_with_grid(
             config,
             search_space=space,
@@ -747,9 +749,7 @@ class TestRefineWithGrid:
 
         assert result is not None
         refined, meta = result
-        # Params the grid does NOT sweep must survive untouched — they change
-        # the smoothed array and belong to stage 1.
-        assert refined["error_smoothing_window"] == 5
+        # threshold_window / min_run_length are stage 1's and survive untouched.
         assert refined["threshold_window"] == 20
         assert refined["threshold_min_anomaly_len"] == 1
         # The two it does sweep are floats drawn from the swept axes.
@@ -790,6 +790,118 @@ class TestRefineWithGrid:
         assert result is not None
         _refined, meta = result
         assert meta["objective_value"] >= tune_metrics["mission_f0_5"]
+
+    def test_pins_the_scoring_runs_smoothing_window_not_the_trials(self) -> None:
+        """errors.npy holds the ALREADY-SMOOTHED array (model/scoring.py's
+        _score_series logs smooth_errors(errors, cfg.error_smoothing_window)),
+        so the grid sweeps it as-is and the refined config must pin the
+        smoothing that produced it.
+
+        Carrying the Tune trial's error_smoothing_window through instead would
+        emit a config whose (z, floor) was chosen against an array no re-score
+        ever reproduces — the exact failure scripts/threshold_ceiling.py's
+        identical pin exists to prevent.
+        """
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {
+            "error_smoothing_window": 5,  # the TRIAL's — must not survive
+            "threshold_window": 20,
+            "threshold_z": 1.05, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.02,
+        }
+        result = self._call(config, ESA_M1_SEARCH_SPACE, smoothing_window=31)
+        assert result is not None
+        refined, _meta = result
+        assert refined["error_smoothing_window"] == 31
+
+    def test_sweeps_the_saved_array_without_re_smoothing_it(self) -> None:
+        """Pins the no-double-smoothing property directly: the grid's scores
+        must equal what the reference implementation (threshold_grid.
+        sweep_group_mission_level, which scripts/threshold_ceiling.py drives)
+        produces on the saved array untouched."""
+        from spacecraft_telemetry.ray_fanout.threshold_grid import (
+            sweep_group_mission_level,
+        )
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        fixture = self._fixture()
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 1.05, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.02,
+        }
+        result = self._call(config, ESA_M1_SEARCH_SPACE)
+        assert result is not None
+        refined, meta = result
+
+        reference = sweep_group_mission_level(
+            fixture["channel_data"],          # the SAVED array, un-re-smoothed
+            fixture["channel_timestamps"],
+            fixture["mission_events"],
+            fixture["mission_timeline_hpo"],
+            threshold_window=20,
+            min_run_length=1,
+            z_values=[refined["threshold_z"]],
+            floor_values=[refined["min_error_value"]],
+        )
+        assert meta["objective_value"] == pytest.approx(
+            reference[(refined["threshold_z"], refined["min_error_value"])]
+        )
+
+    def test_reports_metrics_recomputed_at_the_refined_point(self) -> None:
+        """_meta must describe the config actually emitted, not the stage-1
+        trial it replaced. seg_f0_5 / nominal_fp_rate / objective are all
+        recomputed at the refined (z, floor) on the arrays the grid swept."""
+        from spacecraft_telemetry.ray_fanout.threshold_grid import sweep_group
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        fixture = self._fixture()
+        # A nominal (un-injected) baseline whose errors never excite the
+        # threshold, so a well-chosen config's FP rate is genuinely low.
+        nominal = {"channel_1": np.abs(np.random.default_rng(7).standard_normal(120)) * 0.01}
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 1.05, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.02,
+        }
+        result = self._call(config, ESA_M1_SEARCH_SPACE, nominal_errors=nominal)
+        assert result is not None
+        refined, meta = result
+
+        expected_seg = sweep_group(
+            fixture["channel_data"],
+            threshold_window=20, min_run_length=1,
+            z_values=[refined["threshold_z"]],
+            floor_values=[refined["min_error_value"]],
+        )[(refined["threshold_z"], refined["min_error_value"])]
+        assert meta["seg_f0_5"] == pytest.approx(expected_seg)
+        assert 0.0 <= meta["nominal_fp_rate"] <= 1.0
+        # objective stays seg_f0_5 - w * nominal_fp_rate, w from settings.
+        assert meta["objective"] == pytest.approx(
+            meta["seg_f0_5"] - load_settings("test").tune.fp_penalty_weight
+            * meta["nominal_fp_rate"]
+        )
+
+    def test_nominal_fp_rate_does_not_re_smooth_either(self) -> None:
+        """A nominal run's saved array is already smoothed too, so pricing the
+        refined config's false positives must not re-smooth it — otherwise the
+        penalty is computed against an array the config was never evaluated on."""
+        from spacecraft_telemetry.model.scoring import (
+            dynamic_threshold,
+            flag_anomalies,
+        )
+        from spacecraft_telemetry.ray_fanout.tune import _nominal_fp_rate_at
+
+        errors = np.abs(np.random.default_rng(3).standard_normal(200)) * 0.05
+        got = _nominal_fp_rate_at(
+            {"channel_1": errors},
+            threshold_window=25, min_run_length=2,
+            threshold_z=3.0, min_error_value=0.01,
+        )
+        threshold = dynamic_threshold(errors, 25, 3.0)
+        expected = flag_anomalies(errors, threshold, 2, 0.01).mean()
+        assert got == pytest.approx(expected)
 
     def test_skips_when_min_error_value_is_pinned(self) -> None:
         """ISS pins min_error_value to a constant, not a distribution — there
