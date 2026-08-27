@@ -641,6 +641,268 @@ def test_run_all_sweeps_filters_and_runs(
     assert "objective" not in meta
 
 
+class TestGridAxis:
+    """docs/plans/024 stage .6 — the second stage's initial grid is derived
+    FROM the search space rather than hardcoded, so the two stages always
+    search the same region even after a bounds change."""
+
+    def test_spans_the_domain_inclusive(self) -> None:
+        from ray import tune
+
+        from spacecraft_telemetry.ray_fanout.tune import _grid_axis
+
+        axis = _grid_axis(tune.uniform(1.0, 8.0), 8)
+        assert len(axis) == 8
+        assert axis[0] == pytest.approx(1.0)
+        assert axis[-1] == pytest.approx(8.0)
+        assert axis == sorted(axis)
+
+    def test_two_points_is_just_the_endpoints(self) -> None:
+        from ray import tune
+
+        from spacecraft_telemetry.ray_fanout.tune import _grid_axis
+
+        assert _grid_axis(tune.uniform(0.0, 0.6), 2) == [0.0, 0.6]
+
+    def test_tracks_a_bounds_change(self) -> None:
+        """The point of deriving it: move the bounds, the grid follows."""
+        from ray import tune
+
+        from spacecraft_telemetry.ray_fanout.tune import _grid_axis
+
+        assert _grid_axis(tune.uniform(0.0, 10.0), 3) == [0.0, 5.0, 10.0]
+
+
+class TestRefineWithGrid:
+    """docs/plans/024 stage .6 — the deterministic second stage.
+
+    The motivating measurement: on the H=1 subsystem_5 arm, Ray Tune's
+    50-sample sweep picked `z=1.393, floor=0.251` (0.212 mission F0.5) where
+    the exhaustive grid found `z=3.0, floor=0.4` (0.797). The sampler is
+    mis-matched to this response surface, so a deterministic sweep of the two
+    post-hoc-evaluable params refines it.
+    """
+
+    @staticmethod
+    def _fixture() -> dict[str, typing.Any]:
+        """One channel whose errors spike exactly where a ground-truth event is.
+
+        Built so the mission metric is genuinely sensitive to (z, floor): a
+        low z floods the timeline with detections and tanks precision, which
+        is the failure mode the refinement exists to escape.
+        """
+        import pandas as pd
+
+        from spacecraft_telemetry.esa_adb.events import Event
+
+        t0 = pd.Timestamp("2000-01-01", tz="UTC")
+        n = 120
+        rng = np.random.default_rng(0)
+        errors = np.abs(rng.standard_normal(n)) * 0.01
+        errors[60:70] += 3.0  # one clear excursion
+        labels = np.zeros(n, dtype=np.bool_)
+        labels[60:70] = True
+        timestamps = pd.DatetimeIndex(
+            [t0.tz_localize(None) + pd.Timedelta(seconds=90 * i) for i in range(n)]
+        ).values
+        return {
+            "channel_data": {"channel_1": (errors, labels)},
+            "channel_timestamps": {"channel_1": timestamps},
+            "mission_timeline_hpo": [(t0, t0 + pd.Timedelta(seconds=90 * n))],
+            "mission_events": [
+                Event(
+                    event_id="E1",
+                    category="Anomaly",
+                    intervals=(
+                        (t0 + pd.Timedelta(seconds=90 * 60),
+                         t0 + pd.Timedelta(seconds=90 * 70)),
+                    ),
+                    channels=frozenset({"channel_1"}),
+                )
+            ],
+        }
+
+    def _call(self, config: dict, space: dict, **overrides: typing.Any):
+        from spacecraft_telemetry.ray_fanout.tune import _refine_with_grid
+
+        settings = load_settings("test")
+        kwargs = {**self._fixture(), **overrides}
+        return _refine_with_grid(
+            config,
+            search_space=space,
+            settings=settings,
+            subsystem="subsystem_1",
+            **kwargs,
+        )
+
+    def test_returns_refined_config_and_two_stage_meta(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE
+
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 1.05, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.02,
+        }
+        result = self._call(config, ESA_M1_SEARCH_SPACE)
+
+        assert result is not None
+        refined, meta = result
+        # Params the grid does NOT sweep must survive untouched — they change
+        # the smoothed array and belong to stage 1.
+        assert refined["error_smoothing_window"] == 5
+        assert refined["threshold_window"] == 20
+        assert refined["threshold_min_anomaly_len"] == 1
+        # The two it does sweep are floats drawn from the swept axes.
+        assert isinstance(refined["threshold_z"], float)
+        assert isinstance(refined["min_error_value"], float)
+        assert refined["threshold_z"] in meta["axes"]["threshold_z"]
+        assert refined["min_error_value"] in meta["axes"]["min_error_value"]
+        assert meta["objective_name"] == "mission_corrected_event_wise_f0_5"
+        assert meta["interior"] is True
+        assert isinstance(meta["expansions"], int)
+
+    def test_refinement_beats_the_tune_pick_on_the_selection_metric(self) -> None:
+        """The whole point: the refined point must score >= the config Tune
+        would have shipped, on the metric the sweep selects on."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _scoring_trial,
+        )
+
+        fixture = self._fixture()
+        # A deliberately bad low-z pick, the shape of the real 0.212 failure.
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 1.0, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.0,
+        }
+        tune_metrics = _scoring_trial(
+            config,
+            channel_data=fixture["channel_data"],
+            nominal_errors={},
+            fp_penalty_weight=5.0,
+            channel_timestamps=fixture["channel_timestamps"],
+            mission_events=fixture["mission_events"],
+            mission_timeline_hpo=fixture["mission_timeline_hpo"],
+        )
+
+        result = self._call(config, ESA_M1_SEARCH_SPACE)
+        assert result is not None
+        _refined, meta = result
+        assert meta["objective_value"] >= tune_metrics["mission_f0_5"]
+
+    def test_skips_when_min_error_value_is_pinned(self) -> None:
+        """ISS pins min_error_value to a constant, not a distribution — there
+        is no axis to refine along, so the stage declines rather than
+        inventing one."""
+        from spacecraft_telemetry.ray_fanout.tune import ISS_SEARCH_SPACE
+
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 3.0, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.0,
+        }
+        assert self._call(config, ISS_SEARCH_SPACE) is None
+
+    def test_non_convergence_keeps_the_tune_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-convergent grid's optimum is a grid-edge LOWER bound, not an
+        optimum. Returning it would silently downgrade the sweep, so the stage
+        declines and the Ray Tune config stands."""
+        from spacecraft_telemetry.ray_fanout import tune as tune_module
+        from spacecraft_telemetry.ray_fanout.threshold_search import NonConvergenceError
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise NonConvergenceError("still on an edge")
+
+        monkeypatch.setattr(
+            "spacecraft_telemetry.ray_fanout.threshold_search.widen_to_convergence",
+            _raise,
+        )
+        config = {
+            "error_smoothing_window": 5, "threshold_window": 20,
+            "threshold_z": 3.0, "threshold_min_anomaly_len": 1,
+            "min_error_value": 0.1,
+        }
+        assert self._call(config, tune_module.ESA_M1_SEARCH_SPACE) is None
+
+
+def test_run_all_sweeps_emits_two_stage_provenance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """docs/plans/024 stage .6 / Open Question 5: a two-stage config has two
+    provenances and reporting only one would repeat 022.2b's failure (the
+    ESA-ADB report misdescribing its own rows).
+
+    run_id keeps stage 1's Ray Tune trial (so score_channel's tuned_from_run
+    lineage still resolves) while `source` — which
+    esa_adb.detections.tuned_provenance renders verbatim — names BOTH stages.
+    """
+    import ray
+
+    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+
+    base_settings = load_settings("test")
+    settings = base_settings.model_copy(
+        update={
+            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
+            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
+        }
+    )
+
+    class _FakeRun:
+        class info:
+            run_id = "fake-scored-run-id"
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
+        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
+        lambda *_args, **_kwargs: _FakeRun(),
+    )
+    monkeypatch.setattr(
+        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
+        lambda subsystem, channels, *_args, **_kwargs: {
+            "config": {
+                "error_smoothing_window": 10,
+                "threshold_window": 100,
+                "threshold_z": 3.0,
+                "min_error_value": 0.4,
+                "threshold_min_anomaly_len": 2,
+            },
+            "seg_f0_5": 0.30,
+            "objective": 0.25,
+            "mission_f0_5": 0.797,
+            "selection_metric": "mission_f0_5",
+            "run_id": "stage-1-tune-trial",
+            "grid_meta": {
+                "objective_name": "mission_corrected_event_wise_f0_5",
+                "objective_value": 0.797,
+                "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
+                "expansions": 1,
+                "interior": True,
+            },
+        },
+    )
+
+    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
+    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+
+    assert meta["provenance"] == "ray_tune+exhaustive_grid"
+    assert "Ray Tune" in meta["source"] and "grid refinement" in meta["source"]
+    # Stage 1's lineage survives — a real trial backs it.
+    assert meta["run_id"] == "stage-1-tune-trial"
+    # ...while the swept-grid fields describe stage 2, which actually selected.
+    assert meta["axes"] == {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]}
+    assert meta["expansions"] == 1
+    assert meta["interior"] is True
+    assert meta["objective_value"] == pytest.approx(0.797)
+
+
 def test_run_all_sweeps_labels_mission_metric_meta_correctly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1185,7 +1447,7 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     best = run_hpo_sweep("subsystem_1", [channel], settings, mission)
     assert set(best.keys()) == {
         "config", "seg_f0_5", "nominal_fp_rate", "objective", "mission_f0_5",
-        "selection_metric", "run_id",
+        "selection_metric", "grid_meta", "run_id",
     }
     # No sample_data_dir labels/anomaly_types.csv wired up for this mission in
     # this test, so the 021.4b mission-metric prep can't load ESA-ADB ground
@@ -1193,6 +1455,9 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     # per-channel objective, the only thing computable here (mirrors ISS).
     assert best["selection_metric"] == "objective"
     assert best["mission_f0_5"] is None
+    # ...and stage .6's refinement is gated on the mission metric, so it must
+    # also decline here rather than refine against a different objective.
+    assert best["grid_meta"] is None
     config = best["config"]
     # Mirrors SEARCH_SPACE exactly — min_error_value joined it in 583a850
     # (the ESA-ADB absolute error floor). Keep this set and the bounds below
@@ -1274,6 +1539,22 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
     # mission_f0_5, not the per-channel objective.
     assert result["selection_metric"] == "mission_f0_5"
     assert result["mission_f0_5"] is not None
+
+    # docs/plans/024 stage .6: with the mission metric available, the
+    # deterministic second stage must have run — this is the end-to-end wiring
+    # the fast _refine_with_grid unit tests cannot cover (that run_hpo_sweep
+    # actually reaches it, with the right channel_data/timestamps/events).
+    assert result["grid_meta"] is not None
+    grid_meta = result["grid_meta"]
+    assert grid_meta["objective_name"] == "mission_corrected_event_wise_f0_5"
+    assert grid_meta["interior"] is True
+    assert set(grid_meta["axes"]) == {"threshold_z", "min_error_value"}
+    # The returned config's swept params must be the grid's pick, not Tune's.
+    assert result["config"]["threshold_z"] in grid_meta["axes"]["threshold_z"]
+    assert result["config"]["min_error_value"] in grid_meta["axes"]["min_error_value"]
+    # And the refinement can only have improved the selection metric — the
+    # grid searches a superset of the point Tune landed on.
+    assert result["mission_f0_5"] == pytest.approx(grid_meta["objective_value"])
 
     # Search across every experiment rather than assuming the HPO one by
     # name: this test's Ray/MLflow test harness routes trial runs by ambient

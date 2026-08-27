@@ -61,7 +61,7 @@ import time
 import warnings
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import ray
@@ -798,6 +798,157 @@ def _scoring_trial(
 # Single subsystem sweep
 # ---------------------------------------------------------------------------
 
+def _grid_axis(domain: Any, n_points: int) -> list[float]:
+    """Evenly-spaced grid over a Ray Tune ``uniform`` domain's own bounds.
+
+    Deriving the second stage's initial grid FROM the search space (rather
+    than hardcoding one) keeps the two stages searching the same region: a
+    hardcoded grid would silently drift out of alignment the next time the
+    bounds move, and the whole point of the refinement is to cover ground the
+    sampler could have reached but didn't.
+    """
+    lower, upper = float(domain.lower), float(domain.upper)
+    step = (upper - lower) / (n_points - 1)
+    return [round(lower + i * step, 6) for i in range(n_points)]
+
+
+def _refine_with_grid(
+    best_config: dict[str, Any],
+    *,
+    channel_data: dict[str, tuple[np.ndarray[Any, Any], np.ndarray[Any, np.dtype[np.bool_]]]],
+    search_space: dict[str, Any],
+    settings: Settings,
+    subsystem: str,
+    channel_timestamps: dict[str, np.ndarray[Any, Any]],
+    mission_events: list[Any],
+    mission_timeline_hpo: list[Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Deterministically re-sweep ``(threshold_z, min_error_value)`` around a
+    Ray Tune winner, using the 022.1 mechanical widening driver.
+
+    **Why a second stage rather than a better sampler** (docs/plans/024 stage
+    .6): ``error_smoothing_window`` and ``threshold_window`` change the saved
+    smoothed array and can only be evaluated by re-scoring, so they must stay
+    with Tune. ``threshold_z`` and ``min_error_value`` are pointwise and are
+    evaluable post-hoc on the cached errors, so they can be swept exhaustively
+    for seconds of compute. Two stages, not a swap.
+
+    The grid is scored with :func:`threshold_grid.sweep_group_mission_level`
+    — the SAME mission-level metric ``run_hpo_sweep`` selects on since stage
+    .2, and the same aggregation ``_scoring_trial`` computes per trial. Scoring
+    the refinement on a different objective than the selection would reintroduce
+    exactly the mismatch .2 removed.
+
+    Fixed at the winner's values (never re-swept here): the smoothing window,
+    the threshold window, and the minimum run length. Each channel's errors are
+    re-smoothed with the winner's ``error_smoothing_window`` first, because the
+    grid operates on a *smoothed* array and the winning config's smoothing is
+    what the refined ``(z, floor)`` must be valid for.
+
+    Returns ``(refined_config, grid_meta)``, or ``None`` when refinement did
+    not produce a usable result — a non-convergent widening (the optimum is
+    still on an edge, so it is a lower bound rather than an optimum) or any
+    unexpected failure. Returning ``None`` means "keep the Tune config",
+    which is strictly no worse than not having run this stage at all: a
+    refinement that cannot converge must not silently downgrade a sweep.
+    """
+    from spacecraft_telemetry.model.scoring import smooth_errors
+    from spacecraft_telemetry.ray_fanout.threshold_grid import (
+        NATURAL_BOUNDS,
+        precompute_threshold_terms,
+        sweep_group_mission_level,
+        threshold_grid_sweep_fn,
+    )
+    from spacecraft_telemetry.ray_fanout.threshold_search import (
+        NonConvergenceError,
+        SweepFn,
+        widen_to_convergence,
+    )
+
+    z_domain = search_space.get("threshold_z")
+    floor_domain = search_space.get("min_error_value")
+    if not hasattr(z_domain, "lower") or not hasattr(floor_domain, "lower"):
+        # A pinned constant rather than a distribution (ISS pins
+        # min_error_value) — there is no axis to refine along.
+        return None
+
+    smoothing = int(best_config["error_smoothing_window"])
+    threshold_window = int(best_config["threshold_window"])
+    min_run_length = int(best_config["threshold_min_anomaly_len"])
+
+    smoothed_data = {
+        channel: (smooth_errors(errors, smoothing), labels)
+        for channel, (errors, labels) in channel_data.items()
+    }
+    # Precomputed once and reused across every widening round: the rolling
+    # mean/std pass is z-independent and is the expensive part of a grid point.
+    prepared = {
+        channel: precompute_threshold_terms(smoothed, threshold_window)
+        for channel, (smoothed, _labels) in smoothed_data.items()
+    }
+
+    # cast: threshold_grid's GridPoint is a 2-tuple (z, floor) while the
+    # axis-count-generic driver's is tuple[float, ...]. Every 2-tuple IS a
+    # tuple[float, ...]; the mismatch is dict-key invariance, not a real
+    # incompatibility. scripts/threshold_ceiling.py has always passed this
+    # exact pair — it just isn't type-checked, being outside src/.
+    sweep_fn = cast(
+        SweepFn,
+        threshold_grid_sweep_fn(
+            sweep_group_mission_level,
+            per_channel=smoothed_data,
+            channel_timestamps=channel_timestamps,
+            mission_events=mission_events,
+            mission_timeline=mission_timeline_hpo,
+            threshold_window=threshold_window,
+            min_run_length=min_run_length,
+            prepared=prepared,
+        ),
+    )
+
+    n_points = settings.tune.grid_refine_points
+    axes = {
+        "threshold_z": _grid_axis(z_domain, n_points),
+        "min_error_value": _grid_axis(floor_domain, n_points),
+    }
+
+    try:
+        widening = widen_to_convergence(
+            sweep_fn, axes, natural_bounds=NATURAL_BOUNDS,
+        )
+    except NonConvergenceError as exc:
+        # A non-convergent grid's optimum sits on an edge, making it a lower
+        # bound rather than an optimum — exactly what threshold_search refuses
+        # to return. Keep Tune's config rather than promote a lower bound.
+        log.warning(
+            "tune.grid_refine.non_convergent",
+            subsystem=subsystem, error=str(exc),
+            note="keeping the Ray Tune config; the grid's optimum is a lower "
+            "bound, not an optimum.",
+        )
+        return None
+
+    best_z, best_floor = widening.best_point
+    refined = {
+        **best_config,
+        "threshold_z": float(best_z),
+        "min_error_value": float(best_floor),
+    }
+    grid_meta = {
+        "objective_name": "mission_corrected_event_wise_f0_5",
+        "objective_value": widening.best_score,
+        "axes": {
+            "threshold_z": widening.axes["threshold_z"],
+            "min_error_value": widening.axes["min_error_value"],
+        },
+        "expansions": widening.expansions,
+        # widen_to_convergence never returns a non-interior result — it raises
+        # instead, handled above.
+        "interior": True,
+    }
+    return refined, grid_meta
+
+
 def _resilient_mlflow_callback(**kwargs: Any) -> Any:
     """Build an MLflowLoggerCallback that can't crash the sweep on a transient
     MLflow failure.
@@ -1179,10 +1330,66 @@ def run_hpo_sweep(
             "likely chasing undetectable faults rather than a real threshold.",
         )
 
+    # Second stage (docs/plans/024 stage .6): deterministically refine
+    # (threshold_z, min_error_value) on the cached errors. Gated on the sweep
+    # having selected on the mission metric — that is the only objective the
+    # grid can reproduce, and refining against a different one would reopen
+    # the selection mismatch stage .2 closed. ISS therefore never refines: its
+    # objective carries an fp-penalty term with no grid equivalent.
+    grid_meta: dict[str, Any] | None = None
+    if (
+        settings.tune.grid_refine
+        and selection_metric == "mission_f0_5"
+        and channel_timestamps is not None
+        and mission_events is not None
+        and mission_timeline_hpo is not None
+    ):
+        _refined = _refine_with_grid(
+            best_config,
+            channel_data=channel_data,
+            search_space=_search_space,
+            settings=settings,
+            subsystem=subsystem,
+            channel_timestamps=channel_timestamps,
+            mission_events=mission_events,
+            mission_timeline_hpo=mission_timeline_hpo,
+        )
+        if _refined is not None:
+            refined_config, grid_meta = _refined
+            log.info(
+                "tune.grid_refine.applied",
+                subsystem=subsystem,
+                tune_threshold_z=best_config.get("threshold_z"),
+                tune_min_error_value=best_config.get("min_error_value"),
+                grid_threshold_z=refined_config["threshold_z"],
+                grid_min_error_value=refined_config["min_error_value"],
+                tune_mission_f0_5=(
+                    round(best_mission_f0_5, 4) if best_mission_f0_5 is not None else None
+                ),
+                grid_mission_f0_5=round(grid_meta["objective_value"], 4),
+                expansions=grid_meta["expansions"],
+            )
+            best_config = refined_config
+            best_mission_f0_5 = grid_meta["objective_value"]
+            best_selection_value = grid_meta["objective_value"]
+            # seg_f0_5/nominal_fp_rate/objective still describe the TUNE
+            # trial, not the refined point — recompute them so every reported
+            # metric describes the config actually being returned.
+            _refined_metrics = _scoring_trial(
+                best_config,
+                channel_data=channel_data,
+                nominal_errors=nominal_errors,
+                fp_penalty_weight=settings.tune.fp_penalty_weight,
+            )
+            best_seg_f0_5 = _refined_metrics["seg_f0_5"]
+            best_nominal_fp_rate = _refined_metrics["nominal_fp_rate"]
+            best_objective = _refined_metrics["objective"]
+
     log.info(
         "tune.sweep.end",
         subsystem=subsystem,
         selection_metric=selection_metric,
+        grid_refined=grid_meta is not None,
         best_objective=round(best_objective, 4),
         best_seg_f0_5=round(best_seg_f0_5, 4),
         best_nominal_fp_rate=round(best_nominal_fp_rate, 4),
@@ -1200,6 +1407,7 @@ def run_hpo_sweep(
         "objective": best_objective,
         "mission_f0_5": best_mission_f0_5,
         "selection_metric": selection_metric,
+        "grid_meta": grid_meta,
         "run_id": best_run_id,
     }
 
@@ -1361,29 +1569,56 @@ def run_all_sweeps(
             _objective_value = sweep_result.get(
                 "objective", sweep_result.get("seg_f0_5", 0.0)
             )
+        # docs/plans/024 stage .6 — two-stage provenance. A refined config was
+        # produced by Ray Tune AND the exhaustive grid, and reporting only one
+        # would repeat 022.2b's failure (the report misdescribing its own
+        # rows). Resolves the plan's Open Question 5 WITHOUT touching the
+        # frozen esa_adb modules: the two existing _meta fields already carry
+        # one provenance each, so each keeps its own stage —
+        #   * ``run_id``  -> stage 1's Ray Tune trial (a real trial backs it,
+        #     and score_channel's tuned_from_run lineage tag still resolves);
+        #   * ``source``  -> a string naming BOTH stages, which
+        #     esa_adb.detections.tuned_provenance already renders verbatim.
+        # The swept-grid fields (axes/expansions/interior) then describe stage
+        # 2 rather than being null as they are on a Tune-only config.
+        grid = sweep_result.get("grid_meta")
+        if grid:
+            _source = (
+                "per-subsystem Ray Tune HPO sweep, then exhaustive "
+                "(threshold_z, min_error_value) grid refinement"
+            )
+            _provenance = "ray_tune+exhaustive_grid"
+            # The grid selected the config, so ITS objective is the one the
+            # config was chosen on — stage 1's is superseded, not co-equal.
+            _objective_name = grid["objective_name"]
+            _objective_value = grid["objective_value"]
+        else:
+            _source = "per-subsystem Ray Tune HPO sweep"
+            _provenance = "ray_tune"
         return {
             **config,
             "_meta": {
-                "provenance": "ray_tune",
-                "source": "per-subsystem Ray Tune HPO sweep",
+                "provenance": _provenance,
+                "source": _source,
                 "run_id": sweep_result.get("run_id"),
                 "objective_name": _objective_name,
                 "objective_value": _objective_value,
                 "seg_f0_5": sweep_result.get("seg_f0_5", 0.0),
                 "nominal_fp_rate": sweep_result.get("nominal_fp_rate", 0.0),
-                # Ray Tune always selects the winning trial on the HPO portion
-                # (see run_hpo_sweep's docstring) — never on final_portion.
+                # Both stages select on the HPO portion (run_hpo_sweep slices
+                # channel_data to it before either runs) — never final_portion.
                 "selected_on": "hpo_portion",
                 "hpo_eval_fraction": settings.tune.hpo_eval_fraction,
                 "outer_split": "chronological_50_50",
                 "error_smoothing_window": config.get("error_smoothing_window"),
                 "threshold_window": config.get("threshold_window"),
                 "min_run_length": config.get("threshold_min_anomaly_len"),
-                # No swept grid axes and no "edge" concept for HyperOpt's
-                # continuous search — null on this path, unlike the grid's.
-                "axes": None,
-                "expansions": None,
-                "interior": None,
+                # Stage 2's swept axes when it ran. Null on a Tune-only config:
+                # HyperOpt's continuous search has no swept axes and no
+                # grid-edge "interior" concept.
+                "axes": grid["axes"] if grid else None,
+                "expansions": grid["expansions"] if grid else None,
+                "interior": grid["interior"] if grid else None,
                 "pegged_params": pegged or None,
             },
         }
@@ -1456,9 +1691,13 @@ def write_tuned_configs(
                 "threshold_z": 2.8, "threshold_window": 200,
                 "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
                 "_meta": {
-                    "provenance":        "ray_tune" | "exhaustive_grid",
+                    "provenance":        "ray_tune" | "exhaustive_grid"
+                                         | "ray_tune+exhaustive_grid",
                     "source":            "ray_fanout/tune.py Ray Tune HPO sweep"
-                                         | "scripts/threshold_ceiling.py exhaustive grid",
+                                         | "scripts/threshold_ceiling.py exhaustive grid"
+                                         | "per-subsystem Ray Tune HPO sweep, then
+                                            exhaustive (threshold_z, min_error_value)
+                                            grid refinement",
                     "run_id":            "abc123..." | null,
                     "objective_name":    "mean_per_channel_seg_f0_5_minus_fp_penalty"
                                          | "mission_corrected_event_wise_f0_5"
@@ -1488,6 +1727,18 @@ def write_tuned_configs(
     / ``objective_value`` replace an earlier single ``objective`` key that
     collided across writers (a float on this path, a string on the grid's) —
     nothing reads the old key, so this is a clean break (docs/plans/022).
+
+    **Two-stage configs** (``provenance: "ray_tune+exhaustive_grid"``, docs/
+    plans/024 stage .6) come from BOTH writers' mechanisms in sequence: Ray
+    Tune picks the params that need re-scoring, then the exhaustive driver
+    refines ``(threshold_z, min_error_value)`` on the cached errors. They are
+    the one case where ``run_id`` and the swept-grid fields are populated
+    together — ``run_id`` points at stage 1's trial (so score_channel's
+    ``tuned_from_run`` lineage still resolves) while ``axes``/``expansions``/
+    ``interior`` and ``objective_name``/``objective_value`` describe stage 2,
+    which is what actually selected the config. ``source`` names both stages
+    so ``esa_adb.detections.tuned_provenance`` — which renders it verbatim —
+    cannot misdescribe such a row as single-stage (the 022.2b failure).
 
     ``pegged_params`` (docs/plans/024 stage .0) is this module's own
     bound-truncation guard — see ``_flag_pegged_params``. Only
