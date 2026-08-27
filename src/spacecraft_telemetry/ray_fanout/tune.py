@@ -1,11 +1,27 @@
 """Ray Tune HPO sweep for Telemanom scoring parameters (Phase 5).
 
-Tunes 4 scoring parameters (error_smoothing_window, threshold_window,
-threshold_z, threshold_min_anomaly_len) without re-training any LSTM models.
+Tunes scoring parameters (threshold_window, threshold_z,
+threshold_min_anomaly_len, min_error_value, and — on spaces that still carry
+it — error_smoothing_window) without re-training any LSTM models.
 The objective is segment-overlap F0.5 on the un-pruned pipeline, minus a
 penalty on the false-positive rate measured against each channel's nominal
 (un-injected) baseline scoring run; Hundman §3.3 pruning is intentionally
 excluded to preserve train/serve parity (see SEARCH_SPACE).
+
+Two stages (docs/plans/024)
+---------------------------
+Ray Tune selects the parameters that require re-scoring; a deterministic
+exhaustive grid then refines (threshold_z, min_error_value) on the cached
+error arrays, because those two are pointwise and evaluable post-hoc. Both
+stages score on the SAME objective — the mission-level metric where ESA-ADB
+ground truth exists, else the per-channel one. See run_hpo_sweep and
+_refine_with_grid.
+
+`errors.npy` is already smoothed, so a space that OMITS
+error_smoothing_window (ESA_M1_SEARCH_SPACE) makes _scoring_trial sweep the
+saved array untouched and run_hpo_sweep pin the scoring run's own window into
+the emitted config. Spaces that still carry the key keep the older
+double-smoothing behaviour unchanged.
 Each trial is a single pure-numpy scoring pass (~50ms), so FIFOScheduler is
 used rather than ASHA — ASHA's pruning requires intermediate checkpoints that
 don't exist for single-pass trials.
@@ -47,7 +63,7 @@ by score_channel() as "not tuned", which is the correct interpretation.
 
 Public API
 ----------
-SEARCH_SPACE         Ray Tune search space over the 4 scoring parameters.
+SEARCH_SPACE         Ray Tune search space over the scoring parameters.
 run_hpo_sweep        Run one Tune experiment for a named subsystem.
 run_all_sweeps       Group channels by subsystem, run all sweeps, write JSON.
 write_tuned_configs  Persist subsystem → best_config mapping as JSON.
@@ -229,8 +245,24 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
 # exactly the failure the floor was introduced to prevent. ESA's high-floor
 # optimum (min_error_value 0.4-0.5) is what makes a low z safe here; ISS pins
 # min_error_value to 0.0 and therefore has no such compensating mechanism.
+#
+# error_smoothing_window is DELIBERATELY ABSENT here (docs/plans/024), and its
+# absence is what tells _scoring_trial to sweep the saved array untouched.
+# `errors.npy` is already smoothed, so sampling a second smoothing pass meant
+# every trial was scored against an array score_channel never reproduces.
+# Measured on the H=1 subsystem_5 arm: the doubly-smoothed surface peaks at
+# (z=8.0, floor=0.0)=0.631 while the real one peaks at (z=3.0, floor=0.4)=0.798,
+# and that doubly-smoothed winner scores only 0.397 on the array scoring
+# actually produces — ~0.40 mission F0.5 lost to optimising the wrong surface.
+# run_hpo_sweep pins the scoring run's own window into the emitted config
+# instead, matching the grid and scripts/threshold_ceiling.py.
+#
+# Removed HERE and not from the base SEARCH_SPACE for the same reason the z
+# floor lives here: ISS inherits the base, and ISS is the always-on live demo.
+# The bug is identical there and worth the same fix, but that re-tunes a
+# running detector and must be its own deliberate change — see .claude/rules/iss.md.
 ESA_M1_SEARCH_SPACE: dict[str, Any] = {
-    **SEARCH_SPACE,
+    **{k: v for k, v in SEARCH_SPACE.items() if k != "error_smoothing_window"},
     "threshold_z":     tune.uniform(1.0, 8.0),  # upper: arm A pegged at 4.783 of 5.0
                                                 # lower: both 021 arms pegged at the 2.5 floor
     "min_error_value": tune.uniform(0.0, 0.6),  # was (0.0, 0.3) — arm C pegged at 0.2955
@@ -644,6 +676,17 @@ def _clamp_to_search_space(
     """
     clamped: dict[str, Any] = {}
     for key, value in config.items():
+        # A key the space does not carry is DROPPED, not passed through:
+        # the result has to be a legal candidate in this space, and a sampled
+        # trial would never contain it. ESA_M1_SEARCH_SPACE omits
+        # error_smoothing_window (docs/plans/024) precisely so _scoring_trial
+        # skips its re-smoothing step — leaking the key back in via the
+        # baseline would score the defaults on a doubly-smoothed array while
+        # every sampled trial used the saved one, making the baseline guard's
+        # comparison meaningless. run_hpo_sweep pins the correct value after
+        # selection instead.
+        if key not in search_space:
+            continue
         domain = search_space[key]
         if not hasattr(domain, "lower"):
             clamped[key] = domain
@@ -695,6 +738,15 @@ def _scoring_trial(
     after the fact). Omitting the three args (the default) reproduces the
     pre-021.4b return-key set exactly — every existing caller is unaffected.
 
+    Smoothing (docs/plans/024): ``channel_data`` holds the arrays saved by
+    ``score_channel``, which are ALREADY smoothed. Whether this function
+    smooths them again is driven by the presence of ``error_smoothing_window``
+    in ``config`` — omit it (as ``ESA_M1_SEARCH_SPACE`` now does) to sweep the
+    saved array untouched, which is what a re-score reproduces and what the
+    exhaustive grid sweeps; include it (the base ``SEARCH_SPACE``, and ISS
+    through it) for the original double-smoothing behaviour. See the comment
+    in the body for the measured cost of getting this wrong.
+
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
         channel_data: Mapping channel -> (errors, labels), pre-validated and
@@ -720,6 +772,25 @@ def _scoring_trial(
         smooth_errors,
     )
 
+    # docs/plans/024: `errors.npy` is ALREADY smoothed (model/scoring.py's
+    # _score_series logs smooth_errors(errors, error_smoothing_window)), so
+    # smoothing it again here scores a doubly-smoothed array that no re-score
+    # reproduces. Measured on the H=1 subsystem_5 arm, the two surfaces put
+    # their optima in different places and picking on the wrong one costs
+    # ~0.40 mission F0.5.
+    #
+    # A search space that OMITS error_smoothing_window (ESA_M1_SEARCH_SPACE)
+    # therefore sweeps the saved array untouched, and run_hpo_sweep pins the
+    # scoring run's own window into the emitted config — matching the grid and
+    # scripts/threshold_ceiling.py. A space that still carries the key (the
+    # base SEARCH_SPACE, and ISS via it) keeps the previous behaviour
+    # unchanged, so this cannot alter the live ISS detector; ISS needs the same
+    # fix, but a re-tune of the always-on demo is a separate, deliberate act.
+    _esw = config.get("error_smoothing_window")
+
+    def _prepare(errors: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
+        return smooth_errors(errors, int(_esw)) if _esw is not None else errors
+
     f0_5_scores: list[float] = []
     seg_f0_5_scores: list[float] = []
     channel_flags: dict[str, np.ndarray[Any, Any]] = {}
@@ -728,7 +799,7 @@ def _scoring_trial(
         # Un-pruned pipeline — identical to the headline path in score_channel()
         # and to what the online serving engine produces. No prune step here:
         # see SEARCH_SPACE note on train/serve parity.
-        smoothed = smooth_errors(errors, int(config["error_smoothing_window"]))
+        smoothed = _prepare(errors)
         threshold = dynamic_threshold(
             smoothed,
             int(config["threshold_window"]),
@@ -748,7 +819,7 @@ def _scoring_trial(
 
     fp_rates: list[float] = []
     for nom_errors in nominal_errors.values():
-        nom_smoothed = smooth_errors(nom_errors, int(config["error_smoothing_window"]))
+        nom_smoothed = _prepare(nom_errors)
         nom_threshold = dynamic_threshold(
             nom_smoothed,
             int(config["threshold_window"]),
@@ -1361,6 +1432,28 @@ def run_hpo_sweep(
         best_objective = baseline_metrics["objective"]
         best_mission_f0_5 = baseline_metrics.get("mission_f0_5")
         best_selection_value = baseline_selection_value
+
+    # When the space omits error_smoothing_window (docs/plans/024), nothing
+    # sampled it and _scoring_trial swept the saved array untouched — so the
+    # emitted config MUST pin the window that produced that array, or a
+    # re-score would rebuild a different one and the tuned thresholds would
+    # never have been evaluated against it. Identical to the pin
+    # scripts/threshold_ceiling.py applies for the identical reason.
+    if "error_smoothing_window" not in _search_space:
+        _pinned_smoothing = _scoring_run_smoothing_window(
+            scoring_run_ids, settings.mlflow.tracking_uri
+        )
+        if _pinned_smoothing is not None:
+            best_config["error_smoothing_window"] = _pinned_smoothing
+        else:
+            log.warning(
+                "tune.sweep.smoothing_window_unresolved",
+                subsystem=subsystem,
+                note="scoring runs disagree on error_smoothing_window (or the "
+                "lookup failed), so the emitted config cannot pin the window its "
+                "thresholds were tuned against — a re-score may rebuild a "
+                "different array. Re-score this subsystem uniformly first.",
+            )
 
     # Look up the MLflow run ID for the best trial so score_channel can record
     # lineage via the tuned_from_run tag (Step 5 / runner.py).

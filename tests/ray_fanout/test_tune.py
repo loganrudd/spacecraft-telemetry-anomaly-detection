@@ -1294,6 +1294,125 @@ class TestPinnedParamDetection:
         assert _pinned_params(config, ISS_SEARCH_SPACE) == ["threshold_z"]
 
 
+class TestSmoothingIsNotAppliedTwice:
+    """docs/plans/024 — `errors.npy` is ALREADY smoothed, so a trial that
+    smooths it again scores a doubly-smoothed array no re-score reproduces.
+
+    Measured on the H=1 subsystem_5 arm: the doubly-smoothed surface peaks at
+    (z=8.0, floor=0.0)=0.631 while the real one peaks at (z=3.0, floor=0.4)
+    =0.798, and that doubly-smoothed winner scores only 0.397 on the array
+    scoring actually produces — ~0.40 mission F0.5 lost to optimising the
+    wrong surface.
+
+    The presence or absence of ``error_smoothing_window`` in the config is
+    what selects the behaviour, so these tests drive _scoring_trial directly.
+    """
+
+    @staticmethod
+    def _data() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Long enough, and noisy enough, that a second smoothing pass
+        materially changes which windows flag — otherwise the assertions
+        below would pass while proving nothing (see
+        test_the_two_paths_actually_differ, which enforces exactly that)."""
+        rng = np.random.default_rng(0)
+        n = 200
+        errors = np.abs(rng.standard_normal(n)) * 0.05
+        errors[80:90] += 1.5
+        errors[150:156] += 0.9
+        labels = np.zeros(n, dtype=np.bool_)
+        labels[80:90] = True
+        labels[150:156] = True
+        return {"channel_1": (errors, labels)}
+
+    _BASE: typing.ClassVar[dict[str, float]] = {
+        "threshold_window": 25, "threshold_z": 2.5, "threshold_min_anomaly_len": 2,
+    }
+
+    def test_omitting_the_key_sweeps_the_saved_array_untouched(self) -> None:
+        from spacecraft_telemetry.model.scoring import (
+            dynamic_threshold,
+            evaluate_overlap,
+            flag_anomalies,
+        )
+        from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+        data = self._data()
+        result = _scoring_trial(
+            dict(self._BASE), channel_data=data,
+            nominal_errors={}, fp_penalty_weight=5.0,
+        )
+        errors, labels = data["channel_1"]
+        threshold = dynamic_threshold(errors, 25, 2.5)   # errors, NOT smoothed
+        flags = flag_anomalies(errors, threshold, 2, 0.0)
+        assert result["seg_f0_5"] == pytest.approx(
+            evaluate_overlap(labels, flags)["seg_f0_5"]
+        )
+
+    def test_including_the_key_still_smooths(self) -> None:
+        """The base SEARCH_SPACE (and ISS through it) keeps the old behaviour,
+        so this fix cannot alter the live ISS detector."""
+        from spacecraft_telemetry.model.scoring import (
+            dynamic_threshold,
+            evaluate_overlap,
+            flag_anomalies,
+            smooth_errors,
+        )
+        from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+        data = self._data()
+        config = {**self._BASE, "error_smoothing_window": 2}
+        result = _scoring_trial(
+            config, channel_data=data,
+            nominal_errors={}, fp_penalty_weight=5.0,
+        )
+        errors, labels = data["channel_1"]
+        smoothed = smooth_errors(errors, 2)
+        threshold = dynamic_threshold(smoothed, 25, 2.5)
+        flags = flag_anomalies(smoothed, threshold, 2, 0.0)
+        assert result["seg_f0_5"] == pytest.approx(
+            evaluate_overlap(labels, flags)["seg_f0_5"]
+        )
+
+    def test_the_two_paths_actually_differ(self) -> None:
+        """Guards against a vacuous pair above: if smoothing were a no-op on
+        this fixture, both tests would pass while proving nothing."""
+        from spacecraft_telemetry.ray_fanout.tune import _scoring_trial
+
+        kw = dict(channel_data=self._data(), nominal_errors={}, fp_penalty_weight=5.0)
+        without = _scoring_trial(dict(self._BASE), **kw)
+        with_key = _scoring_trial({**self._BASE, "error_smoothing_window": 2}, **kw)
+        assert without["seg_f0_5"] != with_key["seg_f0_5"]
+
+    def test_esa_m1_space_omits_it_and_base_and_iss_keep_it(self) -> None:
+        """The ESA-only scoping. ISS is the always-on live demo and inherits
+        the base space; the same fix is right for it, but re-tuning a running
+        detector is a separate deliberate act."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            ISS_SEARCH_SPACE,
+            SEARCH_SPACE,
+        )
+
+        assert "error_smoothing_window" not in ESA_M1_SEARCH_SPACE
+        assert "error_smoothing_window" in SEARCH_SPACE
+        assert "error_smoothing_window" in ISS_SEARCH_SPACE
+
+    def test_clamp_drops_a_key_the_space_does_not_carry(self) -> None:
+        """The baseline guard must produce a legal candidate for THIS space.
+        Leaking error_smoothing_window back in would score the defaults on a
+        doubly-smoothed array while every sampled trial used the saved one."""
+        from spacecraft_telemetry.ray_fanout.tune import (
+            ESA_M1_SEARCH_SPACE,
+            _clamp_to_search_space,
+        )
+
+        clamped = _clamp_to_search_space(
+            {"error_smoothing_window": 30, "threshold_z": 3.0}, ESA_M1_SEARCH_SPACE
+        )
+        assert "error_smoothing_window" not in clamped
+        assert clamped["threshold_z"] == pytest.approx(3.0)
+
+
 class TestIssKeepsItsThresholdZFloor:
     """The trap guarding the 021.5b change.
 
