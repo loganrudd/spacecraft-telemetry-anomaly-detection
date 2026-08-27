@@ -1818,9 +1818,13 @@ def test_run_hpo_sweep_smoke(ray_local, ray_series_parquet, tmp_path: Path) -> N
     assert best["run_id"] is None or isinstance(best["run_id"], str)
 
 
-@pytest.mark.slow
+@pytest.mark.parametrize(
+    "search_space",
+    [None, "ESA_M1_SEARCH_SPACE"],
+    ids=["base_search_space", "esa_m1_search_space"],
+)
 def test_run_hpo_sweep_logs_mission_metric_per_trial(
-    ray_local, ray_series_parquet_multichannel, tmp_path: Path
+    ray_local, ray_series_parquet_multichannel, tmp_path: Path, search_space: str | None
 ) -> None:
     """A real sweep with ESA-ADB ground truth available logs mission_f0_5/
     mission_precision/mission_recall on its per-trial MLflow runs.
@@ -1829,12 +1833,22 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
     cover: whether run_hpo_sweep's tune.with_parameters wiring and the
     MLflowLoggerCallback actually surface the new dict keys end-to-end, not
     just whether _scoring_trial computes them correctly in isolation.
+
+    Parametrized over [None, ESA_M1_SEARCH_SPACE] (docs/reviews/024 stage
+    0.2): the base SEARCH_SPACE arm is the pre-024 shape, unchanged; the
+    ESA_M1_SEARCH_SPACE arm is the one docs/plans/024 actually ships to
+    production (ESA-Mission1's real sweeps use it — see run_all_sweeps) and
+    the one that omits error_smoothing_window, exercising the pin at
+    tune.py:1442-1447 — before this parametrization, no test ever ran that
+    branch end-to-end.
     """
     pytest.importorskip("ray")
     import mlflow
 
     from spacecraft_telemetry.ray_fanout.runner import score_all_subsystems, train_all_subsystems
-    from spacecraft_telemetry.ray_fanout.tune import run_hpo_sweep
+    from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE, run_hpo_sweep
+
+    _search_space = ESA_M1_SEARCH_SPACE if search_space == "ESA_M1_SEARCH_SPACE" else None
 
     mission = "ESA-Mission1"
     channels = ["channel_41", "channel_42"]
@@ -1865,11 +1879,15 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
 
     train_all_subsystems(settings, mission, channels)
     score_all_subsystems(settings, mission, channels)
-    result = run_hpo_sweep("subsystem_1", channels, settings, mission)
+    result = run_hpo_sweep(
+        "subsystem_1", channels, settings, mission, search_space=_search_space
+    )
 
     # docs/plans/024 stage .2: ESA-ADB ground truth is available here (labels
     # + anomaly_types wired up above), so the sweep must select on
-    # mission_f0_5, not the per-channel objective.
+    # mission_f0_5, not the per-channel objective — true on both arms; the
+    # search space controls what stage 2 does with that selection, not
+    # whether stage 1 selects on it.
     assert result["selection_metric"] == "mission_f0_5"
     assert result["mission_f0_5"] is not None
 
@@ -1888,6 +1906,28 @@ def test_run_hpo_sweep_logs_mission_metric_per_trial(
     # And the refinement can only have improved the selection metric — the
     # grid searches a superset of the point Tune landed on.
     assert result["mission_f0_5"] == pytest.approx(grid_meta["objective_value"])
+
+    if _search_space is ESA_M1_SEARCH_SPACE:
+        # docs/plans/024 stage .6: this space OMITS error_smoothing_window, so
+        # nothing sampled it — the pin at tune.py:1442-1447 must carry the
+        # scoring runs' own window into the emitted config, matching what a
+        # re-score reproduces. Before this parametrization, no test exercised
+        # this branch end-to-end (the pin was written but never run).
+        assert "error_smoothing_window" not in ESA_M1_SEARCH_SPACE
+        _pin_client = mlflow.tracking.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+        scoring_runs = [
+            r
+            for exp in _pin_client.search_experiments()
+            for r in _pin_client.search_runs([exp.experiment_id])
+            if "error_smoothing_window" in r.data.params
+            # This fixture trains/scores the group jointly (021 multivariate
+            # path), so the run carries a "channels" tag rather than
+            # "channel_id" (see _find_multivariate_scoring_run's docstring).
+            and set(r.data.tags.get("channels", "").split(",")) & set(channels)
+        ]
+        assert scoring_runs, "expected at least one channel scoring run"
+        expected_window = int(scoring_runs[0].data.params["error_smoothing_window"])
+        assert result["config"]["error_smoothing_window"] == expected_window
 
     # Search across every experiment rather than assuming the HPO one by
     # name: this test's Ray/MLflow test harness routes trial runs by ambient
