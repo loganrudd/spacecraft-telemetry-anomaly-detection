@@ -75,6 +75,7 @@ import concurrent.futures
 import json
 import time
 import warnings
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
@@ -817,21 +818,17 @@ def _scoring_trial(
         seg_f0_5_scores.append(evaluate_overlap(labels, flags)["seg_f0_5"])
         channel_flags[channel] = flags
 
-    fp_rates: list[float] = []
-    for nom_errors in nominal_errors.values():
-        nom_smoothed = _prepare(nom_errors)
-        nom_threshold = dynamic_threshold(
-            nom_smoothed,
-            int(config["threshold_window"]),
-            float(config["threshold_z"]),
-        )
-        nom_flags = flag_anomalies(
-            nom_smoothed,
-            nom_threshold,
-            int(config["threshold_min_anomaly_len"]),
-            float(config.get("min_error_value", 0.0)),
-        )
-        fp_rates.append(float(nom_flags.mean()) if len(nom_flags) else 0.0)
+    # docs/reviews/024, Q2: shared with _nominal_fp_rate_at (the grid
+    # refinement's identical computation on the swept-as-is array) — the only
+    # axis of variation between the two is `prepare`.
+    mean_fp_rate = _mean_fp_rate(
+        nominal_errors,
+        prepare=_prepare,
+        threshold_window=int(config["threshold_window"]),
+        min_run_length=int(config["threshold_min_anomaly_len"]),
+        threshold_z=float(config["threshold_z"]),
+        min_error_value=float(config.get("min_error_value", 0.0)),
+    )
 
     # seg_f0_5 (segment-overlap) measures fault recall/precision against
     # injected labels — it matches how long ESA anomalies should be scored and
@@ -841,7 +838,6 @@ def _scoring_trial(
     # is what the sweep actually optimizes (see run_hpo_sweep).
     mean_f0_5 = float(np.mean(f0_5_scores)) if f0_5_scores else 0.0
     mean_seg_f0_5 = float(np.mean(seg_f0_5_scores)) if seg_f0_5_scores else 0.0
-    mean_fp_rate = float(np.mean(fp_rates)) if fp_rates else 0.0
     objective = mean_seg_f0_5 - fp_penalty_weight * mean_fp_rate
     result: dict[str, float] = {
         "f0_5": mean_f0_5,
@@ -936,6 +932,38 @@ def _scoring_run_smoothing_window(
     return None
 
 
+def _mean_fp_rate(
+    nominal_errors: dict[str, np.ndarray[Any, Any]],
+    *,
+    prepare: Callable[[np.ndarray[Any, Any]], np.ndarray[Any, Any]],
+    threshold_window: int,
+    min_run_length: int,
+    threshold_z: float,
+    min_error_value: float,
+) -> float:
+    """Mean nominal false-positive rate at one (threshold_window, threshold_z,
+    min_run_length, min_error_value) point.
+
+    docs/reviews/024, Q2: the single definition of "nominal FP rate" —
+    previously duplicated between ``_scoring_trial``'s nominal loop and
+    ``_nominal_fp_rate_at``, differing only in ``prepare`` (``_scoring_trial``
+    conditionally re-smooths per ``_esw``; ``_nominal_fp_rate_at`` never does,
+    since the grid it backstops sweeps saved arrays as-is — see
+    :func:`_refine_with_grid`). Passing ``_prepare`` vs the identity makes
+    that one axis of variation a visible argument instead of two copies that
+    can drift apart.
+    """
+    from spacecraft_telemetry.model.scoring import dynamic_threshold, flag_anomalies
+
+    rates: list[float] = []
+    for errors in nominal_errors.values():
+        prepared = prepare(errors)
+        threshold = dynamic_threshold(prepared, threshold_window, threshold_z)
+        flags = flag_anomalies(prepared, threshold, min_run_length, min_error_value)
+        rates.append(float(flags.mean()) if len(flags) else 0.0)
+    return float(np.mean(rates)) if rates else 0.0
+
+
 def _nominal_fp_rate_at(
     nominal_errors: dict[str, np.ndarray[Any, Any]],
     *,
@@ -952,14 +980,14 @@ def _nominal_fp_rate_at(
     same reason (see :func:`_refine_with_grid`). Smoothing here would price the
     refined config's false positives against an array it was never evaluated on.
     """
-    from spacecraft_telemetry.model.scoring import dynamic_threshold, flag_anomalies
-
-    rates: list[float] = []
-    for errors in nominal_errors.values():
-        threshold = dynamic_threshold(errors, threshold_window, threshold_z)
-        flags = flag_anomalies(errors, threshold, min_run_length, min_error_value)
-        rates.append(float(flags.mean()) if len(flags) else 0.0)
-    return float(np.mean(rates)) if rates else 0.0
+    return _mean_fp_rate(
+        nominal_errors,
+        prepare=lambda errors: errors,
+        threshold_window=threshold_window,
+        min_run_length=min_run_length,
+        threshold_z=threshold_z,
+        min_error_value=min_error_value,
+    )
 
 
 def _refine_with_grid(
@@ -1427,6 +1455,22 @@ def run_hpo_sweep(
     best_mission_f0_5: float | None = best_metrics.get("mission_f0_5")
     best_selection_value: float = best_metrics.get(selection_metric, best_objective)
 
+    # docs/reviews/024 A3: resolved ONCE, here, rather than separately at the
+    # pin site and inside the stage-2 gate below. Those two calls queried the
+    # same scoring runs for the same value and had no guarantee of agreeing —
+    # a transient MLflow failure between them could make the pinned window
+    # and the window stage 2 actually swept against silently diverge. A
+    # single lookup makes "the pinned window is the window stage 2 swept
+    # against" structurally true instead of coincidental, and halves the
+    # MLflow round-trips for any space that omits error_smoothing_window.
+    # Only queried when the space actually needs it — a space that still
+    # samples the key has nothing to pin or refine against.
+    _pinned_smoothing = (
+        _scoring_run_smoothing_window(scoring_run_ids, settings.mlflow.tracking_uri)
+        if "error_smoothing_window" not in _search_space
+        else None
+    )
+
     # Baseline guard (see module docstring): the sweep optimizes hpo_portion,
     # but a winning trial there can still score worse than the untuned
     # Settings.model defaults on the objective (ISS Phase 15: tuned K landed
@@ -1488,9 +1532,6 @@ def run_hpo_sweep(
     # never have been evaluated against it. Identical to the pin
     # scripts/threshold_ceiling.py applies for the identical reason.
     if "error_smoothing_window" not in _search_space:
-        _pinned_smoothing = _scoring_run_smoothing_window(
-            scoring_run_ids, settings.mlflow.tracking_uri
-        )
         if _pinned_smoothing is not None:
             best_config["error_smoothing_window"] = _pinned_smoothing
         else:
@@ -1625,12 +1666,9 @@ def run_hpo_sweep(
     ):
         # The grid sweeps the SAVED (already-smoothed) errors, so the refined
         # (z, floor) is only valid alongside the smoothing that produced them.
-        # None => the scoring runs disagree (or the lookup failed), in which
-        # case there is no single array the grid would describe: skip rather
-        # than guess.
-        _smoothing = _scoring_run_smoothing_window(
-            scoring_run_ids, settings.mlflow.tracking_uri
-        )
+        # _pinned_smoothing (resolved once, above) is None when the scoring
+        # runs disagree (or the lookup failed), in which case there is no
+        # single array the grid would describe: skip rather than guess.
         _refined = (
             _refine_with_grid(
                 best_config,
@@ -1639,15 +1677,15 @@ def run_hpo_sweep(
                 search_space=_search_space,
                 settings=settings,
                 subsystem=subsystem,
-                smoothing_window=_smoothing,
+                smoothing_window=_pinned_smoothing,
                 channel_timestamps=channel_timestamps,
                 mission_events=mission_events,
                 mission_timeline_hpo=mission_timeline_hpo,
             )
-            if _smoothing is not None
+            if _pinned_smoothing is not None
             else None
         )
-        if _smoothing is None:
+        if _pinned_smoothing is None:
             log.warning(
                 "tune.grid_refine.skipped",
                 subsystem=subsystem,
