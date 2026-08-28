@@ -17,11 +17,6 @@ stages score on the SAME objective — the mission-level metric where ESA-ADB
 ground truth exists, else the per-channel one. See run_hpo_sweep and
 _refine_with_grid.
 
-`errors.npy` is already smoothed, so a space that OMITS
-error_smoothing_window (ESA_M1_SEARCH_SPACE) makes _scoring_trial sweep the
-saved array untouched and run_hpo_sweep pin the scoring run's own window into
-the emitted config. Spaces that still carry the key keep the older
-double-smoothing behaviour unchanged.
 Each trial is a single pure-numpy scoring pass (~50ms), so FIFOScheduler is
 used rather than ASHA — ASHA's pruning requires intermediate checkpoints that
 don't exist for single-pass trials.
@@ -29,6 +24,36 @@ don't exist for single-pass trials.
 Channels are grouped by spacecraft subsystem before sweeping. Individual
 channels have only 2-5 anomaly events (too few for stable F0.5 optimisation);
 pooling channels within a subsystem (6-30 channels each) gives a robust signal.
+
+Smoothing (docs/plans/024, docs/reviews/024 stage 6.1)
+--------------------------------------------------------
+``model/scoring.py``'s ``_score_series`` logs ``smooth_errors(errors,
+cfg.error_smoothing_window)`` — the array every scoring run saves as
+``errors.npy`` is therefore ALREADY smoothed, not raw. Smoothing it a second
+time scores a doubly-smoothed array that no re-score ever reproduces, since
+``score_channel`` only ever applies the pass once.
+
+A search space that OMITS ``error_smoothing_window`` (``ESA_M1_SEARCH_SPACE``)
+is how a sweep opts out of the second pass: absent from ``config``,
+``_scoring_trial``'s ``_prepare`` becomes a no-op and every trial (and stage
+2's grid) sweeps the saved array untouched — matching what
+``scripts/threshold_ceiling.py`` sweeps and what a re-score reproduces.
+``run_hpo_sweep`` then pins the scoring runs' own window
+(``_scoring_run_smoothing_window``) into the emitted config, since nothing
+sampled it. A space that still CARRIES the key (base ``SEARCH_SPACE``, and
+ISS through it) keeps the original double-smoothing behaviour unchanged —
+this is a per-space opt-in, not a global fix; see ``ESA_M1_SEARCH_SPACE``'s
+comment for why the base space and ISS keep the old behaviour deliberately.
+
+**Measured cost of getting this wrong** (H=1 subsystem_5 arm, 020's
+6-channel arm): the doubly-smoothed response surface peaks at
+``(z=8.0, floor=0.0) = 0.631`` mission F0.5, while the real (singly-smoothed)
+surface peaks at ``(z=3.0, floor=0.4) = 0.798`` — a different optimum
+entirely — and that doubly-smoothed winner scores only ``0.397`` mission F0.5
+when evaluated on the array ``score_channel`` actually produces. ~0.40
+mission F0.5 lost to optimising the wrong surface. Every other comment in
+this module that mentions "already smoothed" or "doubly-smoothed" is a
+pointer back to this section, not a restatement of it.
 
 Nominal false-positive penalty (ISS Phase 15)
 ----------------------------------------------
@@ -248,16 +273,9 @@ ISS_SEARCH_SPACE: dict[str, Any] = {
 # optimum (min_error_value 0.4-0.5) is what makes a low z safe here; ISS pins
 # min_error_value to 0.0 and therefore has no such compensating mechanism.
 #
-# error_smoothing_window is DELIBERATELY ABSENT here (docs/plans/024), and its
-# absence is what tells _scoring_trial to sweep the saved array untouched.
-# `errors.npy` is already smoothed, so sampling a second smoothing pass meant
-# every trial was scored against an array score_channel never reproduces.
-# Measured on the H=1 subsystem_5 arm: the doubly-smoothed surface peaks at
-# (z=8.0, floor=0.0)=0.631 while the real one peaks at (z=3.0, floor=0.4)=0.798,
-# and that doubly-smoothed winner scores only 0.397 on the array scoring
-# actually produces — ~0.40 mission F0.5 lost to optimising the wrong surface.
-# run_hpo_sweep pins the scoring run's own window into the emitted config
-# instead, matching the grid and scripts/threshold_ceiling.py.
+# error_smoothing_window is DELIBERATELY ABSENT here (docs/plans/024) — see
+# the module docstring's "Smoothing" section for what that opts out of and
+# the measured cost of getting it wrong.
 #
 # Removed HERE and not from the base SEARCH_SPACE for the same reason the z
 # floor lives here: ISS inherits the base, and ISS is the always-on live demo.
@@ -680,13 +698,11 @@ def _clamp_to_search_space(
     for key, value in config.items():
         # A key the space does not carry is DROPPED, not passed through:
         # the result has to be a legal candidate in this space, and a sampled
-        # trial would never contain it. ESA_M1_SEARCH_SPACE omits
-        # error_smoothing_window (docs/plans/024) precisely so _scoring_trial
-        # skips its re-smoothing step — leaking the key back in via the
-        # baseline would score the defaults on a doubly-smoothed array while
-        # every sampled trial used the saved one, making the baseline guard's
-        # comparison meaningless. run_hpo_sweep pins the correct value after
-        # selection instead.
+        # trial would never contain it. Leaking error_smoothing_window back in
+        # via the baseline would score it doubly-smoothed while every sampled
+        # trial used the saved array untouched (module docstring, "Smoothing"),
+        # making the baseline guard's comparison meaningless. run_hpo_sweep
+        # pins the correct value after selection instead.
         if key not in search_space:
             continue
         domain = search_space[key]
@@ -740,14 +756,12 @@ def _scoring_trial(
     after the fact). Omitting the three args (the default) reproduces the
     pre-021.4b return-key set exactly — every existing caller is unaffected.
 
-    Smoothing (docs/plans/024): ``channel_data`` holds the arrays saved by
-    ``score_channel``, which are ALREADY smoothed. Whether this function
-    smooths them again is driven by the presence of ``error_smoothing_window``
-    in ``config`` — omit it (as ``ESA_M1_SEARCH_SPACE`` now does) to sweep the
-    saved array untouched, which is what a re-score reproduces and what the
-    exhaustive grid sweeps; include it (the base ``SEARCH_SPACE``, and ISS
-    through it) for the original double-smoothing behaviour. See the comment
-    in the body for the measured cost of getting this wrong.
+    Smoothing (module docstring, "Smoothing"): whether this function
+    re-smooths ``channel_data`` (already-smoothed on disk) is driven by the
+    presence of ``error_smoothing_window`` in ``config`` — omit it (as
+    ``ESA_M1_SEARCH_SPACE`` does) to sweep the saved array untouched;
+    include it (base ``SEARCH_SPACE``, and ISS through it) for the original
+    double-smoothing behaviour.
 
     Args:
         config:   Dict of sampled hyperparameter values from SEARCH_SPACE.
@@ -774,20 +788,9 @@ def _scoring_trial(
         smooth_errors,
     )
 
-    # docs/plans/024: `errors.npy` is ALREADY smoothed (model/scoring.py's
-    # _score_series logs smooth_errors(errors, error_smoothing_window)), so
-    # smoothing it again here scores a doubly-smoothed array that no re-score
-    # reproduces. Measured on the H=1 subsystem_5 arm, the two surfaces put
-    # their optima in different places and picking on the wrong one costs
-    # ~0.40 mission F0.5.
-    #
-    # A search space that OMITS error_smoothing_window (ESA_M1_SEARCH_SPACE)
-    # therefore sweeps the saved array untouched, and run_hpo_sweep pins the
-    # scoring run's own window into the emitted config — matching the grid and
-    # scripts/threshold_ceiling.py. A space that still carries the key (the
-    # base SEARCH_SPACE, and ISS via it) keeps the previous behaviour
-    # unchanged, so this cannot alter the live ISS detector; ISS needs the same
-    # fix, but a re-tune of the always-on demo is a separate, deliberate act.
+    # See module docstring, "Smoothing". `_esw` absent (ESA_M1_SEARCH_SPACE)
+    # -> sweep the saved (already-smoothed) array untouched; present (base
+    # SEARCH_SPACE, ISS via it) -> the original double-smoothing behaviour.
     _esw = config.get("error_smoothing_window")
 
     def _prepare(errors: np.ndarray[Any, Any]) -> np.ndarray[Any, Any]:
@@ -901,12 +904,11 @@ def _scoring_run_smoothing_window(
 ) -> int | None:
     """The ``error_smoothing_window`` the scoring runs behind a sweep used.
 
-    ``errors.npy`` holds the **already-smoothed** array (model/scoring.py's
-    ``_score_series`` returns ``smooth_errors(errors, cfg.error_smoothing_window)``
-    and that is what gets logged), so the grid's ``(z, floor)`` is only valid
-    for a re-score that reproduces exactly that smoothing. Pinning it is the
-    same discipline ``scripts/threshold_ceiling.py`` applies for the same
-    reason — see its ``_build_tuned_config``.
+    See module docstring, "Smoothing": ``errors.npy`` is already smoothed, so
+    the grid's ``(z, floor)`` is only valid for a re-score that reproduces
+    exactly that smoothing. Pinning it is the same discipline
+    ``scripts/threshold_ceiling.py`` applies for the same reason — see its
+    ``_build_tuned_config``.
 
     Returns ``None`` when the runs disagree or the lookup fails: averaging a
     grid across differently-smoothed arrays would not describe any single
@@ -1022,13 +1024,11 @@ def _refine_with_grid(
     exactly the mismatch .2 removed.
 
     **``smoothing_window`` is the SCORING RUN's, not the Tune trial's, and the
-    refined config pins it.** ``errors.npy`` is already smoothed (see
-    :func:`_scoring_run_smoothing_window`), so this function sweeps it as-is
-    — exactly as ``scripts/threshold_ceiling.py`` does, which is what makes
-    the two agree on the same run (docs/plans/024 stage .6's gate). Carrying
-    the Tune trial's ``error_smoothing_window`` through instead would emit a
-    config whose ``(z, floor)`` was chosen against an array that a re-score
-    would never reproduce.
+    refined config pins it** (module docstring, "Smoothing") — this function
+    sweeps ``channel_data`` as-is, exactly as ``scripts/threshold_ceiling.py``
+    does. Carrying the Tune trial's ``error_smoothing_window`` through instead
+    would emit a config whose ``(z, floor)`` was chosen against an array a
+    re-score would never reproduce.
 
     Returns ``(refined_config, grid_meta)``, or ``None`` when refinement did
     not produce a usable result — a non-convergent widening (the optimum is
@@ -1075,8 +1075,7 @@ def _refine_with_grid(
     threshold_window = int(best_config["threshold_window"])
     min_run_length = int(best_config["threshold_min_anomaly_len"])
 
-    # Swept AS-IS: errors.npy is already smoothed. Re-smoothing here would
-    # sweep a doubly-smoothed array that no re-score reproduces.
+    # Swept AS-IS — see module docstring, "Smoothing".
     smoothed_data = channel_data
     # Precomputed once and reused across every widening round: the rolling
     # mean/std pass is z-independent and is the expensive part of a grid point.
@@ -1152,10 +1151,10 @@ def _refine_with_grid(
         "error_smoothing_window": smoothing_window,
     }
     # seg_f0_5 at the refined point, computed on the SAME array the grid swept.
-    # Recomputing it through _scoring_trial instead would re-smooth (that path
-    # smooths whatever it is handed), scoring a doubly-smoothed array and
-    # reporting a diagnostic that describes neither the emitted config nor the
-    # grid's own result — the "row misdescribes itself" failure again.
+    # Recomputing it through _scoring_trial instead would re-smooth (see
+    # module docstring, "Smoothing"), reporting a diagnostic that describes
+    # neither the emitted config nor the grid's own result — the "row
+    # misdescribes itself" failure again.
     refined_seg_f0_5 = sweep_group(
         smoothed_data,
         threshold_window=threshold_window,
@@ -1705,17 +1704,14 @@ def run_hpo_sweep(
     # event list must not reach the grid either, for the identical reason.
     #
     # docs/reviews/024 A2: `"error_smoothing_window" not in _search_space` —
-    # the grid sweeps the saved (already-smoothed) errors array as-is and
-    # pins the scoring runs' own smoothing window into the refined config
-    # (see _scoring_run_smoothing_window). A space that still SAMPLES
-    # error_smoothing_window (base SEARCH_SPACE, and any non-ESA-Mission1
-    # mission with ground truth that gets it — see run_all_sweeps' space
-    # selector) means stage 1 scored a doubly-smoothed array, so refining
-    # against the untouched one — then overwriting error_smoothing_window
-    # with a value stage 1 never used — would emit a config whose (z, floor)
-    # was never actually evaluated together. ESA-Mission1's own space already
-    # omits the key, so this is a guard for other missions, not a behaviour
-    # change here.
+    # the grid sweeps the saved array as-is (module docstring, "Smoothing").
+    # A space that still SAMPLES the key (base SEARCH_SPACE, and any
+    # non-ESA-Mission1 mission with ground truth that gets it — see
+    # run_all_sweeps' space selector) means stage 1 scored a doubly-smoothed
+    # array, so refining against the untouched one would emit a config whose
+    # (z, floor) was never actually evaluated together. ESA-Mission1's own
+    # space already omits the key, so this is a guard for other missions,
+    # not a behaviour change here.
     _grid_refine_eligible = (
         settings.tune.grid_refine
         and selection_metric == "mission_f0_5"
@@ -1740,8 +1736,7 @@ def run_hpo_sweep(
         and mission_events is not None
         and mission_timeline_hpo is not None
     ):
-        # The grid sweeps the SAVED (already-smoothed) errors, so the refined
-        # (z, floor) is only valid alongside the smoothing that produced them.
+        # The grid sweeps the SAVED errors (module docstring, "Smoothing").
         # _pinned_smoothing (resolved once, above) is None when the scoring
         # runs disagree (or the lookup failed), in which case there is no
         # single array the grid would describe: skip rather than guess.
@@ -2177,11 +2172,16 @@ def write_tuned_configs(
                 "error_smoothing_window": 25, "threshold_min_anomaly_len": 3,
                 "_meta": {
                     "provenance":        "ray_tune" | "exhaustive_grid"
-                                         | "ray_tune+exhaustive_grid",
+                                         | "ray_tune+exhaustive_grid"
+                                         | "baseline+exhaustive_grid",
                     "source":            "ray_fanout/tune.py Ray Tune HPO sweep"
                                          | "scripts/threshold_ceiling.py exhaustive grid"
                                          | "per-subsystem Ray Tune HPO sweep, then
                                             exhaustive (threshold_z, min_error_value)
+                                            grid refinement"
+                                         | "untuned Settings.model defaults (baseline
+                                            guard kept them), then exhaustive
+                                            (threshold_z, min_error_value)
                                             grid refinement",
                     "run_id":            "abc123..." | null,
                     "objective_name":    "mean_per_channel_seg_f0_5_minus_fp_penalty"
