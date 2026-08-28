@@ -1073,9 +1073,7 @@ class TestRefineWithGrid:
         assert "tune.grid_refine.failed" in stdout
 
 
-def test_run_all_sweeps_emits_two_stage_provenance(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_tuned_config_entry_emits_two_stage_provenance() -> None:
     """docs/plans/024 stage .6 / Open Question 5: a two-stage config has two
     provenances and reporting only one would repeat 022.2b's failure (the
     ESA-ADB report misdescribing its own rows).
@@ -1083,59 +1081,39 @@ def test_run_all_sweeps_emits_two_stage_provenance(
     run_id keeps stage 1's Ray Tune trial (so score_channel's tuned_from_run
     lineage still resolves) while `source` — which
     esa_adb.detections.tuned_provenance renders verbatim — names BOTH stages.
-    """
-    import ray
 
-    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
+    docs/reviews/024, Q4: calls _tuned_config_entry directly — promoted out
+    of run_all_sweeps' closure specifically so this needed no Ray/MLflow
+    monkeypatching to reach (was ~35 lines of it per test)."""
+    from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE, _tuned_config_entry
 
-    base_settings = load_settings("test")
-    settings = base_settings.model_copy(
-        update={
-            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
-            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
-        }
-    )
-
-    class _FakeRun:
-        class info:
-            run_id = "fake-scored-run-id"
-
-    monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
-        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
-        lambda *_args, **_kwargs: _FakeRun(),
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
-        lambda subsystem, channels, *_args, **_kwargs: {
-            "config": {
-                "error_smoothing_window": 10,
-                "threshold_window": 100,
-                "threshold_z": 3.0,
-                "min_error_value": 0.4,
-                "threshold_min_anomaly_len": 2,
-            },
-            "seg_f0_5": 0.30,
-            "objective": 0.25,
-            "mission_f0_5": 0.797,
-            "selection_metric": "mission_f0_5",
-            "run_id": "stage-1-tune-trial",
-            "grid_meta": {
-                "objective_name": "mission_corrected_event_wise_f0_5",
-                "objective_value": 0.797,
-                "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
-                "expansions": 1,
-                "interior": True,
-            },
+    sweep_result = {
+        "config": {
+            "error_smoothing_window": 10,
+            "threshold_window": 100,
+            "threshold_z": 3.0,
+            "min_error_value": 0.4,
+            "threshold_min_anomaly_len": 2,
         },
-    )
+        "seg_f0_5": 0.30,
+        "objective": 0.25,
+        "mission_f0_5": 0.797,
+        "selection_metric": "mission_f0_5",
+        "run_id": "stage-1-tune-trial",
+        "grid_meta": {
+            "objective_name": "mission_corrected_event_wise_f0_5",
+            "objective_value": 0.797,
+            "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
+            "expansions": 1,
+            "interior": True,
+        },
+    }
 
-    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
-    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+    entry = _tuned_config_entry(
+        sweep_result, "subsystem_1",
+        search_space=ESA_M1_SEARCH_SPACE, settings=load_settings("test"),
+    )
+    meta = entry["_meta"]
 
     assert meta["provenance"] == "ray_tune+exhaustive_grid"
     assert "Ray Tune" in meta["source"] and "grid refinement" in meta["source"]
@@ -1149,61 +1127,36 @@ def test_run_all_sweeps_emits_two_stage_provenance(
     assert meta["objective_value"] == pytest.approx(0.797)
 
 
-def test_run_all_sweeps_does_not_credit_tune_when_baseline_was_kept(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_tuned_config_entry_does_not_credit_tune_when_baseline_was_kept() -> None:
     """A refined config whose stage 1 was the BASELINE GUARD (untuned defaults
     kept, so run_id is None) must not name a Ray Tune sweep as its first
     stage. No Tune trial contributed, and claiming one is the same class of
     misstatement 022.2b fixed — just in the other direction."""
-    import ray
+    from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE, _tuned_config_entry
 
-    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
-
-    base_settings = load_settings("test")
-    settings = base_settings.model_copy(
-        update={
-            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
-            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
-        }
-    )
-
-    class _FakeRun:
-        class info:
-            run_id = "fake-scored-run-id"
-
-    monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
-        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
-        lambda *_args, **_kwargs: _FakeRun(),
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
-        lambda subsystem, channels, *_args, **_kwargs: {
-            "config": {
-                "error_smoothing_window": 30, "threshold_window": 250,
-                "threshold_z": 3.0, "min_error_value": 0.4,
-                "threshold_min_anomaly_len": 3,
-            },
-            "seg_f0_5": 0.30, "objective": 0.25, "mission_f0_5": 0.60,
-            "selection_metric": "mission_f0_5",
-            "run_id": None,          # <- baseline guard kept the defaults
-            "grid_meta": {
-                "objective_name": "mission_corrected_event_wise_f0_5",
-                "objective_value": 0.60,
-                "seg_f0_5": 0.30, "nominal_fp_rate": 0.0, "objective": 0.30,
-                "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
-                "expansions": 0, "interior": True,
-            },
+    sweep_result = {
+        "config": {
+            "error_smoothing_window": 30, "threshold_window": 250,
+            "threshold_z": 3.0, "min_error_value": 0.4,
+            "threshold_min_anomaly_len": 3,
         },
-    )
+        "seg_f0_5": 0.30, "objective": 0.25, "mission_f0_5": 0.60,
+        "selection_metric": "mission_f0_5",
+        "run_id": None,          # <- baseline guard kept the defaults
+        "grid_meta": {
+            "objective_name": "mission_corrected_event_wise_f0_5",
+            "objective_value": 0.60,
+            "seg_f0_5": 0.30, "nominal_fp_rate": 0.0, "objective": 0.30,
+            "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
+            "expansions": 0, "interior": True,
+        },
+    }
 
-    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
-    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+    entry = _tuned_config_entry(
+        sweep_result, "subsystem_1",
+        search_space=ESA_M1_SEARCH_SPACE, settings=load_settings("test"),
+    )
+    meta = entry["_meta"]
 
     assert meta["provenance"] == "baseline+exhaustive_grid"
     assert "Ray Tune" not in meta["source"]
@@ -1212,58 +1165,33 @@ def test_run_all_sweeps_does_not_credit_tune_when_baseline_was_kept(
     assert meta["run_id"] is None
 
 
-def test_run_all_sweeps_labels_mission_metric_meta_correctly(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_tuned_config_entry_labels_mission_metric_meta_correctly() -> None:
     """docs/plans/024 stage .2: when a sweep selected on mission_f0_5, the
     written _meta must say so — not carry over the pre-024.2
     per-channel-objective label, which would mis-describe what was actually
     optimized (the same "objective_name must match reality" lesson 022.2b
     enforced for the grid writer)."""
-    import ray
+    from spacecraft_telemetry.ray_fanout.tune import ESA_M1_SEARCH_SPACE, _tuned_config_entry
 
-    from spacecraft_telemetry.ray_fanout.tune import run_all_sweeps
-
-    base_settings = load_settings("test")
-    settings = base_settings.model_copy(
-        update={
-            "model": base_settings.model.model_copy(update={"artifacts_dir": tmp_path / "models"}),
-            "tune": base_settings.tune.model_copy(update={"parallel_subsystems": False}),
-        }
-    )
-
-    class _FakeRun:
-        class info:
-            run_id = "fake-scored-run-id"
-
-    monkeypatch.setattr(ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.load_channel_subsystem_map",
-        lambda *_args, **_kwargs: {"channel_1": "subsystem_1"},
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.find_latest_run_for_channel",
-        lambda *_args, **_kwargs: _FakeRun(),
-    )
-    monkeypatch.setattr(
-        "spacecraft_telemetry.ray_fanout.tune.run_hpo_sweep",
-        lambda subsystem, channels, *_args, **_kwargs: {
-            "config": {
-                "error_smoothing_window": 10,
-                "threshold_window": 100,
-                "threshold_z": 2.5,
-                "threshold_min_anomaly_len": 2,
-            },
-            "seg_f0_5": 0.30,
-            "objective": 0.25,
-            "mission_f0_5": 0.62,
-            "selection_metric": "mission_f0_5",
-            "run_id": "fake-run-id-abc",
+    sweep_result = {
+        "config": {
+            "error_smoothing_window": 10,
+            "threshold_window": 100,
+            "threshold_z": 2.5,
+            "threshold_min_anomaly_len": 2,
         },
-    )
+        "seg_f0_5": 0.30,
+        "objective": 0.25,
+        "mission_f0_5": 0.62,
+        "selection_metric": "mission_f0_5",
+        "run_id": "fake-run-id-abc",
+    }
 
-    out = run_all_sweeps(settings, "ESA-Mission1", ["channel_1"])
-    meta = json.loads(out.read_text())["subsystem_1"]["_meta"]
+    entry = _tuned_config_entry(
+        sweep_result, "subsystem_1",
+        search_space=ESA_M1_SEARCH_SPACE, settings=load_settings("test"),
+    )
+    meta = entry["_meta"]
 
     assert meta["objective_name"] == "mission_corrected_event_wise_f0_5"
     assert meta["objective_value"] == pytest.approx(0.62)
@@ -1376,6 +1304,67 @@ def _pinned_params(
         if abs(value - lower) <= epsilon or abs(value - upper) <= epsilon:
             pinned.append(name)
     return pinned
+
+
+class TestPreferBaseline:
+    """docs/reviews/024, T4/OQ2: the baseline guard's decision, extracted out
+    of run_hpo_sweep so its fallback behavior (what happens when one side
+    lacks ``selection_metric``) is directly testable instead of asserted
+    about in the abstract."""
+
+    def test_keeps_tune_when_tune_wins(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"mission_f0_5": 0.5, "objective": 0.1}
+        best = {"mission_f0_5": 0.8, "objective": 0.3}
+        assert _prefer_baseline(baseline, best, "mission_f0_5") is False
+
+    def test_keeps_baseline_when_baseline_wins(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"mission_f0_5": 0.8, "objective": 0.1}
+        best = {"mission_f0_5": 0.5, "objective": 0.3}
+        assert _prefer_baseline(baseline, best, "mission_f0_5") is True
+
+    def test_keeps_baseline_on_an_exact_tie(self) -> None:
+        """`>=`, not `>` — the guard's own doc: keep the untuned defaults
+        whenever they are AT LEAST as good, not only strictly better."""
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"mission_f0_5": 0.5}
+        best = {"mission_f0_5": 0.5}
+        assert _prefer_baseline(baseline, best, "mission_f0_5") is True
+
+    def test_works_on_the_per_channel_objective_too(self) -> None:
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"objective": -0.2}
+        best = {"objective": -0.1}
+        assert _prefer_baseline(baseline, best, "objective") is False
+
+    def test_mixed_units_fallback_prefers_the_baseline(self) -> None:
+        """The decision this settles (docs/reviews/024 OQ2): when
+        ``best_metrics`` is missing ``selection_metric`` — e.g. a crashed
+        trial returning partial metrics — falling back to "objective" would
+        compare a bounded mission_f0_5 against an unbounded (possibly
+        negative) per-channel objective, which isn't a comparison at all.
+        Here the baseline's mission_f0_5 (0.1, a real losing score on its own
+        terms) would lose to a same-units comparison, but the fallback makes
+        it WIN anyway — proving this isn't "whichever number is bigger", it's
+        "no reliable signal, keep the untuned defaults"."""
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"mission_f0_5": 0.1, "objective": 0.05}
+        best = {"objective": 5.0}  # no mission_f0_5 key at all
+        assert _prefer_baseline(baseline, best, "mission_f0_5") is True
+
+    def test_mixed_units_fallback_when_baseline_is_missing_the_key(self) -> None:
+        """Symmetric case: baseline lacks the key instead of best."""
+        from spacecraft_telemetry.ray_fanout.tune import _prefer_baseline
+
+        baseline = {"objective": 5.0}  # no mission_f0_5 key at all
+        best = {"mission_f0_5": 0.9, "objective": 0.2}
+        assert _prefer_baseline(baseline, best, "mission_f0_5") is True
 
 
 class TestPinnedParamDetection:
