@@ -1358,6 +1358,34 @@ that the deployer has no `actAs` on. Both are documented inline in the workflow.
   job as an automatic second stage (see the first bullet), where it costs ~1.2 s/point on the
   mission metric against a job that already pays the load and prep above.
 
+### CLI / tooling work
+
+- **`ray tune --subsystem X` silently drops the mission-specific search space.** Found while
+  reproducing the H=1 `subsystem_5` arm for the [024 review](#two-stage-threshold-tuning):
+  `run_all_sweeps` (the `ray tune --mission M` path, no `--subsystem`) selects
+  `ESA_M1_SEARCH_SPACE` / `ISS_SEARCH_SPACE` by mission before calling `run_hpo_sweep`, but the
+  CLI's single-subsystem path (`ray tune --mission M --subsystem X`) calls `run_hpo_sweep`
+  directly with no `search_space=` argument at all — so it always falls back to the narrower
+  base `SEARCH_SPACE`, regardless of mission. A single-subsystem sweep run this way tunes
+  against the wrong bounds (and, for ESA-Mission1, the wrong smoothing behaviour — see
+  [Two-stage threshold tuning](#two-stage-threshold-tuning)) with no warning that it did. The
+  fix is one line — thread the same mission-based selector `run_all_sweeps` already has into
+  the CLI's `--subsystem` branch — but it wasn't part of the 024 review's declared findings, so
+  it's recorded here rather than fixed inline. Reproducing a single subsystem in the meantime:
+  use `--channels ch1,ch2,...` (no `--subsystem`) instead, which routes through
+  `run_all_sweeps` and gets the right space.
+
+- **`--subsystem` is the wrong grain for these CLI arguments post-023.** `preprocess`, `ray
+  train`, `ray tune`, and `ray score` all expose `--subsystem`, but docs/plans/023 introduced
+  channel *groups* (`subsystem_6_g09`, etc.) as the actual multivariate training/scoring unit —
+  a subsystem can contain several groups, and a scoring run's `subsystem` tag has meant "group"
+  since that phase (see `_find_multivariate_scoring_run`'s docstring in `ray_fanout/tune.py`).
+  The CLI argument name and the concept it now addresses have drifted apart, which is plausibly
+  part of why the search-space bug above went unnoticed — a `--subsystem` flag reads as
+  operating at subsystem grain even where the code beneath it is already group-keyed. Worth a
+  pass to rename these arguments (and their internal plumbing) to `--group`, consistently
+  across all four commands, rather than patching each call site's mismatch individually.
+
 
 ## Links
 
