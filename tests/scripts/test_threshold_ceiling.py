@@ -193,7 +193,20 @@ class TestMetaKeySetParity:
     # widen_to_convergence never returns a non-interior result (already
     # covered by the shared "interior" key), so it has no comparable failure
     # mode to report. See write_tuned_configs' docstring.
-    _TUNE_ONLY_DIAGNOSTIC_KEYS = frozenset({"seg_f0_5", "nominal_fp_rate", "pegged_params"})
+    #
+    # "elapsed_s"/"n_points"/"peak_rss_mb" (docs/reviews/024 stage 5.1) are
+    # stage 2's cost, measured live inside the process that ran it — the
+    # offline grid script has no comparable self-instrumentation to report.
+    _TUNE_ONLY_DIAGNOSTIC_KEYS = frozenset(
+        {
+            "seg_f0_5",
+            "nominal_fp_rate",
+            "pegged_params",
+            "elapsed_s",
+            "n_points",
+            "peak_rss_mb",
+        }
+    )
 
     def test_grid_and_tune_writers_emit_the_same_meta_key_set(
         self, script_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

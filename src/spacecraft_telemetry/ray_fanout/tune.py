@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import resource
 import time
 import warnings
 from collections.abc import Callable
@@ -1065,6 +1066,12 @@ def _refine_with_grid(
         # must refuse it directly too, since it is exercised on its own.
         return None
 
+    # docs/reviews/024, stage 5.1: instrument stage 2's cost so A4/P2/P3
+    # (parallelize? cost-aware grid ordering? cap concurrency?) can be
+    # decided from a measurement instead of a guess. Timed from here — the
+    # real compute, not the cheap early-decline checks above.
+    _stage2_start = time.time()
+
     threshold_window = int(best_config["threshold_window"])
     min_run_length = int(best_config["threshold_min_anomaly_len"])
 
@@ -1170,6 +1177,15 @@ def _refine_with_grid(
         min_error_value=float(best_floor),
     )
 
+    # docs/reviews/024, stage 5.1. ru_maxrss unit: KB on Linux (GKE workers),
+    # bytes on macOS — same normalization as preprocess/pipeline.py's
+    # identical measurement. A running peak sampled once at the end (not a
+    # before/after delta), same convention: dominated by whatever the
+    # heaviest thing the process has done so far is, which for a fresh Ray
+    # worker running one subsystem's stage 2 is stage 2 itself.
+    _rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    _peak_rss_mb = _rss_raw / 1024 / 1024 if _rss_raw > 1_000_000_000 else _rss_raw / 1024
+
     grid_meta = {
         "objective_name": "mission_corrected_event_wise_f0_5",
         "objective_value": widening.best_score,
@@ -1185,7 +1201,21 @@ def _refine_with_grid(
         # widen_to_convergence never returns a non-interior result — it raises
         # instead, handled above.
         "interior": True,
+        # docs/reviews/024, stage 5.1: cost instrumentation — the only way to
+        # tell whether A4 (parallelize stage 2), P2 (the low-z flood corner),
+        # or P3 (driver RSS) actually matter, instead of guessing.
+        "elapsed_s": round(time.time() - _stage2_start, 3),
+        "n_points": len(widening.grid),
+        "peak_rss_mb": round(_peak_rss_mb, 1),
     }
+    log.info(
+        "tune.grid_refine.cost",
+        subsystem=subsystem,
+        elapsed_s=grid_meta["elapsed_s"],
+        n_points=grid_meta["n_points"],
+        expansions=widening.expansions,
+        peak_rss_mb=grid_meta["peak_rss_mb"],
+    )
     return refined, grid_meta
 
 
@@ -1753,6 +1783,9 @@ def run_hpo_sweep(
                 ),
                 grid_mission_f0_5=round(grid_meta["objective_value"], 4),
                 expansions=grid_meta["expansions"],
+                elapsed_s=grid_meta["elapsed_s"],
+                n_points=grid_meta["n_points"],
+                peak_rss_mb=grid_meta["peak_rss_mb"],
             )
             best_config = refined_config
             best_mission_f0_5 = grid_meta["objective_value"]
@@ -1928,6 +1961,13 @@ def _tuned_config_entry(
             "expansions": grid["expansions"] if grid else None,
             "interior": grid["interior"] if grid else None,
             "pegged_params": pegged or None,
+            # docs/reviews/024, stage 5.1: stage 2's own cost, measured live
+            # inside this process — tune-only, like pegged_params, since the
+            # offline grid script (scripts/threshold_ceiling.py) has no
+            # comparable self-instrumentation to report.
+            "elapsed_s": grid["elapsed_s"] if grid else None,
+            "n_points": grid["n_points"] if grid else None,
+            "peak_rss_mb": grid["peak_rss_mb"] if grid else None,
         },
     }
 
@@ -2192,6 +2232,14 @@ def write_tuned_configs(
     grid writer (scripts/threshold_ceiling.py) has no comparable failure mode
     — ``widen_to_convergence`` never returns a non-interior result, already
     checked via ``interior`` above — so it omits this key rather than
+    emitting a meaningless ``null``.
+
+    ``elapsed_s`` / ``n_points`` / ``peak_rss_mb`` (docs/reviews/024 stage
+    5.1) are stage 2's own cost, measured live inside the process that ran
+    it: wall time, total grid points swept across every widening round
+    (``len(widening.grid)``), and this process's peak RSS so far. Tune-only,
+    like ``pegged_params`` — the offline grid script has no comparable
+    self-instrumentation to report, so it omits these too rather than
     emitting a meaningless ``null``.
 
     ``_meta`` is filtered out by score_all_channels before applying overrides

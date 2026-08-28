@@ -1106,6 +1106,9 @@ def test_tuned_config_entry_emits_two_stage_provenance() -> None:
             "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
             "expansions": 1,
             "interior": True,
+            "elapsed_s": 0.05,
+            "n_points": 32,
+            "peak_rss_mb": 512.0,
         },
     }
 
@@ -1149,6 +1152,7 @@ def test_tuned_config_entry_does_not_credit_tune_when_baseline_was_kept() -> Non
             "seg_f0_5": 0.30, "nominal_fp_rate": 0.0, "objective": 0.30,
             "axes": {"threshold_z": [1.0, 3.0], "min_error_value": [0.0, 0.4]},
             "expansions": 0, "interior": True,
+            "elapsed_s": 0.03, "n_points": 8, "peak_rss_mb": 256.0,
         },
     }
 
