@@ -176,7 +176,29 @@ jobs:
     # unchanged) — that's fine — but if it ran and failed, block the API deploy
     # to preserve the depends_on ordering. always() is required so a skipped
     # deploy-mlflow doesn't transitively skip this job.
+    #
+    # PAUSED (2026-08-27) behind the DEPLOY_API repo variable, set it to
+    # 'true' to re-enable. The serving architecture is deliberately unsettled
+    # while the DC-VAE detector and ensemble work is in flight (see README
+    # Future Work): a second detector needs two engines plus a fusion rule, so
+    # whatever is deployed now is likely torn down. api-iss also runs
+    # min-instances=1, i.e. always-on billing for a service nobody is using
+    # meanwhile.
+    #
+    # TWO THINGS TO FIX BEFORE RE-ENABLING — the last run failed for reasons
+    # unrelated to the pause, and they will still be there:
+    #   1. The `api` and `api-iss` Cloud Run services no longer exist. They are
+    #      Terraform-owned (infra/cloud_run.tf), so recreate them with
+    #      `terraform apply`, not by letting CI create them.
+    #   2. `gcloud run deploy` below passes no --service-account. Updating an
+    #      existing service inherits the runtime SA Terraform set (sa-api,
+    #      which the deployer has actAs on via infra/iam.tf), but CREATING one
+    #      defaults it to the project's compute SA, which the deployer has no
+    #      actAs on — the exact "Permission 'iam.serviceaccounts.actAs' denied"
+    #      failure seen on 2026-08-25. Doing (1) makes these updates again;
+    #      passing --service-account would also make the create path work.
     if: |
+      vars.DEPLOY_API == 'true' &&
       always() &&
       needs.build-api.result == 'success' &&
       needs.deploy-mlflow.result != 'failure' &&
@@ -202,7 +224,10 @@ jobs:
     needs: [build-api, deploy-mlflow]
     # Same gate as deploy-api — both services run the same image. api-iss is
     # the ISS mission serving endpoint; it shares sa-api and all env wiring.
+    # Paused behind the same DEPLOY_API variable; see deploy-api's comment for
+    # why, and for the two things to fix before re-enabling.
     if: |
+      vars.DEPLOY_API == 'true' &&
       always() &&
       needs.build-api.result == 'success' &&
       needs.deploy-mlflow.result != 'failure' &&

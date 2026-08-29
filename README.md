@@ -64,10 +64,18 @@ recovery.
 - Preprocessing to partitioned Parquet outputs (pandas + Ray Core fan-out per channel)
 - Per-channel Telemanom training + scoring artifacts, tracked in MLflow
 - Ray fan-out training and scoring across channels
-- Ray Tune HPO over scoring parameters per subsystem
+- Ray Tune HPO over scoring parameters per subsystem, selecting on the mission-level metric
+  the benchmark report publishes wherever ground truth exists (falling back to the
+  per-channel objective for missions without it, e.g. ISS)
 - Mechanical grid-widening driver for threshold selection
   (`ray_fanout/threshold_search.py`): auto-expands whichever axis's optimum sits on a grid
   edge and fails closed rather than returning a configuration that is really a lower bound
+- Two-stage tuning: the HPO job runs that grid automatically as a second stage, refining
+  `(threshold_z, min_error_value)` deterministically on cached error arrays after Ray Tune
+  picks the parameters that need re-scoring
+  ([details](#two-stage-threshold-tuning))
+- Bound-truncation guard: a winning config sitting on a search-space bound is flagged in the
+  logs and recorded in `_meta`, instead of being found later by a human reading a config
 - `tuned_configs.json` carries a machine-readable `_meta` provenance block (which search
   produced it, objective name *and* value, the slice it was selected on, the swept axes,
   how many widening rounds it took); the ESA-ADB report renders each tuned row's provenance
@@ -254,6 +262,14 @@ followed by `cloud-train`/`cloud-tune`/`cloud-score` with `MULTIVARIATE=1`.
 > selected a `threshold_z` below the entire swept range. Treat 0.457 as what the
 > pipeline currently produces, not as what this configuration can reach — see the
 > first [Future Work](#future-work) item.
+>
+> **Both numbers predate the tuning changes described in
+> [Two-stage threshold tuning](#two-stage-threshold-tuning)** — mission-metric
+> selection and automatic grid refinement. On the arm where both have been
+> measured those were worth 0.212 → 0.813, so these two columns are very likely
+> further below their ceiling than the paragraph above implies. They have not been
+> re-tuned yet because the two arms must be re-tuned *together* to stay
+> comparable; that is the first [Future Work](#future-work) item.
 
 Precision and recall sit close together: the forecaster catches about half the
 labeled segments, and slightly under half of what it flags overlaps a labeled one.
@@ -351,8 +367,15 @@ Getting that comparison honest required discarding a first attempt. Tuned by `cl
 `threshold_z = 1.393`, below the entire range the grid sweeps, firing 113 detections at 0.18
 precision. Reported against the grid-tuned 0.507 above, that would have said the common time
 grid *hurt* detection by a factor of two. It is the same tuning-luck failure this repo
-already documents once, in the opposite direction, and it is why the exhaustive sweep is
-listed first in [Future Work](#future-work) as a correctness gap rather than an optimisation.
+already documents once, in the opposite direction, and it is what motivated moving the
+exhaustive sweep inside the tuning job.
+
+**That 0.212 has since been diagnosed, and it was not tuning luck.** Ray Tune was selecting
+trials on a per-channel proxy objective rather than the mission-level metric reported here;
+asking it the right question moves the same sweep to 0.756 without changing the sampler at
+all. See [Two-stage threshold tuning](#two-stage-threshold-tuning) for the split. The
+grid-tuned numbers in this section are unaffected — they never came from Tune — but the
+*reason* they had to be grid-tuned is now better understood than "the sampler got unlucky."
 
 **The grid and the horizon do not compose.** Each helps alone — the grid takes 0.507 → 0.797,
 the horizon 0.507 → 0.753 — but applied together they give **0.550**, worse than either. The
@@ -600,6 +623,81 @@ tuned row's provenance from the scoring run's MLflow tags rather than asserting
 "per-subsystem Ray Tune HPO", a claim that was **false** for every horizon row above: those
 configurations came from the post-hoc grid, not from Tune. A report that misstates how its
 own numbers were produced is the exact failure this layer exists to prevent.
+
+### Two-stage threshold tuning
+
+The driver above made threshold selection mechanical, but it still lived in a local script
+that `cloud-tune` never called — so the step documented as *required before any architecture
+claim* was the one step the pipeline could not perform, and skipping it was the default rather
+than a mistake you had to make. That gap is closed: the grid now runs **inside** the tuning
+job, as an automatic second stage.
+
+**Two stages, not a swap**, because the scoring parameters do not all have the same cost.
+`threshold_window` changes what the rolling threshold is computed over and can only be
+evaluated by re-scoring, so it stays with Ray Tune. `threshold_z` and `min_error_value` are
+pointwise and stateless — evaluable post-hoc on the cached error arrays — so a deterministic
+sweep refines them afterwards. Ray Tune picks the operating *regime*; the grid finds the
+operating *point* inside it.
+
+Why it was needed at all: on the 30 s-grid arm, Ray Tune's 50-sample sweep chose
+`threshold_z = 1.393` — *below the entire range the grid sweeps* — scoring **0.212** mission
+F0.5 where a hand-run grid found `z = 3.0, floor = 0.4` at **0.798**. It was not one unlucky
+draw: the H=10 arm did the same thing independently (`z = 1.481` against a grid optimum of
+`z = 7.0`). Read as an architecture result rather than a tuning artifact, that number would
+have said the common time grid *hurt* detection by a factor of two.
+
+**Re-running that arm end-to-end showed the original diagnosis was wrong**, and the correction
+is more interesting than the fix. The gap had been attributed to the sampler being mis-matched
+to a ridged response surface. Taking the three changes apart, on the same arm at the same
+50-sample budget:
+
+| | `threshold_z` | `min_error_value` | Ray Tune alone | + grid |
+|---|---:|---:|---:|---:|
+| per-channel objective, double-smoothed inputs *(the original 0.212)* | 1.393 | 0.251 | **0.212** | — |
+| selecting on the mission metric | 3.756 | 0.389 | 0.756 | 0.813 |
+| **+ un-double-smoothed inputs** | 3.0 | 0.343 | **0.798** | **0.813** |
+| hand-run reference grid | 3.0 | 0.4 | — | 0.798 |
+
+Most of the original gap — 0.212 → 0.756 — was **objective mis-specification, not sampler
+weakness**. The optimiser was answering the question it was asked; the question was the wrong
+one. Fixing the double-smoothing then carries Ray Tune *on its own* to 0.798, exactly the
+hand-run reference's ceiling. "HyperOpt can't find this ridge" was simply the wrong story:
+given the right objective and the right inputs, it finds it.
+
+The second stage still earns its place, but for a different reason than first claimed. It is
+worth **+0.015** here rather than the +0.6 the original framing implied — and, more usefully,
+it is what makes the result *insensitive* to stage 1 being wrong. Note what it did in the
+middle row: with stage 1 optimising a fictional surface, the grid still reached 0.813, but only
+by pushing `threshold_z` out to 8.0 (the search space's ceiling, needing a widening round) to
+compensate. With stage 1 fixed, it converges at `z = 3.0` with **zero widening** and nothing
+pegged. Same score, but the pipeline now agrees with itself instead of one stage silently
+correcting another.
+
+Two correctness details the stage is careful about, both learned the hard way:
+
+- **It selects on the metric it reports.** Analysis of 350 archived trials found the
+  per-channel objective Tune had been selecting on correlates only moderately with the
+  mission-level metric actually published (ρ ≈ 0.64–0.66) while leaving **0.36–0.66 F0.5** of
+  regret against the best trial in the same sweep — 3–5× the regret that motivated the
+  original threshold work. Selection now uses the mission metric wherever ESA-ADB ground truth
+  exists, and the refinement is scored on that same metric. Missions without ground truth
+  (ISS, by design) keep the per-channel objective and skip refinement entirely, rather than
+  being refined against an objective that silently drops the false-positive penalty their live
+  detector depends on.
+- **It pins the smoothing that produced the array it swept.** `errors.npy` is already
+  smoothed, so a `(z, floor)` chosen against it is only valid for a re-score that reproduces
+  exactly that smoothing — the stage therefore pins the scoring run's own
+  `error_smoothing_window` into the emitted config. Finding this is also what surfaced the
+  double-smoothing bug in stage 1 (the row above), since the two stages disagreed about what
+  array they were looking at.
+
+A refined config carries **both** provenances: `_meta.run_id` still points at stage 1's Ray
+Tune trial so scoring-run lineage resolves, while `_meta.source` names both stages and the
+swept-grid fields describe stage 2. A two-stage config that reported only one stage would
+repeat precisely the failure the previous section's provenance work exists to prevent. And a
+grid that cannot converge to an interior optimum returns nothing rather than a grid-edge lower
+bound, leaving Tune's config in place — refinement can improve a sweep or decline, never
+quietly degrade it.
 
 ### ISS: evaluation by fault injection (no real labels)
 
@@ -1016,6 +1114,8 @@ reason — but it is untested and not attempted here.
 | 20 | Experiment variant axis (separate mission from experiment config) | Complete |
 | 21 | 6-in/6-out multivariate Telemanom | Complete |
 | 22 | Tuning layer (mechanical threshold selection + config provenance) | Complete |
+| 23 | Channel time grid (common resample so joint models share a timestamp index) | Complete |
+| 24 | HPO search space audit + two-stage threshold tuning | Complete |
 
 Phases 19–22 are post-18 workstreams rather than new platform capabilities: 19 is
 evaluation credibility (implementing ESA-ADB's own corrected event-wise metric and
@@ -1031,65 +1131,123 @@ rather than by a human widening grid ranges
 string, or a cache — none of the published numbers above moved, which was the plan's
 governing invariant.
 
+23 gives a channel group one shared timestamp index, which is what lets a joint model
+window over it at all — and, measured, it is also the single largest detection gain on
+the benchmark. 24 audited whether the HPO search space was truncating optima (it is not,
+at today's bounds — the finding was per-subsystem *heterogeneity* instead, recorded rather
+than fitted), added a guard so a future truncation is flagged automatically, and closed
+22's remaining correctness gap by moving the threshold grid inside the tuning job
+([details](#two-stage-threshold-tuning)). Unlike 22, phase 24 **does** change what future
+sweeps select, so any re-tuned number is republished with a before/after rather than
+swapped in silently.
+
 
 ## Future Work
 
 The detector roadmap below is sequenced deliberately: each step builds the infrastructure the next one needs. The **6-in/6-out multivariate Telemanom** these items depended on is now built and measured — it matched per-channel accuracy rather than beating it ([details](#multivariate-forecasting-built-measured-no-gain)), but it delivered the joint
 channel-group data path, which is the part the work below actually reuses.
 
-- **Fold the exhaustive threshold grid into the tuning job as a second stage.** This is a
-  **correctness** gap, not a performance one, and it is the highest-priority item here.
-  `scripts/threshold_ceiling.py` is documented above as a required step before any
-  architecture claim — but it is a local script, and the modules it drives
-  (`ray_fanout/threshold_search.py`, `ray_fanout/threshold_grid.py`) are library code that
-  `run_all_sweeps` never calls. So the required step is the one step the pipeline cannot
-  perform, and skipping it is the default rather than a mistake you have to make.
+### Sequencing: detectors first, then one coordinated re-tune
 
-  Measured cost, on the 30 s-grid arm over channels 41–46 (same split, same 25 held-out
-  events, same model): `cloud-tune`'s 50-sample Ray Tune sweep selected
-  `threshold_z = 1.393, min_error_value = 0.251` and scored **0.212** mission-level corrected
-  event-wise F0.5. The exhaustive grid over the same objective found
-  `threshold_z = 3.0, min_error_value = 0.4` at **0.798**, with the optimum interior to the
-  grid. The chosen z sat *below the entire swept range*, so the arm fired 113 detections at
-  0.18 precision — a config 4× worse than one a deterministic sweep finds in the same space.
-  Read as an architecture result rather than a tuning artifact, that number would have said
-  the common time grid *hurt* detection.
+Phase 24 changed what the tuner selects, so every published number is now below what the
+pipeline would produce today. The obvious response — re-tune and republish immediately — is
+**deliberately deferred**, because two things are about to change the comparison set again:
+a second detector (DC-VAE) and an ensemble over both.
 
-  **It is systematic, not one unlucky sweep.** The same thing happened independently on the
-  H=10 arm: Ray Tune chose `threshold_z = 1.481, min_error_value = 0.246` where that arm's
-  exhaustive grid put the optimum at `threshold_z = 7.0, min_error_value = 0.3`. Two separate
-  sweeps, two different horizons, both landing in the same low-`z` region the grid scores an
-  order of magnitude worse. The sampler is not unlucky; it is mis-matched to this response
-  surface.
+The governing constraint is tuning parity: *a comparison set must be re-tuned together or not
+at all.* Re-tuning Telemanom now, then DC-VAE later, then the ensemble later still, would
+produce a table whose rows were tuned by three different versions of the tuner — which is
+precisely the failure that inflated an architecture claim threefold in phase 21 and nearly
+published an inverted grid result in phase 23.
 
-  The fix is two stages, not a swap: the grid sweeps only `(threshold_z, min_error_value)`,
-  because `error_smoothing_window` is baked into the saved smoothed array and cannot be
-  re-evaluated post-hoc. So Ray Tune keeps the params that require re-scoring, and the
-  exhaustive driver deterministically refines the two that are cheap on cached errors —
-  making a ridge-refined config the automatic output of `cloud-tune` rather than a manual
-  follow-up. The parallelism item below is what makes stage 2 affordable at mission scale.
+So the order is:
 
-  **Then re-score the 30 s-grid arm and refresh the Evaluation numbers.** Only that arm is
-  worth the pass — the default arm is a different data representation (native timestamps,
-  one model per channel) that this work supersedes, so tuning it to ceiling would be effort
-  spent on a configuration nothing else builds on. The scope is **45 channels, not 62**:
-  the rest carry no labeled anomaly in the held-out window and cannot move a detection
-  metric. It is also only **two sweeps**, since those 45 fall entirely in two subsystems —
-  `subsystem_6` (39 channels, ~4.4 GB resident) and `subsystem_5` (6, ~0.7 GB). The second
-  runs on a laptop today; the first sits right at CLAUDE.md's ~4–5 GB ceiling, which is the
-  concrete reason stage 2 wants Ray rather than a local script. Re-scoring lifts the
-  Evaluation table's 0.457 toward its ceiling, and the two arms there stop being
-  tuning-comparable at that point — so report the swept arm as its own row rather than
-  swapping the number in.
-- **Reparameterize the HPO search space onto the ridge.** Measured: HPO leaves 0.07–0.13 on
-  the table because the response surface is a narrow ridge, and `threshold_z` and
-  `min_error_value` are substitutes rather than independent knobs — so sampling them
-  independently spends most of the budget off-ridge. One configuration reported above
-  (`first`'s `threshold_z = 15.0`) sits outside the search space HPO can reach at all. The
-  mechanical driver is what makes this decidable: it produces the ridge geometry across arms
-  that the choice depends on. Deliberately not designed in advance — the baseline any
-  cleverer sampler must beat is simply raising `num_samples`, and picking a
-  reparameterization from the keyboard would repeat the mistake the driver exists to remove.
+1. **Build DC-VAE** and get it scoring.
+2. **Measure per-anomaly overlap** between detectors — this gates the ensemble's fusion rule.
+3. **Build the ensemble** if the overlap supports it.
+4. **One coordinated pass at the end**: re-tune every compared arm together, re-score, refresh
+   every Evaluation and head-to-head number, promote to `@champion`, deploy.
+
+Two honest costs of deferring, recorded so they are not surprises:
+
+- **The published numbers stay stale until step 4**, which is why the Evaluation section
+  carries an explicit caveat saying so. That caveat is what makes the deferral honest rather
+  than merely convenient — it must not be trimmed while the numbers remain.
+- **The final batch grows.** It is already the default arm, the 30 s-grid arm, and five
+  head-to-head rows; DC-VAE and the fusion variants add more. A large coordinated re-tune is
+  exactly where one arm quietly gets swept and another does not, so step 4 is real planned
+  work, not a formality.
+
+**Cloud Run deploys are paused meanwhile.** The `api` / `api-iss` deploy jobs in
+`.github/workflows/deploy.yml` are gated behind a `DEPLOY_API` repo variable (unset = off), so
+`main` is not permanently red for a deploy nobody wants yet, and `api-iss` does not bill for
+`min-instances=1` while unused. Two things need fixing before re-enabling, and neither is
+caused by the pause: the services are Terraform-owned but no longer exist (recreate with
+`terraform apply`, not by letting CI create them), and the `gcloud run deploy` commands pass
+no `--service-account`, so a *create* defaults the runtime identity to the project compute SA
+that the deployer has no `actAs` on. Both are documented inline in the workflow.
+
+### Detector work
+
+- **Re-score, refresh the Evaluation numbers, and promote — step 4 above, not before.**
+  The tuning-correctness work this depended on has shipped (see
+  [Two-stage threshold tuning](#two-stage-threshold-tuning)); what remains is running it
+  against production once the comparison set is final.
+
+  Only the 30 s-grid arm is worth the pass — the default arm is a different data
+  representation (native timestamps, one model per channel) that this work supersedes, so
+  tuning it to ceiling would be effort spent on a configuration nothing else builds on. The
+  scope is **45 channels, not 62**: the rest carry no labeled anomaly in the held-out window
+  and cannot move a detection metric. It is also only **two sweeps**, since those 45 fall
+  entirely in two subsystems — `subsystem_6` (39–41 channels) and `subsystem_5` (6). Both fit
+  on a laptop at the measured footprint (see the last bullet). Re-scoring lifts the Evaluation
+  table's 0.457 toward its ceiling, and the two arms there stop being tuning-comparable at
+  that point — so report the swept arm as its own row rather than swapping the number in.
+
+  Note the two halves differ in cost by orders of magnitude: the **re-tune** is an HPO sweep
+  over cached `errors.npy` (no GPU, minutes), while the **re-score** is a full forward pass per
+  channel. Only the re-score genuinely wants the cloud.
+
+  Then the configs reach production: promote to MLflow's `@champion` alias (deliberately —
+  never with a bare `--mission ESA-Mission1`, which also prefix-matches the
+  `ESA-Mission1-ADB*` pseudo-missions), and re-enable the deploys above.
+
+- **Carry the double-smoothing fix over to ISS.** `errors.npy` holds the **already-smoothed**
+  array (`scoring.py`'s `_score_series` logs `smooth_errors(errors, error_smoothing_window)`),
+  and the HPO trial function used to smooth it *again* with the trial's own window — so that
+  parameter tuned a second smoothing pass, and every trial was scored against an array
+  `score_channel` never reproduces at re-score time. Measured on the H=1 subsystem_5 arm, the
+  two surfaces put their optima in completely different places (`z=3.0, floor=0.4` → 0.798 vs
+  `z=8.0, floor=0.0` → 0.631) and the doubly-smoothed winner scores just **0.397** on the real
+  array — ~0.40 mission F0.5 lost to optimising a fiction.
+
+  **Fixed for ESA-Mission1** (see [Two-stage threshold tuning](#two-stage-threshold-tuning)):
+  `error_smoothing_window` is no longer sampled there, the trial function sweeps the saved
+  array untouched, and the emitted config pins the scoring run's own window — the same
+  discipline the exhaustive grid already applied. **Not yet carried over to ISS**, which
+  inherits the base search space and still double-smooths. The bug is identical and the fix
+  would be the same one-line scoping change, but ISS is the always-on live demo: re-tuning it
+  changes what the public endpoint serves, so it wants its own before/after pass rather than
+  riding along with an ESA change.
+
+  **This one is not blocked by the sequencing above.** ISS never enters the ESA comparison
+  set — it has no labeled anomalies and is evaluated by fault injection — so it carries no
+  tuning-parity obligation to the DC-VAE work and can be done whenever ISS is next touched.
+  Until then the live detector keeps tuning against an array its own scorer never reproduces.
+- **Reparameterize the HPO search space onto the ridge — investigated, cut.** Measured this
+  directly rather than designing it from the keyboard: swept a third subsystem (`subsystem_6`,
+  39–41 channels) through the same exhaustive grid used for the two arms above. All three
+  grids converge to an **interior** optimum (no widening needed) — so the search space's
+  bounds are not truncating anything at today's width, and the earlier truncation incidents
+  that motivated widening the bounds (`threshold_z` 2.5→1.0, `min_error_value` 0.3→0.6) were
+  real but have already been fixed. (A bound-truncation guard also now flags a config landing
+  on a search-space bound automatically, rather than needing a human to notice by hand — how
+  all three prior incidents were caught.) What the third sweep actually found is
+  **heterogeneity, not a shared ridge**: `subsystem_6` wants `min_error_value ≈ 0.05`, an order
+  of magnitude below `subsystem_5`'s `0.3–0.4`. A single reparameterization fit to one
+  subsystem's geometry would overfit to it and mis-tune the others — the opposite of the
+  intended fix. A per-subsystem search space would address the heterogeneity, but that is a
+  bigger change than this investigation scoped, so it is recorded here rather than built.
 - **DC-VAE as a second detector.** Implement the
   [DC-VAE](https://arxiv.org/abs/2406.17826) architecture (Dual-Channel Variational
   Autoencoder — dilated CNN encoder → `z ∼ N(μ, σ²)` → decoder, reconstruction-error
@@ -1175,17 +1333,58 @@ channel-group data path, which is the part the work below actually reuses.
 - **Parallelize the drift sweep.** `drift batch-mission` runs channels serially; the
   per-channel work has the same shape as the Ray training fan-out and could move to
   `@ray.remote` (tracked by a TODO in `cli.py`).
-- **Move the post-hoc threshold sweep onto Ray.** The `(threshold_z, min_error_value)` grid
-  that equalizes tuning between compared arms still runs as a local script. The original case
-  for moving it was *data locality* — ~11 min pulling each arm's saved error arrays from GCS
-  against ~4 min of actual sweep — but that is no longer the profile: parallelizing the
-  per-channel loads and adding a local artifact cache keyed on `(run_id, artifact_path)` cut
-  the load phase to 17–31 s, leaving ~85% of an ~11 min run inside the sweep itself. So the
-  remaining case is **parallelism over grid points**, and it is a real one: the grid is
-  embarrassingly parallel (the rolling mean/std is precomputed once per channel and shared
-  across every `z`), and the mechanical widening driver only makes the point count grow. It
-  becomes *necessary* rather than merely nice at mission scale — six channels hold ~690 MB
-  resident, so ~100 channels would need ~15–18 GB and cannot run on a laptop at all.
+- **~~Move the post-hoc threshold sweep onto Ray.~~ Measured, and the case does not hold.**
+  This was listed as *necessary at mission scale* on an extrapolation — six channels held
+  ~690 MB resident, so ~100 channels "would need ~15–18 GB and cannot run on a laptop at all."
+  Measuring it instead of extrapolating it, on `subsystem_6`'s 41 channels:
+
+  | | extrapolated | **measured** |
+  |---|---|---|
+  | resident per channel | ~115 MB | **31 MB** |
+  | 41 channels, peak RSS | ~4.4 GB | **1.04 GB** |
+  | ~100 channels (projected) | 15–18 GB | **~3.1 GB** |
+  | grid sweep, 72 points | most of an ~11 min run | **11 s** (153 ms/point) |
+
+  The 115 MB/channel figure came from channels 41–46, which are ~2.9M windows each;
+  `subsystem_6`'s are mostly ~1M, so the per-channel extrapolation was ~4× too pessimistic and
+  the whole mission fits comfortably under the laptop ceiling it was said to blow through.
+
+  The sweep is also not where the time goes. On that same run: **69 s loading** the error
+  arrays, **282 s of mission-metric prep** (`mission_timeline` / `hpo_cutoff` re-reading each
+  channel's parquet), and **11 s of actual grid**. Parallelising grid points would attack 3%
+  of the runtime. If this is ever revisited, the target is the mission prep, not the grid.
+
+  The correctness half of this item shipped instead — the grid now runs **inside** the tuning
+  job as an automatic second stage (see the first bullet), where it costs ~1.2 s/point on the
+  mission metric against a job that already pays the load and prep above.
+
+### CLI / tooling work
+
+- **`ray tune --subsystem X` silently drops the mission-specific search space.** Found while
+  reproducing the H=1 `subsystem_5` arm for the [024 review](#two-stage-threshold-tuning):
+  `run_all_sweeps` (the `ray tune --mission M` path, no `--subsystem`) selects
+  `ESA_M1_SEARCH_SPACE` / `ISS_SEARCH_SPACE` by mission before calling `run_hpo_sweep`, but the
+  CLI's single-subsystem path (`ray tune --mission M --subsystem X`) calls `run_hpo_sweep`
+  directly with no `search_space=` argument at all — so it always falls back to the narrower
+  base `SEARCH_SPACE`, regardless of mission. A single-subsystem sweep run this way tunes
+  against the wrong bounds (and, for ESA-Mission1, the wrong smoothing behaviour — see
+  [Two-stage threshold tuning](#two-stage-threshold-tuning)) with no warning that it did. The
+  fix is one line — thread the same mission-based selector `run_all_sweeps` already has into
+  the CLI's `--subsystem` branch — but it wasn't part of the 024 review's declared findings, so
+  it's recorded here rather than fixed inline. Reproducing a single subsystem in the meantime:
+  use `--channels ch1,ch2,...` (no `--subsystem`) instead, which routes through
+  `run_all_sweeps` and gets the right space.
+
+- **`--subsystem` is the wrong grain for these CLI arguments post-023.** `preprocess`, `ray
+  train`, `ray tune`, and `ray score` all expose `--subsystem`, but docs/plans/023 introduced
+  channel *groups* (`subsystem_6_g09`, etc.) as the actual multivariate training/scoring unit —
+  a subsystem can contain several groups, and a scoring run's `subsystem` tag has meant "group"
+  since that phase (see `_find_multivariate_scoring_run`'s docstring in `ray_fanout/tune.py`).
+  The CLI argument name and the concept it now addresses have drifted apart, which is plausibly
+  part of why the search-space bug above went unnoticed — a `--subsystem` flag reads as
+  operating at subsystem grain even where the code beneath it is already group-keyed. Worth a
+  pass to rename these arguments (and their internal plumbing) to `--group`, consistently
+  across all four commands, rather than patching each call site's mismatch individually.
 
 
 ## Links

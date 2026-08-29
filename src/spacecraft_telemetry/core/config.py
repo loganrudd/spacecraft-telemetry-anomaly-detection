@@ -449,6 +449,39 @@ class TuneConfig(BaseModel):
     # of 5.0 means a 10% nominal-window false-positive rate costs 0.5 off the
     # objective — enough to push the optimizer off a hair-trigger threshold.
     fp_penalty_weight: float = 5.0
+    # Second-stage deterministic (threshold_z, min_error_value) grid refinement
+    # after the Ray Tune sweep picks a winner (docs/plans/024 stage .6).
+    #
+    # HyperOptSearch is mis-matched to this response surface: measured on three
+    # independent sweeps, it lands in a low-z corner the exhaustive grid scores
+    # an order of magnitude worse (0.212 vs 0.798 mission F0.5 on the H=1 arm).
+    # (z, floor) are evaluable post-hoc on the cached error arrays, so a
+    # deterministic sweep can refine them for ~seconds of extra compute, while
+    # error_smoothing_window/threshold_window must stay with Tune (they change
+    # the smoothed array and require re-scoring). Two stages, not a swap.
+    #
+    # Only applies where the grid can score the SAME objective the sweep
+    # selected on — i.e. missions with ESA-ADB ground truth. ISS keeps pure Ray
+    # Tune: its objective carries an fp-penalty term the grid cannot reproduce,
+    # and refining against plain seg_f0_5 would silently drop the penalty that
+    # keeps the live detector off a hair trigger. See ray_fanout/tune.py's
+    # _refine_with_grid.
+    grid_refine: bool = True
+    # Grid points sampled per axis for the second stage's INITIAL grid, spanning
+    # the search space's own bounds. The mechanical widening driver
+    # (ray_fanout/threshold_search.py) extends past an edge optimum from there,
+    # so this is a starting resolution, not a cap.
+    grid_refine_points: int = 8
+
+    @field_validator("grid_refine_points")
+    @classmethod
+    def at_least_two_grid_points(cls, v: int) -> int:
+        # widen_to_convergence derives its expansion interval from the spacing
+        # between the two points nearest an edge; a single point has no spacing
+        # and would widen by a meaningless hardcoded 1.0.
+        if v < 2:
+            raise ValueError(f"grid_refine_points must be >= 2, got {v}")
+        return v
 
     @field_validator("num_samples", "max_concurrent_trials", "max_parallel_subsystems")
     @classmethod
